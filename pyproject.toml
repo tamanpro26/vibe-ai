@@ -1,0 +1,49 @@
+[project]
+name = "vibeai"
+version = "2.0.0"
+description = "Multi-provider AI orchestration: autonomous coding agent + multi-team reasoning pipeline on free-tier models"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.29,<1",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "openai>=1.30,<2",
+    "anthropic>=0.100,<1",
+    "aiohttp>=3.9,<4",
+    "loguru>=0.7,<1",
+    "tenacity>=8.2,<10",
+    "rich>=13.7,<15",
+    "prompt-toolkit>=3.0,<4",
+]
+
+[project.optional-dependencies]
+ssh   = ["asyncssh>=2.14,<3"]
+video = ["opencv-python>=4.9,<5"]
+rag   = ["chromadb>=0.4,<2", "sentence-transformers>=2.6,<6"]
+math  = ["sympy>=1.12,<2", "scipy>=1.12,<2", "z3-solver>=4.12,<5"]
+voice = ["sounddevice>=0.4,<1"]   # mic capture for /voice (transcription uses free Groq Whisper)
+dev   = ["pytest>=8.0,<9", "pytest-asyncio>=0.23,<2"]
+
+[project.scripts]
+# After `pip install`, `vibeai` starts the interactive CLI from anywhere.
+vibeai = "cli:run"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools]
+# Flat layout: cli.py and main.py sit at the repo root as importable modules,
+# alongside the package directories discovered below.
+py-modules = ["cli", "main"]
+
+[tool.setuptools.packages.find]
+# Only the real source packages — never tests, workspace, logs, eval run
+# artifacts, or the (separately-published) VS Code extension.
+include = [
+    "api*", "config*", "core*", "manager*", "models*",
+    "pipeline*", "teams*", "tools*", "video_observer*",
+]
+exclude = ["tests*", "workspace*", "logs*", "evals*", "vscode-extension*"]

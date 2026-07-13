@@ -1,0 +1,86 @@
+{
+  "name": "vibeai-vscode",
+  "displayName": "VibeAI — Multi-Agent Coding Team",
+  "description": "Your local multi-agent AI coding team in VS Code. Chat with a council of specialized models (@vibeai), fix and explain selected code — private, on your machine, powered by free-tier providers.",
+  "version": "0.1.0",
+  "publisher": "vibeai-local",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0d1121",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "ai",
+    "chat",
+    "copilot",
+    "multi-agent",
+    "agent",
+    "code assistant",
+    "llm",
+    "local",
+    "privacy"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "vibeai.chat",
+        "name": "vibeai",
+        "fullName": "VibeAI",
+        "description": "Ask your local VibeAI multi-agent team",
+        "isSticky": true
+      }
+    ],
+    "commands": [
+      {
+        "command": "vibeai.fixSelection",
+        "title": "VibeAI: Fix/Explain Selected Code"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "vibeai.fixSelection",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "VibeAI",
+      "properties": {
+        "vibeai.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Base URL of the local VibeAI API server (start it with: python main.py serve)"
+        },
+        "vibeai.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token (VIBE_API_TOKEN from VibeAI's .env). Leave empty for tokenless localhost dev mode."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.5.0"
+  }
+}

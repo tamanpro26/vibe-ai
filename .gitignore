@@ -1,0 +1,47 @@
+# Secrets — never commit
+.env
+.env.local
+.env.example
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Runtime state & artifacts
+logs/
+uploads/
+workspace/
+workspace_test*/
+evals/runs/
+
+# Node / build output
+node_modules/
+dist/
+build/
+
+# Separate/unrelated projects and build artifacts — not part of this repo
+jarvis-ai-assistant/
+dist_backend/
+build_backend/
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# VS Code extension build output + packages
+vscode-extension/out/
+vscode-extension/*.vsix
+vscode-extension/node_modules/
+
+# Python packaging build artifacts
+*.egg-info/
+*.egg-link
+build/
