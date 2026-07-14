@@ -3368,3 +3368,109 @@ class TestConsultIfUnsure:
             "some draft\nCONFIDENCE: 0.1 (model=flux_asset)",
         ))
         assert out == "some draft"
+
+
+# ── Confidence-gated cascade (core/confidence_cascade.py) ──────────────────────
+
+class TestConfidenceCascade:
+    def test_cheap_tier_clears_bar_no_escalation(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        calls = []
+
+        async def fake_generate(model_id, **kwargs):
+            calls.append(model_id)
+            if model_id == "cheap":
+                return "a fine answer"
+            if model_id == "qwen36_27b_verifier":
+                return '{"confidence": 0.9, "failed_points": [], "reasoning": "meets rubric"}'
+            raise AssertionError(f"expensive tier should never be called, got {model_id}")
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        result = asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap", "expensive"], instruction="do x", system="sys",
+        ))
+        assert result.output == "a fine answer"
+        assert result.model_id == "cheap"
+        assert result.escalations == 0
+        assert calls.count("expensive") == 0
+
+    def test_low_confidence_escalates_to_next_tier(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id == "cheap":
+                return "a shaky answer"
+            if model_id == "expensive":
+                return "a solid answer"
+            if model_id == "qwen36_27b_verifier":
+                # score whichever candidate is embedded in the prompt
+                if "a shaky answer" in kwargs["prompt"]:
+                    return '{"confidence": 0.3, "failed_points": ["misses edge case"], "reasoning": "weak"}'
+                return '{"confidence": 0.9, "failed_points": [], "reasoning": "solid"}'
+            raise AssertionError(f"unexpected model {model_id}")
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        result = asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap", "expensive"], instruction="do x", system="sys",
+        ))
+        assert result.output == "a solid answer"
+        assert result.model_id == "expensive"
+        assert result.escalations == 1
+        assert result.scores == [0.3, 0.9]
+
+    def test_all_tiers_below_threshold_returns_last_tier_anyway(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id in ("cheap", "expensive"):
+                return f"answer from {model_id}"
+            return '{"confidence": 0.2, "failed_points": ["x"], "reasoning": "still weak"}'
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        result = asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap", "expensive"], instruction="do x", system="sys",
+        ))
+        # never silently drops the strongest attempt, even though nothing cleared the bar
+        assert result.output == "answer from expensive"
+        assert result.model_id == "expensive"
+        assert result.escalations == 1
+
+    def test_unparseable_verifier_output_treated_as_zero_confidence(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id == "cheap":
+                return "an answer"
+            if model_id == "expensive":
+                return "escalated answer"
+            return "not json at all"
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        result = asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap", "expensive"], instruction="do x", system="sys",
+        ))
+        assert result.scores[0] == 0.0
+        assert result.model_id == "expensive"
+
+    def test_empty_tiers_rejected(self):
+        import core.confidence_cascade as cascade_mod
+        with pytest.raises(ValueError):
+            asyncio.run(cascade_mod.run_cascade(tiers=[], instruction="x", system="y"))
+
+    def test_missing_rubric_falls_back_to_generic(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        seen_prompt = {}
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id == "cheap":
+                return "answer"
+            seen_prompt["text"] = kwargs["prompt"]
+            return '{"confidence": 0.9, "failed_points": [], "reasoning": "ok"}'
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap"], instruction="do x", system="sys", rubric=None,
+        ))
+        assert cascade_mod._GENERIC_RUBRIC[0] in seen_prompt["text"]

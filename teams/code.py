@@ -26,8 +26,8 @@ from typing import Any
 
 from loguru import logger
 
+from core.confidence_cascade import run_cascade
 from core.imcp import TaskJSON, TaskType, Complexity
-from core.peer_consult import CONFIDENCE_PROMPT_SUFFIX
 from teams.base_team import BaseTeam
 
 
@@ -144,7 +144,10 @@ class CodeTeam(BaseTeam):
             result = await self._debug(instruction, error_trace, image_b64, task_json)
         else:
             complexity = task_json.classification.complexity
-            result     = await self._generate(instruction, image_b64, task_type, complexity)
+            result     = await self._generate(
+                instruction, image_b64, task_type, complexity,
+                task_json.success_criteria,
+            )
 
         if result:
             _cache_put(instruction, result)
@@ -158,26 +161,44 @@ class CodeTeam(BaseTeam):
         image_b64: str | None,
         task_type: TaskType,
         complexity: Complexity,
+        success_criteria: list[str] | None = None,
     ) -> str:
         budget = _code_budget(complexity, instruction)
 
         if complexity == Complexity.COMPLEX and not image_b64:
             return await self._best_of_n(instruction, budget)
 
-        images  = [image_b64] if image_b64 else []
-        primary = (
-            self._get_model("glm_47_cerebras")
-            if task_type == TaskType.VIBE_CODING and not image_b64
-            else self._get_model("gpt_oss_120b_coder")
-        )
-
-        code = await primary.generate(
-            prompt=instruction,
-            system=_CODE_SYSTEM + CONFIDENCE_PROMPT_SUFFIX.format(model_id=primary.model_id),
-            images=images,
-            max_tokens=budget,
-            temperature=0.2,
-        )
+        if image_b64:
+            # Vision-capable models only -- the cascade's cheap tier
+            # (llama33_70b_coder) has no vision capability, so a screenshot
+            # request skips the cascade and goes straight to the model that
+            # can actually see it.
+            code = await self._get_model("gpt_oss_120b_coder").generate(
+                prompt=instruction, system=_CODE_SYSTEM, images=[image_b64],
+                max_tokens=budget, temperature=0.2,
+            )
+        else:
+            # Confidence-gated cascade: try the cheap/fast tier first, let an
+            # independent verifier score it against the task's own success
+            # criteria, and only pay for the bigger model when that score is
+            # too low. SIMPLE/MODERATE requests (the common case) had no
+            # quality gate at all before this -- COMPLEX already gets
+            # best-of-N above, which is its own (pricier) quality mechanism.
+            primary_tier = "glm_47_cerebras" if task_type == TaskType.VIBE_CODING else "gpt_oss_120b_coder"
+            cascade = await run_cascade(
+                tiers=["llama33_70b_coder", primary_tier],
+                instruction=instruction,
+                system=_CODE_SYSTEM,
+                rubric=success_criteria,
+                max_tokens=budget,
+                temperature=0.2,
+            )
+            code = cascade.output
+            if cascade.escalations:
+                logger.info(
+                    f"[code] cascade escalated to {cascade.model_id} "
+                    f"(confidence={cascade.verifier_score:.2f})"
+                )
 
         # Review pass only when the generated code shows signs of being incomplete.
         # Clean code that compiles = skip the whole extra model call.
