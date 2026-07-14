@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from core.imcp import TaskJSON
+from core.peer_consult import consult_if_unsure
 from models.registry import registry, generate_resilient
 
 
@@ -53,6 +54,10 @@ class BaseTeam(ABC):
             f"task={task_json.task_id} | iter={iteration}"
         )
         result = await self._execute(task_json, instruction, iteration, extra)
+        # No-op unless the team's system prompt invited a CONFIDENCE tag
+        # (see core/peer_consult.py) and the model actually flagged low
+        # confidence on part of its answer.
+        result = await consult_if_unsure(self.team_name, instruction, result)
         logger.info(
             f"[{self.team_name}] done | output_len={len(result)} chars"
         )

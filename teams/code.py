@@ -27,6 +27,7 @@ from typing import Any
 from loguru import logger
 
 from core.imcp import TaskJSON, TaskType, Complexity
+from core.peer_consult import CONFIDENCE_PROMPT_SUFFIX
 from teams.base_team import BaseTeam
 
 
@@ -172,7 +173,7 @@ class CodeTeam(BaseTeam):
 
         code = await primary.generate(
             prompt=instruction,
-            system=_CODE_SYSTEM,
+            system=_CODE_SYSTEM + CONFIDENCE_PROMPT_SUFFIX.format(model_id=primary.model_id),
             images=images,
             max_tokens=budget,
             temperature=0.2,

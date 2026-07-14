@@ -49,6 +49,65 @@ class TestShouldRetry:
         assert _should_retry(ConnectionError("temporary blip")) is True
 
 
+class TestGenerateRetriesEmptyResponse:
+    """
+    Regression test for a live-caught bug (2026-07-14): generate() treated an
+    empty-string response as SUCCESS -- no retry, no exception -- because the
+    retry loop only reacts to exceptions raised by _call(), never to the
+    value it returns. Reproduced live: glm_47_cerebras (Cerebras) returned a
+    normal 200 with 0 chars on a real call (no rate limit, no error) roughly
+    1 in 3 times with a longer system prompt. This is the same class of
+    provider quirk already worked around ad hoc elsewhere (Ollama's edge
+    router in classify_quick, Pollinations' empty-200 needing curl) -- but
+    generate(), the one shared connector entry point, had no defense, so any
+    caller (e.g. core/peer_consult.py's finalize step) could receive "" as if
+    it were a real answer and use it to silently overwrite a good draft.
+    """
+
+    @staticmethod
+    def _connector(call_results):
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.cerebras_conn import CerebrasConnector
+        c = CerebrasConnector(MODEL_REGISTRY["glm_47_cerebras"])
+        calls = {"n": 0}
+
+        async def fake_call(*a, **kw):
+            i = calls["n"]
+            calls["n"] += 1
+            return call_results[min(i, len(call_results) - 1)]
+
+        c._call = fake_call
+        return c, calls
+
+    @staticmethod
+    def _no_wait(monkeypatch):
+        # tenacity's exponential backoff (2-10s/attempt) is real production
+        # behavior, not something this test should sit through 3x per case.
+        async def fast_sleep(*a, **kw):
+            return None
+        monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    def test_retries_past_a_single_empty_response(self, monkeypatch):
+        self._no_wait(monkeypatch)
+        connector, calls = self._connector(["", "real answer"])
+        out = asyncio.run(connector.generate(prompt="x", system="y"))
+        assert out == "real answer"
+        assert calls["n"] == 2
+
+    def test_whitespace_only_response_also_retried(self, monkeypatch):
+        self._no_wait(monkeypatch)
+        connector, calls = self._connector(["   \n  ", "real answer"])
+        out = asyncio.run(connector.generate(prompt="x", system="y"))
+        assert out == "real answer"
+
+    def test_raises_when_every_attempt_is_empty(self, monkeypatch):
+        self._no_wait(monkeypatch)
+        connector, calls = self._connector(["", "", ""])
+        with pytest.raises(Exception):
+            asyncio.run(connector.generate(prompt="x", system="y"))
+        assert calls["n"] == 3  # exhausted stop_after_attempt(3), no silent ""
+
+
 # ── Cerebras truncation anchor (models/connectors/cerebras_conn.py) ────────────
 
 class TestCerebrasTruncateAnchor:
@@ -2659,3 +2718,653 @@ class TestAgentLoopBareImageRoutingRule:
         idx_7 = _AGENT_SYSTEM.find("\n7.")
         assert idx_5 != -1 and idx_6 != -1 and idx_7 != -1
         assert idx_5 < idx_6 < idx_7
+
+
+# ── Code review fixes (2026-07-13) ──────────────────────────────────────────────
+# Regression tests for the findings from the initial-commit code review,
+# fixed the same day. Each class documents the specific finding it guards.
+
+class TestWebSocketAuth:
+    """#1/#2 -- both WebSocket routes had zero auth while every REST route
+    used Depends(require_token). WS clients can't set a custom Authorization
+    header (browser WebSocket API limitation), so the token travels as a
+    query parameter instead, checked with the same constant-time compare."""
+
+    def _client(self, monkeypatch, token: str = "sekrit123"):
+        import api.server as server_mod
+        monkeypatch.setattr(server_mod.settings, "vibe_api_token", token)
+        from fastapi.testclient import TestClient
+        return TestClient(server_mod.app)
+
+    def test_ws_prompt_rejects_missing_token(self, monkeypatch):
+        from starlette.websockets import WebSocketDisconnect
+        client = self._client(monkeypatch)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/test1"):
+                pass
+
+    def test_ws_prompt_rejects_wrong_token(self, monkeypatch):
+        from starlette.websockets import WebSocketDisconnect
+        client = self._client(monkeypatch)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/test1?token=wrong"):
+                pass
+
+    def test_ws_prompt_accepts_correct_token(self, monkeypatch):
+        client = self._client(monkeypatch)
+        with client.websocket_connect("/ws/test1?token=sekrit123"):
+            pass  # connecting without raising is the assertion
+
+    def test_ws_agent_rejects_missing_token(self, monkeypatch):
+        from starlette.websockets import WebSocketDisconnect
+        client = self._client(monkeypatch)
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/agent/test1"):
+                pass
+
+    def test_ws_agent_accepts_correct_token(self, monkeypatch):
+        client = self._client(monkeypatch)
+        with client.websocket_connect("/ws/agent/test1?token=sekrit123"):
+            pass
+
+
+class TestRestTokenCompare:
+    """#5 -- the bearer-token check used a plain `!=` instead of a
+    constant-time comparison. Behavioral test: correct/incorrect tokens still
+    get the right status codes after switching to hmac.compare_digest."""
+
+    def test_correct_token_accepted(self, monkeypatch):
+        import api.server as server_mod
+        monkeypatch.setattr(server_mod.settings, "vibe_api_token", "sekrit123")
+        from fastapi.testclient import TestClient
+        client = TestClient(server_mod.app)
+        r = client.post("/api/manager/recover", headers={"Authorization": "Bearer sekrit123"})
+        assert r.status_code == 200
+
+    def test_wrong_token_rejected(self, monkeypatch):
+        import api.server as server_mod
+        monkeypatch.setattr(server_mod.settings, "vibe_api_token", "sekrit123")
+        from fastapi.testclient import TestClient
+        client = TestClient(server_mod.app)
+        r = client.post("/api/manager/recover", headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+
+    def test_missing_token_rejected(self, monkeypatch):
+        import api.server as server_mod
+        monkeypatch.setattr(server_mod.settings, "vibe_api_token", "sekrit123")
+        from fastapi.testclient import TestClient
+        client = TestClient(server_mod.app)
+        r = client.post("/api/manager/recover")
+        assert r.status_code == 401
+
+
+class TestVibemindFsReadAuth:
+    """#3 -- GET /api/fs/read had no auth despite read_text_file(path) taking
+    any path with no allowlist and returning raw file content (.env, SSH
+    keys, anything the OS user can read). fs_list stays unauthenticated on
+    purpose (metadata only) -- this test also guards that it wasn't
+    accidentally locked down too."""
+
+    def test_fs_read_requires_token(self, monkeypatch):
+        import os
+        monkeypatch.setenv("VIBEMIND_API_TOKEN", "sekrit123")
+        import importlib
+        import vibemind.server as vm_server
+        importlib.reload(vm_server)
+        from fastapi.testclient import TestClient
+        client = TestClient(vm_server.app)
+
+        r = client.get("/api/fs/read", params={"path": "x.txt"})
+        assert r.status_code == 401
+
+        r = client.get("/api/fs/read", params={"path": "x.txt"},
+                        headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+
+        r = client.get("/api/fs/read", params={"path": "x.txt"},
+                        headers={"Authorization": "Bearer sekrit123"})
+        assert r.status_code == 200
+
+    def test_fs_list_stays_unauthenticated(self, monkeypatch):
+        import os
+        monkeypatch.setenv("VIBEMIND_API_TOKEN", "sekrit123")
+        import importlib
+        import vibemind.server as vm_server
+        importlib.reload(vm_server)
+        from fastapi.testclient import TestClient
+        client = TestClient(vm_server.app)
+        r = client.get("/api/fs/list")
+        assert r.status_code == 200
+
+
+class TestSynthesisGracefulDegrade:
+    """#4 -- an uncaught RuntimeError when all 5 Free Manager Council members
+    failed at the synthesis stage crashed the whole request, discarding
+    team_outputs that had already been computed successfully."""
+
+    def test_degrade_returns_longest_usable_team_output(self):
+        from manager.claude_manager import ClaudeManager
+        out = ClaudeManager._degrade_to_team_outputs({
+            "brain": "short",
+            "code": "a much longer and more complete answer here",
+            "vision": "[ERROR: x]",
+        })
+        assert "a much longer and more complete answer here" in out
+        assert "code team" in out
+
+    def test_degrade_all_errors_returns_safe_message(self):
+        from manager.claude_manager import ClaudeManager
+        out = ClaudeManager._degrade_to_team_outputs({
+            "brain": "[ERROR: boom]", "code": "[ERROR: boom2]",
+        })
+        assert "failed" in out.lower()
+
+    def test_synthesise_failure_degrades_instead_of_raising(self, monkeypatch):
+        import asyncio
+        from manager.claude_manager import ClaudeManager
+        from core.imcp import TaskJSON, Classification, TaskType, Complexity
+
+        mgr = ClaudeManager()
+
+        async def boom(*a, **kw):
+            raise RuntimeError("Free Manager Council: all members failed at Synthesizer stage.")
+        monkeypatch.setattr(mgr, "_synthesise", boom)
+
+        async def fake_store(*a, **kw):
+            return None
+        monkeypatch.setattr(mgr, "_store_memory", fake_store)
+
+        async def fake_refiner_run(*a, **kw):
+            return TaskJSON(
+                original_prompt="x", refined_prompt="x",
+                classification=Classification(primary_type=TaskType.VIBE_CODING, complexity=Complexity.SIMPLE),
+            )
+        monkeypatch.setattr(mgr._refiner, "run", fake_refiner_run)
+
+        async def fake_dispatch(*a, **kw):
+            return {"brain": "a real completed answer from the brain team"}
+        monkeypatch.setattr(mgr, "_dispatch", fake_dispatch)
+
+        async def fake_retrieve(*a, **kw):
+            return ""
+        monkeypatch.setattr(mgr, "_retrieve_memory", fake_retrieve)
+
+        async def fake_search(*a, **kw):
+            return ""
+        monkeypatch.setattr(mgr, "_fetch_search_context", fake_search)
+
+        result = asyncio.run(mgr.handle_user_request("do a real task", extra={"skip_fast_path": True}))
+        assert "a real completed answer from the brain team" in result
+
+
+class TestZaiToolCallsTokenFloor:
+    """#6 -- _call_with_tools never applied the reasoning-token floor _call
+    applies, so a caller with a smaller max_tokens (vibemind/brain.py's
+    desktop-agent fallback uses 1024) hit the exact silent-empty-response
+    bug the floor was written to fix, just on the tool-calling path."""
+
+    def test_call_with_tools_floors_small_max_tokens(self, monkeypatch):
+        import asyncio
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.zai_conn import ZaiConnector
+
+        monkeypatch.setattr("config.settings.settings.zai_api_key", "fake-key")
+        connector = ZaiConnector(MODEL_REGISTRY["glm_47_flash_zai"])
+
+        captured = {}
+
+        class FakeToolCallMsg:
+            content = "ok"
+            tool_calls = None
+
+        class FakeChoice:
+            message = FakeToolCallMsg()
+
+        class FakeResponse:
+            choices = [FakeChoice()]
+
+        class FakeCompletions:
+            async def create(self, **kwargs):
+                captured.update(kwargs)
+                return FakeResponse()
+
+        class FakeChat:
+            completions = FakeCompletions()
+
+        class FakeClient:
+            chat = FakeChat()
+
+        connector._client = FakeClient()
+        asyncio.run(connector._call_with_tools(
+            messages=[{"role": "user", "content": "hi"}], tools=[], max_tokens=100, temperature=0.3,
+        ))
+        assert captured["max_tokens"] >= connector._MIN_TOKENS_FOR_THINKING
+
+
+class TestConnectorTimeouts:
+    """#7 -- no connector set an explicit client timeout, relying on SDK
+    defaults (~600s) and blocking the fallback chain on a hang.
+    default_timeout_ms existed in settings but was dead code (never
+    referenced), confirmed by grep before this fix."""
+
+    def test_default_timeout_ms_is_referenced_somewhere(self):
+        import inspect
+        import models.connectors.cerebras_conn as cerebras_conn
+        import models.connectors.groq_conn as groq_conn
+        import models.connectors.anthropic_conn as anthropic_conn
+        for mod in (cerebras_conn, groq_conn, anthropic_conn):
+            src = inspect.getsource(mod)
+            assert "default_timeout_ms" in src, f"{mod.__name__} should reference default_timeout_ms"
+
+    def test_cerebras_client_has_explicit_timeout(self):
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.cerebras_conn import CerebrasConnector
+        connector = CerebrasConnector(MODEL_REGISTRY["glm_47_cerebras"])
+        assert connector._client.timeout is not None
+
+    def test_ollama_uses_a_longer_dedicated_timeout(self):
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.ollama import OllamaConnector
+        connector = OllamaConnector(MODEL_REGISTRY["qwen25_3b_ollama"])
+        # Local cold-start (~45s documented elsewhere) needs more headroom
+        # than the 30s cloud-provider default -- must not just inherit it.
+        assert connector._TIMEOUT_S > 30
+
+
+class TestHuggingFaceImageGenNonBlocking:
+    """#8 -- huggingface_hub's InferenceClient.text_to_image is synchronous;
+    calling it directly from an async method blocked the entire event loop
+    for the call's duration, not just this connector's own path."""
+
+    def test_generate_image_runs_off_the_event_loop(self, monkeypatch):
+        import asyncio
+        import sys
+        import time
+        import types
+        from config.models_config import ModelDef
+        from models.connectors.huggingface import HuggingFaceConnector
+
+        class FakeImage:
+            def save(self, buf, format=None):
+                buf.write(b"fake-png-bytes")
+
+        class FakeInferenceClient:
+            def __init__(self, api_key=None):
+                pass
+
+            def text_to_image(self, prompt, model, width, height):
+                time.sleep(0.2)   # simulates the real blocking HTTP call
+                return FakeImage()
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.InferenceClient = FakeInferenceClient
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+        model_def = ModelDef(
+            model_id="fake_hf_image", provider="huggingface", api_model="fake/model",
+            team="design", role="test", context_window=1000, capabilities=["image_generation"],
+        )
+        connector = HuggingFaceConnector(model_def)
+        connector._hf_token = "fake-token"
+
+        async def ticker():
+            ticks = 0
+            for _ in range(6):
+                await asyncio.sleep(0.03)
+                ticks += 1
+            return ticks
+
+        async def main():
+            ticks_task = asyncio.create_task(ticker())
+            result = await connector._generate_image("a cat")
+            ticks = await ticks_task
+            return result, ticks
+
+        result, ticks = asyncio.run(main())
+        assert result.startswith("data:image/png;base64,")
+        assert ticks == 6  # event loop kept running concurrently, not blocked
+
+
+class TestAgentLoopHardReasoningTimeout:
+    """#9 -- the _is_hard_reasoning branch called reasoning_core.reason()
+    with no timeout, unlike the sibling _needs_planning branch 15 lines
+    later, which wraps its call in asyncio.wait_for(timeout=25.0)."""
+
+    def test_hard_reasoning_branch_source_has_timeout_wrap(self):
+        import inspect
+        import core.agent_loop as al
+        src = inspect.getsource(al.AgentLoop.run)
+        # Both the hard-reasoning and needs-planning branches' reasoning_core
+        # calls must be wrapped in asyncio.wait_for now -- previously only
+        # the sibling _needs_planning branch had one.
+        assert src.count("asyncio.wait_for(") >= 2
+        assert "reasoning_core.reason(" in src
+        assert "VibeMind pre-reasoning timed out" in src
+
+
+class TestSshExecTripwire:
+    """#10 -- ssh_exec had none of bash()'s destructive-command tripwires;
+    a "deploy to server" task could execute sudo rm -rf, shutdown, etc.
+    unfiltered over SSH. Reuses ToolExecutor._BLOCKED_RE rather than a
+    second, driftable copy of the pattern list."""
+
+    def test_blocked_command_never_reaches_the_ssh_connection(self):
+        import asyncio
+        import tools.remote_terminal as rt
+
+        class FakeConn:
+            @staticmethod
+            async def run(cmd, check=False):
+                raise AssertionError("must not reach the real SSH call for a blocked command")
+
+        class FakeSess:
+            username = "u"
+            host = "h"
+            _conn = FakeConn()
+
+        rt._SESSIONS["fake-test"] = FakeSess()
+        try:
+            result = asyncio.run(rt.ssh_exec("fake-test", "sudo rm -rf /"))
+        finally:
+            rt._SESSIONS.pop("fake-test", None)
+        assert result.startswith("ERROR: Blocked command pattern detected")
+
+    def test_benign_command_is_not_blocked(self):
+        import asyncio
+        import tools.remote_terminal as rt
+
+        class FakeResult:
+            stdout = "hi\n"
+            stderr = ""
+            exit_status = 0
+
+        class FakeConn:
+            @staticmethod
+            async def run(cmd, check=False):
+                return FakeResult()
+
+        class FakeSess:
+            username = "u"
+            host = "h"
+            _conn = FakeConn()
+
+        rt._SESSIONS["fake-test2"] = FakeSess()
+        try:
+            result = asyncio.run(rt.ssh_exec("fake-test2", "echo hi"))
+        finally:
+            rt._SESSIONS.pop("fake-test2", None)
+        assert "Blocked" not in result
+
+
+class TestPrunedDirectoryWalks:
+    """#13 -- list_dir, build_repo_map, and _iter_files all fully
+    materialized the entire tree via rglob (including node_modules/dist)
+    before filtering it back out. Switched to os.walk with in-place
+    dirnames pruning, which never descends into an ignored directory."""
+
+    def test_verifiers_never_descends_into_node_modules(self, tmp_path):
+        from core.verifiers import _iter_files
+        (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+        (tmp_path / "node_modules" / "pkg" / "index.js").write_text("x")
+        (tmp_path / "real.py").write_text("y")
+        found = list(_iter_files(tmp_path, (".py", ".js")))
+        assert any(p.name == "real.py" for p in found)
+        assert not any("node_modules" in p.parts for p in found)
+
+    def test_list_dir_never_descends_into_node_modules(self, tmp_path):
+        import asyncio
+        from tools.agent_tools import ToolExecutor
+        ex = ToolExecutor(workspace=tmp_path)
+
+        async def setup_and_list():
+            await ex.create_file("a.txt", "hi")
+            await ex.create_file("node_modules/pkg/index.js", "x")
+            return await ex.list_dir(".")
+
+        listing = asyncio.run(setup_and_list())
+        assert "node_modules" not in listing
+        assert "a.txt" in listing
+
+    def test_repo_map_never_descends_into_node_modules(self, tmp_path):
+        from core.repo_map import _iter_source_files
+        (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+        (tmp_path / "node_modules" / "pkg" / "index.js").write_text("function f() {}")
+        (tmp_path / "real.py").write_text("def f(): pass")
+        found = list(_iter_source_files(tmp_path))
+        assert any(p.name == "real.py" for p in found)
+        assert not any("node_modules" in p.parts for p in found)
+
+
+class TestAutomationNonBlocking:
+    """#14 -- wait_for_window's poll loop and type_text's clipboard-restore
+    sleep are blocking time.sleep calls, invoked directly from an async
+    method (_execute_desktop_tool) on the shared FastAPI event loop with no
+    executor offload -- froze the whole backend for the call's duration."""
+
+    def test_wait_for_window_runs_off_the_event_loop(self, monkeypatch):
+        import asyncio
+        import time
+        import vibemind.brain as brain
+        import vibemind.automation as auto
+
+        def fake_wait(title_substr, timeout=10.0, poll=0.4):
+            time.sleep(0.2)
+            return None
+        monkeypatch.setattr(auto, "wait_for_window", fake_wait)
+
+        async def ticker():
+            ticks = 0
+            for _ in range(6):
+                await asyncio.sleep(0.03)
+                ticks += 1
+            return ticks
+
+        async def main():
+            ticks_task = asyncio.create_task(ticker())
+            await brain._execute_desktop_tool("wait_for_window", {"title_substr": "nope", "timeout": 999})
+            return await ticks_task
+
+        ticks = asyncio.run(main())
+        assert ticks == 6  # event loop kept running concurrently, not blocked
+
+    def test_wait_for_window_timeout_is_clamped(self, monkeypatch):
+        import asyncio
+        import vibemind.brain as brain
+        import vibemind.automation as auto
+
+        captured = {}
+        def fake_wait(title_substr, timeout=10.0, poll=0.4):
+            captured["timeout"] = timeout
+            return None
+        monkeypatch.setattr(auto, "wait_for_window", fake_wait)
+
+        asyncio.run(brain._execute_desktop_tool("wait_for_window", {"title_substr": "x", "timeout": 999}))
+        assert captured["timeout"] <= 30.0
+
+
+class TestAgentRequestParity:
+    """#16/#28 -- /api/agent's AgentRequest had no context/history fields
+    (cli.py always passes both), and the WS agent path built its payload off
+    bare dict.get() calls instead of validating against the same model."""
+
+    def test_agent_request_has_context_and_history_with_safe_defaults(self):
+        import api.server as server_mod
+        req = server_mod.AgentRequest(task="hi")
+        assert req.context == ""
+        assert req.history == []
+
+    def test_agent_request_accepts_context_and_history(self):
+        import api.server as server_mod
+        req = server_mod.AgentRequest(
+            task="hi", context="existing site grounding",
+            history=[{"role": "user", "content": "x"}],
+        )
+        assert req.context == "existing site grounding"
+        assert req.history == [{"role": "user", "content": "x"}]
+
+    def test_agent_request_ignores_extra_ws_envelope_fields(self):
+        import api.server as server_mod
+        req = server_mod.AgentRequest(type="agent_task", task="hi")
+        assert req.task == "hi"
+
+    def test_agent_request_requires_task(self):
+        import api.server as server_mod
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            server_mod.AgentRequest(model_id="x")
+
+
+class TestImageGenWorkspaceLocation:
+    """#24 -- images from /image and POST /api/image were saved to
+    ~/.vibeai/images, outside DEFAULT_WORKSPACE -- invisible to a later
+    same-session agent task, since the agent has no path into the user's
+    home directory."""
+
+    def test_images_dir_is_inside_default_workspace(self):
+        from tools.agent_tools import DEFAULT_WORKSPACE
+        from tools.image_gen import IMAGES_DIR
+        assert DEFAULT_WORKSPACE in IMAGES_DIR.parents or IMAGES_DIR == DEFAULT_WORKSPACE
+
+
+class TestApiContractConsistency:
+    """#27/#30 -- only 2 of 7 mutating routes declared a response_model, and
+    /api/agent used "complete" while /api/video and /api/screenshot used
+    "ok" for the same kind of status field."""
+
+    def test_video_screenshot_recover_agent_have_response_models(self):
+        import api.server as server_mod
+        video_route = next(r for r in server_mod.app.routes if getattr(r, "path", None) == "/api/video")
+        screenshot_route = next(r for r in server_mod.app.routes if getattr(r, "path", None) == "/api/screenshot")
+        recover_route = next(r for r in server_mod.app.routes if getattr(r, "path", None) == "/api/manager/recover")
+        agent_route = next(r for r in server_mod.app.routes if getattr(r, "path", None) == "/api/agent")
+        assert video_route.response_model is server_mod.VideoResponse
+        assert screenshot_route.response_model is server_mod.ScreenshotResponse
+        assert recover_route.response_model is server_mod.RecoverResponse
+        assert agent_route.response_model is server_mod.AgentResponse
+
+    def test_agent_route_status_value_is_ok_not_complete(self):
+        import inspect
+        import api.server as server_mod
+        src = inspect.getsource(server_mod.run_agent)
+        status_line = next(line for line in src.splitlines() if '"status":' in line)
+        assert "ok" in status_line
+        assert "complete" not in status_line
+
+
+# ── Confidence-triggered peer help (core/peer_consult.py) ──────────────────────
+
+class TestPeerConsultTagParsing:
+    def test_no_tag_returns_output_unchanged(self):
+        from core.peer_consult import _parse
+        cleaned, conf, model_id, uncertain = _parse("just a normal answer, no tag")
+        assert cleaned == "just a normal answer, no tag"
+        assert conf is None
+        assert model_id == ""
+
+    def test_tag_and_uncertain_line_both_stripped(self):
+        from core.peer_consult import _parse
+        raw = (
+            "def f(x):\n    return x * 2\n\n"
+            "CONFIDENCE: 0.4 (model=gpt_oss_120b_coder)\n"
+            "UNCERTAIN: not sure this handles negative input correctly"
+        )
+        cleaned, conf, model_id, uncertain = _parse(raw)
+        assert "CONFIDENCE" not in cleaned and "UNCERTAIN" not in cleaned
+        assert conf == 0.4
+        assert model_id == "gpt_oss_120b_coder"
+        assert "negative input" in uncertain
+
+    def test_tag_without_uncertain_line_still_parses(self):
+        from core.peer_consult import _parse
+        cleaned, conf, model_id, uncertain = _parse(
+            "some answer\nCONFIDENCE: 0.9 (model=glm_47_cerebras)"
+        )
+        assert conf == 0.9
+        assert model_id == "glm_47_cerebras"
+        assert uncertain == ""
+        assert "CONFIDENCE" not in cleaned
+
+
+class TestPeerConsultPeerSelection:
+    def test_excludes_acting_model_and_manual_only_providers(self):
+        from core.peer_consult import _pick_peers
+        # code team includes codestral_mistral (mistral, ToS-restricted) and
+        # claude_opus_4_6 (anthropic, manual-select only) -- neither should
+        # ever be silently pulled in as an automatic peer.
+        peers = _pick_peers("code", exclude_model_id="glm_47_cerebras")
+        assert "glm_47_cerebras" not in peers
+        assert "codestral_mistral" not in peers
+        assert "claude_opus_4_6" not in peers
+        assert len(peers) <= 2
+
+    def test_caps_at_max_peers(self):
+        from core.peer_consult import _pick_peers, MAX_PEERS
+        peers = _pick_peers("code", exclude_model_id="")
+        assert len(peers) <= MAX_PEERS
+
+
+class TestConsultIfUnsure:
+    def test_confident_output_skips_peer_consult_entirely(self, monkeypatch):
+        import core.peer_consult as peer_consult_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise AssertionError("should not be called when confidence is high")
+
+        monkeypatch.setattr(peer_consult_mod, "generate_resilient", fake_generate)
+        out = asyncio.run(peer_consult_mod.consult_if_unsure(
+            "code", "write a helper",
+            "def f(): return 1\nCONFIDENCE: 0.95 (model=glm_47_cerebras)",
+        ))
+        assert "CONFIDENCE" not in out
+        assert "def f()" in out
+
+    def test_low_confidence_consults_peers_then_finalizes_with_original_model(self, monkeypatch):
+        import core.peer_consult as peer_consult_mod
+
+        calls = []
+
+        async def fake_generate(model_id, **kwargs):
+            calls.append(model_id)
+            if model_id == "glm_47_cerebras":
+                return "FINAL: fixed the edge case per peer feedback"
+            return f"peer opinion from {model_id}: looks fine"
+
+        monkeypatch.setattr(peer_consult_mod, "generate_resilient", fake_generate)
+        out = asyncio.run(peer_consult_mod.consult_if_unsure(
+            "code", "write a helper",
+            "def f(x): return x\nCONFIDENCE: 0.3 (model=glm_47_cerebras)\n"
+            "UNCERTAIN: not sure about negative x",
+        ))
+        # peers consulted first, then the ORIGINAL model finalizes -- last
+        # call must be back to the model that flagged its own uncertainty.
+        assert calls[-1] == "glm_47_cerebras"
+        assert calls.count("glm_47_cerebras") == 1
+        assert out == "FINAL: fixed the edge case per peer feedback"
+
+    def test_all_peers_failing_keeps_original_draft(self, monkeypatch):
+        import core.peer_consult as peer_consult_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("provider down")
+
+        monkeypatch.setattr(peer_consult_mod, "generate_resilient", fake_generate)
+        out = asyncio.run(peer_consult_mod.consult_if_unsure(
+            "code", "write a helper",
+            "def f(x): return x\nCONFIDENCE: 0.2 (model=glm_47_cerebras)",
+        ))
+        assert out == "def f(x): return x"
+
+    def test_no_peers_available_keeps_original_draft(self, monkeypatch):
+        import core.peer_consult as peer_consult_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise AssertionError("no peers exist for this team — should never be called")
+
+        monkeypatch.setattr(peer_consult_mod, "generate_resilient", fake_generate)
+        # "design" team is all-pollinations (image gen) -- none qualify as a
+        # text peer under _TEXT_PEER_PROVIDERS.
+        out = asyncio.run(peer_consult_mod.consult_if_unsure(
+            "design", "make an icon",
+            "some draft\nCONFIDENCE: 0.1 (model=flux_asset)",
+        ))
+        assert out == "some draft"

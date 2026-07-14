@@ -101,6 +101,16 @@ class BaseModelConnector(ABC):
                         max_tokens=max_tokens, temperature=temperature,
                         task_type=task_type, **kwargs,
                     )
+                    if not result or not result.strip():
+                        # Some providers return a 200 with empty content on a
+                        # transient glitch instead of an error (already worked
+                        # around ad hoc for Ollama's edge router and
+                        # Pollinations' empty-200 CDN response) -- verified
+                        # live (2026-07-14): Cerebras/GLM-4.7 returned 0 chars
+                        # on a real successful call, no rate limit involved.
+                        # Treat it as retry-worthy like any other failure
+                        # instead of handing callers "" as if it were real.
+                        raise RuntimeError(f"{self.model_id} returned an empty response")
                     duration_ms = (time.perf_counter() - t0) * 1000
                     logger.info(f"[{self.model_id}] done | {len(result)} chars")
                     try:
