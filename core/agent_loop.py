@@ -574,13 +574,25 @@ class AgentLoop:
             try:
                 from core.reasoning_core import reasoning_core
                 logger.info("[agent] hard reasoning detected — pre-reasoning with VibeMind")
-                bb = await reasoning_core.reason(problem=task, depth=1, max_tokens=2000, user_facing=False)
+                # Same 25s cap as the sibling _needs_planning branch below --
+                # found in code review (2026-07-13): this call had no timeout
+                # at all, unlike that sibling, even though reason() fans out
+                # to 5 parallel proposers hitting the exact same no-connector-
+                # timeout risk (fix #7 above). If any provider is slow or
+                # rate-limited this would stall the entire agent before it
+                # even starts, same risk the sibling's own comment warns about.
+                bb = await asyncio.wait_for(
+                    reasoning_core.reason(problem=task, depth=1, max_tokens=2000, user_facing=False),
+                    timeout=25.0,
+                )
                 if bb.final:
                     vibemind_ctx = (
                         f"\n\nVIBEMIND PRE-ANALYSIS (verified multi-model reasoning):\n"
                         f"{bb.final}\n\nUse this analysis to guide your approach."
                     )
                     logger.info("[agent] VibeMind plan injected into agent context")
+            except asyncio.TimeoutError:
+                logger.warning("[agent] VibeMind pre-reasoning timed out (25s) — proceeding without it")
             except Exception as exc:
                 logger.warning(f"[agent] VibeMind pre-reasoning skipped: {str(exc)[:60]}")
 
@@ -614,7 +626,29 @@ class AgentLoop:
             except Exception as exc:
                 logger.warning(f"[agent] VibeMind planning skipped: {str(exc)[:60]}")
 
-        messages  = self._build_messages(task, system, context + skills_ctx + workspace_ctx + vibemind_ctx, history)
+        # Cross-session lessons: past solved build failures relevant to this
+        # task (tools/memory.py, written by _store_build_lesson below). Local
+        # ChromaDB + local embeddings -- no network call -- but still capped
+        # defensively in case the embedding model's first load is slow.
+        lessons_ctx = ""
+        try:
+            from tools.memory import memory
+            if not memory._ready:
+                await asyncio.wait_for(memory.init(), timeout=10.0)
+            retrieved = await asyncio.wait_for(
+                memory.retrieve_context(task, team="code", top_k=2), timeout=10.0,
+            )
+            if retrieved:
+                lessons_ctx = f"\n\n{retrieved}"
+                logger.info("[agent] past-lesson context injected")
+        except Exception as exc:
+            logger.warning(f"[agent] lesson retrieval skipped: {str(exc)[:60]}")
+
+        messages  = self._build_messages(
+            task, system,
+            context + skills_ctx + workspace_ctx + vibemind_ctx + lessons_ctx,
+            history,
+        )
         # Reflexion state — capped at 2 cycles so this can never spin (agent-lessons: infinite loop)
         _reflexion_cycles = 0
         _plan_spec        = vibemind_ctx  # pass spec to the critic so it knows what was planned
@@ -636,6 +670,7 @@ class AgentLoop:
         _empty_streak     = 0             # consecutive empty/stub responses (handoff at 3)
         _build_verified   = False         # True once 'npm run build' passes without errors
         _build_fail_cycles = 0            # consecutive build-gate failures (comparison-judge at 2+)
+        _last_build_err   = ""            # text of the most recent build failure, for the lesson store below
         _verifiers_passed = False         # True once the deterministic battery is clean
         _verifier_cycles  = 0             # capped fix cycles driven by the battery
         _vision_done      = False         # vision-loop QA fires at most once per run
@@ -893,6 +928,7 @@ class AgentLoop:
                     if build_err:
                         _build_verified = False
                         _build_fail_cycles += 1
+                        _last_build_err = build_err
                         _ledger_build   = f"FAILING: {build_err[:120]}"
                         logger.warning(
                             f"[agent] build-verification gate FAILED at iteration {i+1} "
@@ -963,6 +999,14 @@ class AgentLoop:
                         _build_verified = True
                         _ledger_build   = f"PASSING (gate-verified at iteration {i+1})"
                         logger.info(f"[agent] build-verification gate PASSED at iteration {i+1}")
+                        # Durable lesson: only when this build genuinely failed at
+                        # least once first — a first-try pass has nothing to teach
+                        # a future session. Cross-session (ChromaDB, not the
+                        # per-run ledger above), so the NEXT task — even in a new
+                        # process — can retrieve this via memory.retrieve_context()
+                        # before it re-derives the same fix from scratch.
+                        if _build_fail_cycles > 0 and _last_build_err:
+                            await self._store_build_lesson(_last_build_err, result.final_response)
 
                 # ── Deterministic verification battery ─────────────────────────
                 # Zero-token, pure-code checks for the defect classes weak models
@@ -1537,6 +1581,22 @@ class AgentLoop:
             messages.extend(history)
         messages.append({"role": "user", "content": task})
         return messages
+
+    async def _store_build_lesson(self, error: str, fix_explanation: str) -> None:
+        """Persist a solved build failure to VectorMemory (tools/memory.py) so a
+        future task — even in a brand-new process — can retrieve it via
+        memory.retrieve_context() before re-deriving the same fix. Best-effort:
+        this must never affect the run it's called from.
+        """
+        try:
+            from tools.memory import memory
+            if not memory._ready:
+                await memory.init()
+            await memory.store_error_fix(
+                error=error[:500], fix=fix_explanation[:800], team="code",
+            )
+        except Exception as exc:
+            logger.warning(f"[agent] build-lesson store skipped: {str(exc)[:60]}")
 
     async def _run_build_check(self, touched: list[str] | None = None) -> str | None:
         """

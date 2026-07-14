@@ -3474,3 +3474,71 @@ class TestConfidenceCascade:
             tiers=["cheap"], instruction="do x", system="sys", rubric=None,
         ))
         assert cascade_mod._GENERIC_RUBRIC[0] in seen_prompt["text"]
+
+
+# ── Cross-session build lessons (core/agent_loop.py + tools/memory.py) ─────────
+# A fixed build failure is now persisted to VectorMemory (ChromaDB, local
+# embeddings) so a LATER task -- even in a brand-new process -- can retrieve it
+# via memory.retrieve_context() before re-deriving the same fix. Previously the
+# only build-failure state lived in the per-run "project ledger", which resets
+# every run and never taught a future session anything.
+
+class TestBuildLessonPersistence:
+    @staticmethod
+    def _loop(tmp_path):
+        from core.agent_loop import AgentLoop
+        return AgentLoop(workspace=tmp_path)
+
+    def test_stores_truncated_error_and_fix(self, tmp_path, monkeypatch):
+        import tools.memory as memory_mod
+        loop = self._loop(tmp_path)
+
+        seen = {}
+
+        async def fake_store_error_fix(self, error, fix, team="code"):
+            seen["error"] = error
+            seen["fix"] = fix
+            seen["team"] = team
+
+        monkeypatch.setattr(memory_mod.memory, "_ready", True)
+        monkeypatch.setattr(memory_mod.VectorMemory, "store_error_fix", fake_store_error_fix)
+
+        asyncio.run(loop._store_build_lesson("x" * 900, "y" * 900))
+        assert len(seen["error"]) == 500
+        assert len(seen["fix"]) == 800
+        assert seen["team"] == "code"
+
+    def test_lazily_initializes_memory_when_not_ready(self, tmp_path, monkeypatch):
+        import tools.memory as memory_mod
+        loop = self._loop(tmp_path)
+
+        init_calls = []
+
+        async def fake_init(self):
+            init_calls.append(True)
+            self._ready = True
+            return True
+
+        async def fake_store_error_fix(self, error, fix, team="code"):
+            pass
+
+        monkeypatch.setattr(memory_mod.memory, "_ready", False)
+        monkeypatch.setattr(memory_mod.VectorMemory, "init", fake_init)
+        monkeypatch.setattr(memory_mod.VectorMemory, "store_error_fix", fake_store_error_fix)
+
+        asyncio.run(loop._store_build_lesson("some error", "some fix"))
+        assert init_calls == [True]
+
+    def test_never_raises_on_storage_failure(self, tmp_path, monkeypatch):
+        import tools.memory as memory_mod
+        loop = self._loop(tmp_path)
+
+        async def broken_store(self, error, fix, team="code"):
+            raise RuntimeError("chromadb exploded")
+
+        monkeypatch.setattr(memory_mod.memory, "_ready", True)
+        monkeypatch.setattr(memory_mod.VectorMemory, "store_error_fix", broken_store)
+
+        # must not raise -- this is a best-effort side channel, never allowed
+        # to break the agent run it's called from
+        asyncio.run(loop._store_build_lesson("error", "fix"))
