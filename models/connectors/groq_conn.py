@@ -36,7 +36,12 @@ class GroqConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
-        self._client = AsyncOpenAI(api_key=settings.groq_api_key or "not-configured", base_url=self.BASE_URL)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
+        self._client = AsyncOpenAI(
+            api_key=settings.groq_api_key or "not-configured", base_url=self.BASE_URL,
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     # ── Context management ─────────────────────────────────────────────────────
 
@@ -257,12 +262,21 @@ class GroqConnector(BaseModelConnector):
                         return recovered
                     # No <function=name> patterns — model gave a pure text explanation.
                     # Return it as a text response so the agent loop finishes gracefully
-                    # rather than crashing the entire app.
+                    # rather than crashing the entire app. tool_call_failed=True is the
+                    # signal the caller needs: this text is a FAILED tool-call attempt,
+                    # not a legitimate answer -- found live (2026-07-15): without this
+                    # marker, agent_loop.py's only escalation trigger (the empty-streak
+                    # guard) checks response length, and a failed_generation dump can run
+                    # to 2000 chars, so it never counted as a failure signal. The same
+                    # broken model got re-tried 5 times in a row on an identical
+                    # create_file call, and every retry failed the same way, shipping a
+                    # broken page (missing stylesheet) the deterministic verifier had
+                    # already correctly flagged five times over.
                     logger.warning(
                         f"[groq/{self.api_model}] 400 tool_use_failed with pure-text "
                         f"failed_generation — returning as text response"
                     )
-                    return {"type": "text", "content": failed_gen[:2000]}
+                    return {"type": "text", "content": failed_gen[:2000], "tool_call_failed": True}
             raise
         msg = resp.choices[0].message
         if msg.tool_calls:

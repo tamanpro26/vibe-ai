@@ -629,6 +629,44 @@ class TestFailedGenerationParse:
         assert result["type"] == "tool_calls"
         assert result["tool_calls"][0]["name"] == "create_file"
 
+    def test_unrecoverable_400_marks_tool_call_failed(self):
+        """
+        Regression test for a live-caught bug (2026-07-15): when the model's
+        failed_generation has no <function=...> pattern at all (a pure-text,
+        unrecoverable failure), the fallback returned a normal-looking
+        {"type": "text", ...} dict with no signal that a tool call was even
+        attempted. agent_loop.py's only escalation trigger (the empty-streak
+        guard) checks response length, and failed_generation can run up to
+        2000 chars -- so it never counted as a failure. The same broken model
+        got retried 5 times in a row on an identical create_file call live,
+        shipping a page with a missing stylesheet the deterministic verifier
+        had already correctly flagged every single time. tool_call_failed=True
+        is the fix: an explicit signal the agent loop can escalate on.
+        """
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.groq_conn import GroqConnector
+
+        connector = GroqConnector(MODEL_REGISTRY["llama33_70b_coder"])
+
+        class FakeAPIError(Exception):
+            status_code = 400
+            body = {
+                "message": "Failed to call a function.",
+                "code": "tool_use_failed",
+                "failed_generation": "I will create the file with the right styles now.",
+            }
+
+        async def _raise(*a, **kw):
+            raise FakeAPIError("boom")
+
+        connector._client.chat.completions.create = _raise
+        result = asyncio.run(connector._call_with_tools(
+            messages=[{"role": "user", "content": "write a.txt"}],
+            tools=[], max_tokens=1000, temperature=0.5,
+        ))
+        assert result["type"] == "text"
+        assert result["tool_call_failed"] is True
+
 
 # ── Python quality checks (round 2 additions) ─────────────────────────────────
 

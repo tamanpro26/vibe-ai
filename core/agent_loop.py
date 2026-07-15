@@ -667,6 +667,7 @@ class AgentLoop:
         _loop_warnings    = 0             # how many times the soft LOOP WARNING has already fired
         _no_write_iters   = 0             # consecutive tool-using iterations with zero file writes
         _empty_streak     = 0             # consecutive empty/stub responses (handoff at 3)
+        _tool_fail_streak = 0             # consecutive tool_use_failed recoveries (handoff at 2)
         _build_verified   = False         # True once 'npm run build' passes without errors
         _build_fail_cycles = 0            # consecutive build-gate failures (comparison-judge at 2+)
         _last_build_err   = ""            # text of the most recent build failure, for the lesson store below
@@ -865,7 +866,47 @@ class AgentLoop:
 
             tool_calls = response.get("tool_calls", [])
 
+            if tool_calls:
+                _tool_fail_streak = 0
+
             if not tool_calls:
+                # ── Tool-call recovery failure guard ─────────────────────────────
+                # Some connectors (e.g. Groq, see groq_conn.py::_call_with_tools)
+                # mark tool_call_failed=True when the model attempted a tool call
+                # the API rejected (400 tool_use_failed) and the text-format
+                # recovery parser couldn't salvage it either. This is NOT a
+                # legitimate text answer -- the model was trying to act and
+                # couldn't -- so it needs to escalate faster than the generic
+                # empty-response guard below, which checks response LENGTH and
+                # completely misses this: a failed_generation dump runs up to
+                # 2000 chars, so it never looked "empty." Found live
+                # (2026-07-15): the same model failed the identical create_file
+                # call 5 times in a row across 2 reflexion + 3 verifier fix
+                # cycles, shipping a page with a missing stylesheet the
+                # deterministic verifier had already correctly flagged every
+                # single time -- because nothing upstream ever saw this as a
+                # failure at all.
+                if response.get("tool_call_failed"):
+                    _tool_fail_streak += 1
+                    logger.warning(
+                        f"[agent] {connector.model_id} tool-call recovery failed "
+                        f"({_tool_fail_streak} in a row) at iteration {i+1}"
+                    )
+                    if _tool_fail_streak >= 2:
+                        _next_tier = _next_fallback_tier(connector.model_id)
+                        if _next_tier:
+                            logger.warning(
+                                f"[agent] {_tool_fail_streak} tool-call failures from "
+                                f"{connector.model_id} — handing off to {_next_tier}"
+                            )
+                            connector        = registry.get(_next_tier)
+                            _tried_models.add(_next_tier)
+                            params           = get_params(connector.api_model, task_type)
+                            _fallback_active = _use_compact_for(connector)
+                        _tool_fail_streak = 0
+                else:
+                    _tool_fail_streak = 0
+
                 # Final text response
                 content = response.get("content", "")
                 result.final_response = _strip_thinking(content)
