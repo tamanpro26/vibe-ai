@@ -2,6 +2,8 @@
 config/settings.py
 All settings loaded from .env — every module imports from here.
 """
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -82,3 +84,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# pydantic-settings reads .env straight into this object's fields -- it never
+# touches os.environ. huggingface_hub (used by sentence-transformers for
+# tools/memory.py's embedding model) reads the token directly from the
+# process environment instead, so a real HF_TOKEN in .env was silently never
+# reaching it -- found live (2026-07-15): every SentenceTransformer load hit
+# "sending unauthenticated requests to the HF Hub" despite HF_TOKEN being set.
+if settings.hf_token and not os.environ.get("HF_TOKEN"):
+    os.environ["HF_TOKEN"] = settings.hf_token

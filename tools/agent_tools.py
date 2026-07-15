@@ -770,17 +770,37 @@ class ToolExecutor:
         p = self._safe_path(path)
         if not p.exists():
             return f"ERROR: Directory not found: {path}"
-        lines = []
-        for item in sorted(p.rglob("*")):
-            # Skip ignored directories and anything inside them
-            if any(part in self._IGNORE_DIRS for part in item.parts):
-                continue
-            rel    = item.relative_to(self.workspace)
-            prefix = "📁 " if item.is_dir() else "📄 "
-            lines.append(f"{prefix}{rel}")
-            if len(lines) >= 500:   # hard cap — prevents context overflow
-                lines.append(f"... ({sum(1 for _ in p.rglob('*'))} total items, truncated)")
+        lines: list[str] = []
+        truncated = False
+        # os.walk with in-place dirnames pruning instead of sorted(p.rglob("*")) --
+        # found in code review (2026-07-13): rglob fully materialized the entire
+        # tree, including node_modules/dist (this class's own _IGNORE_DIRS comment
+        # calls them "thousands of generated files"), before the filter discarded
+        # them -- descending in and immediately backing out was the expensive
+        # part. Also dropped the second full rglob('*') that ran just to print an
+        # exact truncated-item count; "truncated" without a possibly-stale count
+        # from a second full walk says the same useful thing for far less work.
+        for dirpath, dirnames, filenames in os.walk(p):
+            dirnames[:] = sorted(d for d in dirnames if d not in self._IGNORE_DIRS)
+            dp = Path(dirpath)
+            for name in dirnames:
+                rel = (dp / name).relative_to(self.workspace)
+                lines.append(f"📁 {rel}")
+                if len(lines) >= 500:
+                    truncated = True
+                    break
+            if truncated:
                 break
+            for name in sorted(filenames):
+                rel = (dp / name).relative_to(self.workspace)
+                lines.append(f"📄 {rel}")
+                if len(lines) >= 500:
+                    truncated = True
+                    break
+            if truncated:
+                break
+        if truncated:
+            lines.append("... (truncated at 500 items)")
         return "\n".join(lines) if lines else "(empty directory)"
 
     # Matches a bare "npm install"/"npm ci"/"npm run X" with no "cd " already in
@@ -796,9 +816,23 @@ class ToolExecutor:
             k: v for k, v in os.environ.items()
             if not self._SENSITIVE_ENV_RE.search(k)
         }
+        # stdin=DEVNULL is load-bearing, not cosmetic: without it the child
+        # inherits this process's stdin, and a command that hits an
+        # interactive prompt (e.g. "npm create vite@latest <dir>" when <dir>
+        # already exists non-empty from a previous failed/interrupted attempt
+        # -- create-vite's "not empty, overwrite?" prompt -- ignores
+        # --template and asks anyway) hangs reading input that never arrives
+        # until the timeout kills it. Found live (2026-07-15): the same
+        # scaffold command timed out 3x in a row at 90s each, because the
+        # first attempt left a partial my-app/ directory and every retry
+        # re-hit the identical prompt. DEVNULL gives an immediate EOF instead,
+        # so the tool fails fast with the real "not empty" error the agent
+        # can actually act on (rename/remove the dir) instead of a silent
+        # timeout that looks identical to a slow build.
         if self._POSIX_SHELL:
             proc = await asyncio.create_subprocess_exec(
                 self._POSIX_SHELL, "-c", command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.workspace),
@@ -807,6 +841,7 @@ class ToolExecutor:
         else:
             proc = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.workspace),
@@ -925,6 +960,7 @@ class ToolExecutor:
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
+                stdin=asyncio.subprocess.DEVNULL,  # same reasoning as _run_shell above -- credential/pager prompts must fail fast, not hang
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.workspace),

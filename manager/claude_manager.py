@@ -114,13 +114,31 @@ mention internal teams, routing, or classification."""
 
 class ClaudeManager:
     def __init__(self) -> None:
-        self._refiner      = PromptRefinerPipeline()
-        self._memory_ready = False
+        self._refiner          = PromptRefinerPipeline()
+        self._memory_ready     = False
+        self._memory_init_task: asyncio.Task | None = None
         bus.subscribe("claude_sonnet_4.6", self._handle_message)
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
     async def startup(self) -> None:
+        """
+        Kicks off memory init in the background instead of awaiting it here.
+        Found live (2026-07-15): memory.init() alone took ~35s (SentenceTransformer
+        model load + a Hub round-trip), and this method used to be awaited
+        directly by cli.py's main() before the interactive prompt ever showed --
+        every single launch paid that cost even though _memory_ready already
+        degrades gracefully to "no memory this call" everywhere it's checked
+        (_retrieve_memory/_store_memory below). Nothing in this codebase
+        actually requires memory to be ready before the manager is usable.
+        """
+        self._memory_init_task = asyncio.create_task(self._init_memory_background())
+        logger.info(
+            f"[manager] ready | active_manager={fallback_chain.active_name} "
+            "| memory loading in background"
+        )
+
+    async def _init_memory_background(self) -> None:
         try:
             from tools.memory import memory
             self._memory_ready = await memory.init()
@@ -131,9 +149,8 @@ class ClaudeManager:
             await collective_memory.init()
         except Exception as exc:
             logger.warning(f"[manager] collective memory init skipped: {exc}")
-        logger.info(
-            f"[manager] ready | active_manager={fallback_chain.active_name}"
-        )
+        if self._memory_ready:
+            logger.info("[manager] background memory init complete")
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -213,13 +230,50 @@ class ClaudeManager:
 
         # 5. Synthesise via fallback chain
         viz("stage", "Manager combining team results into the final answer…")
-        final = await self._synthesise(task_json, team_outputs)
+        try:
+            final = await self._synthesise(task_json, team_outputs)
+        except Exception as exc:
+            # Found in code review (2026-07-13): this call was unguarded, so
+            # a correlated failure (all 5 Free Manager Council members dying
+            # at the same pipeline stage -- the exact scenario DECISIONS.md
+            # already documents happening live for 2-provider overlaps)
+            # raised past every caller with no try/except along the way
+            # (this function, the REST /api/prompt handler, the WS pipeline's
+            # own except-block notwithstanding) -- turning a request whose
+            # team_outputs above had ALREADY been computed successfully into
+            # a raw 500, discarding that real, completed work. Degrading to
+            # the best available team output is strictly better than
+            # throwing away work that already succeeded.
+            logger.warning(f"[manager] synthesis failed ({str(exc)[:100]}) — degrading to raw team output")
+            final = self._degrade_to_team_outputs(team_outputs)
 
         # 6. Store approved outputs
         await self._store_memory(task_json, team_outputs, session_id)
         viz("stage", "Final answer ready", status="done")
 
         return final
+
+    @staticmethod
+    def _degrade_to_team_outputs(team_outputs: dict[str, str]) -> str:
+        """Best-effort final answer when synthesis itself fails. Prefers the
+        longest non-error team output (closest to a complete answer) over
+        just concatenating everything, since most callers show this as a
+        single response, not a multi-section report."""
+        usable = {
+            team: output for team, output in team_outputs.items()
+            if output and not output.startswith("[ERROR:")
+        }
+        if not usable:
+            return (
+                "All specialist teams and the manager's synthesis step failed for this "
+                "request. Please try again in a moment."
+            )
+        best_team, best_output = max(usable.items(), key=lambda kv: len(kv[1]))
+        return (
+            f"{best_output}\n\n"
+            f"[Note: the manager's final synthesis step failed, so this is the "
+            f"{best_team} team's own output shown directly, unedited.]"
+        )
 
     # ── Fast path ─────────────────────────────────────────────────────────────
 
