@@ -109,7 +109,23 @@ async def run_cascade(
             images=images or [], max_tokens=max_tokens, temperature=temperature,
         )
         last_output, last_model = output, model_id
-        confidence, reasoning = await _score(verifier_model, instruction, rubric, output)
+
+        try:
+            confidence, reasoning = await _score(verifier_model, instruction, rubric, output)
+        except Exception as exc:
+            # A verifier outage is an infrastructure failure, not a quality
+            # signal -- it must not discard an already-successful generation.
+            # Accept this tier's output as-is rather than escalating blind
+            # (escalating without a real confidence signal would defeat the
+            # cascade's cost-control purpose and could walk every remaining
+            # tier for nothing if the verifier stays down).
+            logger.warning(f"[cascade] verifier unavailable ({str(exc)[:80]}) — accepting {model_id} as-is")
+            return CascadeResult(
+                output=output, model_id=model_id, tier_index=i,
+                escalations=i, verifier_score=0.0,
+                verifier_reasoning="verifier unavailable — accepted without scoring",
+                scores=scores,
+            )
         scores.append(confidence)
 
         if confidence >= threshold:

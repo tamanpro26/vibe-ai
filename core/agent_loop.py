@@ -633,8 +633,7 @@ class AgentLoop:
         lessons_ctx = ""
         try:
             from tools.memory import memory
-            if not memory._ready:
-                await asyncio.wait_for(memory.init(), timeout=10.0)
+            await self._ensure_memory_ready(memory)
             retrieved = await asyncio.wait_for(
                 memory.retrieve_context(task, team="code", top_k=2), timeout=10.0,
             )
@@ -1582,6 +1581,16 @@ class AgentLoop:
         messages.append({"role": "user", "content": task})
         return messages
 
+    @staticmethod
+    async def _ensure_memory_ready(memory) -> None:
+        """Lazily init the tools.memory singleton, bounded so a slow first
+        model/collection load can't hang the caller. Shared by both call
+        sites (lesson retrieval above, lesson storage below) so the guard
+        is written once instead of drifting between two copies.
+        """
+        if not memory._ready:
+            await asyncio.wait_for(memory.init(), timeout=10.0)
+
     async def _store_build_lesson(self, error: str, fix_explanation: str) -> None:
         """Persist a solved build failure to VectorMemory (tools/memory.py) so a
         future task — even in a brand-new process — can retrieve it via
@@ -1590,8 +1599,7 @@ class AgentLoop:
         """
         try:
             from tools.memory import memory
-            if not memory._ready:
-                await memory.init()
+            await self._ensure_memory_ready(memory)
             await memory.store_error_fix(
                 error=error[:500], fix=fix_explanation[:800], team="code",
             )

@@ -3542,3 +3542,31 @@ class TestBuildLessonPersistence:
         # must not raise -- this is a best-effort side channel, never allowed
         # to break the agent run it's called from
         asyncio.run(loop._store_build_lesson("error", "fix"))
+
+
+class TestCascadeVerifierFailure:
+    """
+    Code-review regression test (2026-07-15): run_cascade had no try/except
+    around the verifier call, so a verifier-infrastructure outage propagated
+    an exception out of run_cascade and discarded an already-successful
+    generation instead of just accepting it. Three independent reviewers
+    (correctness, reliability, agent-native) flagged this in the same pass.
+    """
+
+    def test_verifier_exception_accepts_tier_output_instead_of_raising(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id == "cheap":
+                return "a perfectly good answer"
+            raise RuntimeError("all verifier providers down")
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        result = asyncio.run(cascade_mod.run_cascade(
+            tiers=["cheap", "expensive"], instruction="do x", system="sys",
+            verifier_model="broken_verifier",
+        ))
+        assert result.output == "a perfectly good answer"
+        assert result.model_id == "cheap"
+        assert result.escalations == 0
+        assert "unavailable" in result.verifier_reasoning

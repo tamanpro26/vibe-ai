@@ -27,17 +27,17 @@ import re
 from loguru import logger
 
 from config.models_config import MODEL_REGISTRY
-from models.registry import generate_resilient
+from models.registry import _LLM_PROVIDERS, generate_resilient
 
 DEFAULT_THRESHOLD = 0.6
 MAX_PEERS = 2
 
-# Same free/text-capable provider set core registry.py's generate_resilient
-# already trusts for automatic cross-model substitution — keeps peer
-# selection consistent with the one policy call already made there
-# (anthropic/mistral manual-only, pollinations/huggingface are image/asset
-# generators with nothing useful to say about a text draft).
-_TEXT_PEER_PROVIDERS = {"google", "groq", "cerebras", "openrouter", "ollama", "nvidia", "zai"}
+# Reuse registry.py's own free/text-capable provider set rather than
+# redeclaring it here — keeps peer selection consistent with the one policy
+# call already made there (anthropic/mistral manual-only, pollinations/
+# huggingface are image/asset generators with nothing useful to say about a
+# text draft) without a second copy to drift out of sync.
+_TEXT_PEER_PROVIDERS = _LLM_PROVIDERS
 
 CONFIDENCE_PROMPT_SUFFIX = """
 

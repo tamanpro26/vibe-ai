@@ -21,6 +21,7 @@ Improvement: +5% at session 1, +20% at session 100 (snowball effect).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -88,18 +89,30 @@ class VectorMemory:
         """
         Initialise Chroma DB and sentence-transformers.
         Returns True if successful, False if dependencies missing.
+
+        Offloaded to a thread: chromadb's PersistentClient and (especially)
+        SentenceTransformer's model load are synchronous CPU/disk work with
+        no internal await, so calling them inline here would run to
+        completion the moment this coroutine starts -- a caller's
+        asyncio.wait_for(...) around this call cannot preempt a coroutine
+        that never yields, and a slow first load (cold model download)
+        would freeze the whole single-process event loop, not just this call.
         """
         try:
             import chromadb
             from sentence_transformers import SentenceTransformer
 
-            Path(self._dir).mkdir(parents=True, exist_ok=True)
-            client     = chromadb.PersistentClient(path=self._dir)
-            self._col  = client.get_or_create_collection(
-                name=self.COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
-            self._emb  = SentenceTransformer(self.EMBED_MODEL)
+            def _blocking_init():
+                Path(self._dir).mkdir(parents=True, exist_ok=True)
+                client = chromadb.PersistentClient(path=self._dir)
+                col = client.get_or_create_collection(
+                    name=self.COLLECTION_NAME,
+                    metadata={"hnsw:space": "cosine"},
+                )
+                emb = SentenceTransformer(self.EMBED_MODEL)
+                return col, emb
+
+            self._col, self._emb = await asyncio.to_thread(_blocking_init)
             self._ready = True
             logger.info(
                 f"[memory] ready | collection={self.COLLECTION_NAME} | "
@@ -114,10 +127,13 @@ class VectorMemory:
             )
             return False
 
-    def _embed(self, text: str) -> list[float]:
+    async def _embed(self, text: str) -> list[float]:
         if not self._emb:
             return []
-        return self._emb.encode(text, normalize_embeddings=True).tolist()
+        # .encode() runs the model forward pass -- also blocking CPU work,
+        # same reasoning as init() above.
+        vec = await asyncio.to_thread(self._emb.encode, text, normalize_embeddings=True)
+        return vec.tolist()
 
     # ── Store ─────────────────────────────────────────────────────────────────
 
@@ -149,7 +165,7 @@ class VectorMemory:
 
         try:
             doc = entry.to_chroma_doc()
-            embedding = self._embed(entry.content)
+            embedding = await self._embed(entry.content)
             self._col.add(
                 ids=[doc["id"]],
                 documents=[doc["document"]],
@@ -180,11 +196,12 @@ class VectorMemory:
         )
         try:
             doc = entry.to_chroma_doc()
+            embedding = await self._embed(entry.content)
             self._col.add(
                 ids=[doc["id"]],
                 documents=[doc["document"]],
                 metadatas=[doc["metadata"]],
-                embeddings=[self._embed(entry.content)] if self._embed else None,
+                embeddings=[embedding] if embedding else None,
             )
         except Exception:
             pass
@@ -206,7 +223,7 @@ class VectorMemory:
             return ""
 
         try:
-            embedding = self._embed(query)
+            embedding = await self._embed(query)
             where = {"team": team} if team else None
 
             results = self._col.query(
