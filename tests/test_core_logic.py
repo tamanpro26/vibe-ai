@@ -2439,13 +2439,39 @@ class TestRunTeamInstructionFallback:
 # the live COUNCIL list.
 
 class TestFreeManagerCouncilRoster:
-    def test_roster_summary_dedups_repeated_model_names(self):
-        from manager.free_manager import FreeManagerTeam
-        team = FreeManagerTeam()
+    def test_roster_summary_dedups_repeated_model_names(self, monkeypatch):
+        # Exercises the dedup MECHANISM directly rather than depending on the
+        # live COUNCIL happening to contain a repeated model name. It used to
+        # (Drafter and Critic were both GPT-OSS-120B on Groq) until the
+        # 2026-07-15 cross-family fix swapped Critic to Qwen3.6-27B
+        # specifically to remove that duplication -- pinning this test to
+        # the real roster would have made a future roster change silently
+        # stop testing dedup at all.
+        import manager.free_manager as fm_mod
+        fake_council = [
+            fm_mod.Member(role="Planner", model_id="a", model_name="Model X", provider="P1"),
+            fm_mod.Member(role="Drafter", model_id="b", model_name="Model Y", provider="P2"),
+            fm_mod.Member(role="Critic", model_id="c", model_name="Model Y", provider="P2"),
+        ]
+        monkeypatch.setattr(fm_mod, "COUNCIL", fake_council)
+        team = fm_mod.FreeManagerTeam()
         summary = team.roster_summary()
-        assert "GPT-OSS 120B x2" in summary
+        assert "Model Y x2" in summary
         # collapsed into the "x2" form, never listed as two separate entries
-        assert summary.count("GPT-OSS 120B") == 1
+        assert summary.count("Model Y") == 1
+
+    def test_critic_is_not_same_model_family_as_drafter(self):
+        """Regression test for a live-caught design flaw (2026-07-15): Critic
+        used to be gpt_oss_120b_debug -- the SAME underlying model
+        (GPT-OSS-120B on Groq) as the Drafter (gpt_oss_120b_coder) -- so a
+        drifted draft and its own critique shared identical blind spots by
+        construction. A critic must be a genuinely different model than the
+        one it's critiquing."""
+        from manager.free_manager import COUNCIL
+        drafter = next(m for m in COUNCIL if m.role == "Drafter")
+        critic = next(m for m in COUNCIL if m.role == "Critic")
+        assert critic.model_id != drafter.model_id
+        assert critic.model_name != drafter.model_name
 
     def test_no_council_member_uses_the_confirmed_broken_gemma_4(self):
         from manager.free_manager import COUNCIL
@@ -3608,3 +3634,326 @@ class TestCascadeVerifierFailure:
         assert result.model_id == "cheap"
         assert result.escalations == 0
         assert "unavailable" in result.verifier_reasoning
+
+
+# ── Council v3: Intent Contract (manager/intent_contract.py) ───────────────────
+
+class TestIntentContract:
+    def test_builds_structured_contract_from_valid_json(self, monkeypatch):
+        import manager.intent_contract as ic_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return (
+                '{"goal": "build a login form", '
+                '"success_criteria": ["form validates email", "submits to /api/login"], '
+                '"constraints": ["no jQuery"], '
+                '"non_goals": ["password reset flow"], '
+                '"open_ambiguities": []}'
+            )
+
+        monkeypatch.setattr(ic_mod, "generate_resilient", fake_generate)
+        contract = asyncio.run(ic_mod.build_intent_contract("build me a login form"))
+
+        assert contract.raw_request == "build me a login form"
+        assert contract.goal == "build a login form"
+        assert "form validates email" in contract.success_criteria
+        assert "no jQuery" in contract.constraints
+        assert "password reset flow" in contract.non_goals
+        assert contract.has_open_ambiguities is False
+
+    def test_malformed_json_falls_back_to_bare_goal(self, monkeypatch):
+        import manager.intent_contract as ic_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return "I think the user wants... (rambling, no JSON)"
+
+        monkeypatch.setattr(ic_mod, "generate_resilient", fake_generate)
+        contract = asyncio.run(ic_mod.build_intent_contract("do the thing"))
+
+        assert contract.raw_request == "do the thing"
+        assert contract.goal  # bare-goal fallback, never empty
+        assert contract.open_ambiguities == []
+
+    def test_extraction_failure_never_raises_and_has_no_ambiguities(self, monkeypatch):
+        # Fail-open is deliberate: an infrastructure hiccup extracting the
+        # contract is not evidence the request is actually ambiguous, so it
+        # must never trip the ambiguity gate.
+        import manager.intent_contract as ic_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("all providers down")
+
+        monkeypatch.setattr(ic_mod, "generate_resilient", fake_generate)
+        contract = asyncio.run(ic_mod.build_intent_contract("build me a website"))
+
+        assert contract.open_ambiguities == []
+        assert contract.raw_request == "build me a website"
+
+    def test_as_prompt_block_includes_criteria_and_constraints(self):
+        from manager.intent_contract import IntentContract
+
+        contract = IntentContract(
+            raw_request="x", goal="ship a landing page",
+            success_criteria=["has a hero section"], constraints=["dark theme"],
+        )
+        block = contract.as_prompt_block()
+        assert "ship a landing page" in block
+        assert "has a hero section" in block
+        assert "dark theme" in block
+
+    def test_has_open_ambiguities_reflects_list_state(self):
+        from manager.intent_contract import IntentContract
+
+        assert IntentContract(raw_request="x").has_open_ambiguities is False
+        assert IntentContract(raw_request="x", open_ambiguities=["which framework?"]).has_open_ambiguities is True
+
+
+# ── Council v3: stage supervision (manager/supervisor.py) ──────────────────────
+
+class TestSupervisorPing:
+    @staticmethod
+    def _contract():
+        from manager.intent_contract import IntentContract
+        return IntentContract(raw_request="x", goal="build a form", success_criteria=["validates email"])
+
+    def test_parses_continue_verdict(self, monkeypatch):
+        import manager.supervisor as sup_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return '{"intent_alignment": 9, "criteria_on_track": true, "drift_detected": false, "drift_description": "", "recommend": "continue"}'
+
+        monkeypatch.setattr(sup_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(sup_mod.supervisor_ping(self._contract(), "Drafter", "a good draft"))
+
+        assert verdict.recommend == "continue"
+        assert verdict.intent_alignment == 9
+        assert verdict.drift_detected is False
+
+    def test_parses_correct_verdict_with_drift_description(self, monkeypatch):
+        import manager.supervisor as sup_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return (
+                '{"intent_alignment": 4, "criteria_on_track": false, "drift_detected": true, '
+                '"drift_description": "ignored the email validation requirement", "recommend": "correct"}'
+            )
+
+        monkeypatch.setattr(sup_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(sup_mod.supervisor_ping(self._contract(), "Drafter", "a drifted draft"))
+
+        assert verdict.recommend == "correct"
+        assert "email validation" in verdict.drift_description
+
+    def test_invalid_recommend_value_defaults_to_continue(self, monkeypatch):
+        import manager.supervisor as sup_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return '{"intent_alignment": 8, "criteria_on_track": true, "drift_detected": false, "drift_description": "", "recommend": "maybe"}'
+
+        monkeypatch.setattr(sup_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(sup_mod.supervisor_ping(self._contract(), "Drafter", "output"))
+        assert verdict.recommend == "continue"
+
+    def test_unparseable_output_fails_open_to_continue(self, monkeypatch):
+        import manager.supervisor as sup_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return "not json"
+
+        monkeypatch.setattr(sup_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(sup_mod.supervisor_ping(self._contract(), "Drafter", "output"))
+        assert verdict.recommend == "continue"
+        assert verdict.drift_detected is False
+
+    def test_ping_exception_fails_open_to_continue(self, monkeypatch):
+        # A down supervisor must never block or fail the pipeline it watches.
+        import manager.supervisor as sup_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("provider outage")
+
+        monkeypatch.setattr(sup_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(sup_mod.supervisor_ping(self._contract(), "Drafter", "output"))
+        assert verdict.recommend == "continue"
+
+    def test_log_verdict_writes_jsonl_and_never_raises(self, tmp_path, monkeypatch):
+        import json as _json
+        import manager.supervisor as sup_mod
+
+        log_path = tmp_path / "verdicts.jsonl"
+        monkeypatch.setattr(sup_mod, "_LOG_PATH", log_path)
+
+        verdict = sup_mod.SupervisionVerdict(
+            intent_alignment=7, criteria_on_track=True,
+            drift_detected=False, drift_description="", recommend="continue",
+        )
+        sup_mod.log_verdict("Drafter", verdict, outcome="test")
+
+        lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        record = _json.loads(lines[0])
+        assert record["stage"] == "Drafter"
+        assert record["outcome"] == "test"
+
+    def test_log_verdict_swallows_write_failures(self, monkeypatch):
+        import manager.supervisor as sup_mod
+
+        # An unwritable path (parent creation itself will fail) must not raise.
+        monkeypatch.setattr(sup_mod, "_LOG_PATH", Path("Z:/nonexistent/impossible/path.jsonl"))
+        verdict = sup_mod.SupervisionVerdict(
+            intent_alignment=5, criteria_on_track=True,
+            drift_detected=False, drift_description="", recommend="continue",
+        )
+        sup_mod.log_verdict("Drafter", verdict)   # must not raise
+
+
+# ── Council v3: ambiguity gate, complexity gate, stage supervision wiring ──────
+# (manager/free_manager.py)
+
+class TestFreeManagerAmbiguityGate:
+    def test_open_ambiguity_returns_question_without_running_any_stage(self, monkeypatch):
+        import manager.free_manager as fm_mod
+        from manager.intent_contract import IntentContract
+
+        async def fake_build_contract(raw_request):
+            return IntentContract(
+                raw_request=raw_request, goal="unclear",
+                open_ambiguities=["which framework: React or Vue?"],
+            )
+
+        async def fail_if_called(self, member, prompt, system, max_tokens, temperature):
+            raise AssertionError("no stage should run while ambiguities are open")
+
+        monkeypatch.setattr(fm_mod, "build_intent_contract", fake_build_contract)
+        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", fail_if_called)
+
+        team = fm_mod.FreeManagerTeam()
+        result = asyncio.run(team._collaborative_pipeline("build me a website", 1000, 0.3))
+
+        assert "which framework" in result.lower()
+        assert "React or Vue" in result
+
+
+class TestFreeManagerComplexityGate:
+    def test_classifies_simple_correctly(self, monkeypatch):
+        import manager.free_manager as fm_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return "SIMPLE"
+
+        monkeypatch.setattr(fm_mod, "generate_resilient", fake_generate)
+        team = fm_mod.FreeManagerTeam()
+        assert asyncio.run(team._classify_complexity("what's 2+2?")) is False
+
+    def test_classifies_complex_correctly(self, monkeypatch):
+        import manager.free_manager as fm_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return "COMPLEX"
+
+        monkeypatch.setattr(fm_mod, "generate_resilient", fake_generate)
+        team = fm_mod.FreeManagerTeam()
+        assert asyncio.run(team._classify_complexity("design a full app")) is True
+
+    def test_classifier_failure_defaults_to_complex(self, monkeypatch):
+        # Fails open to the MORE expensive path deliberately: downgrading a
+        # hard request to the 2-stage fast path on an infra hiccup would be
+        # the actual quality regression, not the extra Council stages.
+        import manager.free_manager as fm_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("classifier unavailable")
+
+        monkeypatch.setattr(fm_mod, "generate_resilient", fake_generate)
+        team = fm_mod.FreeManagerTeam()
+        assert asyncio.run(team._classify_complexity("anything")) is True
+
+
+class TestFreeManagerSupervisedStage:
+    @staticmethod
+    def _contract():
+        from manager.intent_contract import IntentContract
+        return IntentContract(raw_request="x", goal="build a form")
+
+    def test_continue_verdict_makes_exactly_one_call(self, monkeypatch):
+        import manager.free_manager as fm_mod
+        from manager.supervisor import SupervisionVerdict
+
+        calls: list[str] = []
+
+        async def fake_call(self, member, prompt, system, max_tokens, temperature):
+            calls.append(member.role)
+            return "a fine draft"
+
+        async def fake_ping(contract, role, output):
+            return SupervisionVerdict(9, True, False, "", "continue")
+
+        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", fake_call)
+        monkeypatch.setattr(fm_mod, "supervisor_ping", fake_ping)
+        monkeypatch.setattr(fm_mod, "log_verdict", lambda *a, **kw: None)
+
+        team = fm_mod.FreeManagerTeam()
+        result = asyncio.run(team._run_stage_supervised("Drafter", self._contract(), "prompt", 500, 0.3))
+
+        assert result == "a fine draft"
+        assert calls == ["Drafter"]   # exactly one call, no retry
+
+    def test_correct_verdict_retries_once_with_correction(self, monkeypatch):
+        import manager.free_manager as fm_mod
+        from manager.supervisor import SupervisionVerdict
+
+        prompts_seen: list[str] = []
+
+        async def fake_call(self, member, prompt, system, max_tokens, temperature):
+            prompts_seen.append(prompt)
+            return "draft attempt"
+
+        verdicts = iter([
+            SupervisionVerdict(4, False, True, "missed the email validation requirement", "correct"),
+            SupervisionVerdict(9, True, False, "", "continue"),
+        ])
+
+        async def fake_ping(contract, role, output):
+            return next(verdicts)
+
+        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", fake_call)
+        monkeypatch.setattr(fm_mod, "supervisor_ping", fake_ping)
+        monkeypatch.setattr(fm_mod, "log_verdict", lambda *a, **kw: None)
+
+        team = fm_mod.FreeManagerTeam()
+        result = asyncio.run(team._run_stage_supervised("Drafter", self._contract(), "original prompt", 500, 0.3))
+
+        assert result == "draft attempt"
+        assert len(prompts_seen) == 2   # original attempt + one correction retry
+        assert "email validation" in prompts_seen[1]   # drift fed back into the retry
+
+    def test_escalate_verdict_skips_the_primary_member(self, monkeypatch):
+        import manager.free_manager as fm_mod
+        from manager.supervisor import SupervisionVerdict
+
+        roles_called: list[str] = []
+
+        async def fake_call(self, member, prompt, system, max_tokens, temperature):
+            roles_called.append(member.role)
+            return f"output from {member.role}"
+
+        verdicts = iter([
+            SupervisionVerdict(3, False, True, "ignored a hard constraint", "escalate"),
+            SupervisionVerdict(9, True, False, "", "continue"),
+        ])
+
+        async def fake_ping(contract, role, output):
+            return next(verdicts)
+
+        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", fake_call)
+        monkeypatch.setattr(fm_mod, "supervisor_ping", fake_ping)
+        monkeypatch.setattr(fm_mod, "log_verdict", lambda *a, **kw: None)
+
+        team = fm_mod.FreeManagerTeam()
+        result = asyncio.run(team._run_stage_supervised("Drafter", self._contract(), "prompt", 500, 0.3))
+
+        # First call is the primary (Drafter); the escalation retry must NOT
+        # call Drafter again -- it should be a different Council member.
+        assert roles_called[0] == "Drafter"
+        assert roles_called[1] != "Drafter"
+        assert result == f"output from {roles_called[1]}"

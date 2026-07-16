@@ -16,7 +16,7 @@ Council never competes with the Brain team for the same models:
                 gemini-2.0-flash is a SEPARATE Google quota pool from the
                 gemini-2.5-flash bucket brain/vision/prompt-refiner all share)
   Drafter     — GPT-OSS 120B       (Groq,      free)  — code team
-  Critic      — GPT-OSS 120B       (Groq,      free)  — code team
+  Critic      — Qwen3.6 27B        (Groq,      free)  — brain team
   Refiner     — GLM 4.7            (Cerebras,  free)  — code team
   Synthesizer — GLM 4.7 Flash      (Z.AI,      free)  — code team
 
@@ -26,9 +26,13 @@ swapped for gpt_oss_120b_debug; Synthesizer used to be Gemma 4 31B
 (gemma_4), which failed 100% of live calls this session (OpenRouter serving
 it from a backend that 404s) and was swapped to the already-proven
 glm_47_flash_zai. Planner moved off the brain/vision-shared Gemini bucket
-onto its own. Use `FreeManagerTeam.roster_summary()` for the current live
-roster rather than trusting a hardcoded string anywhere — that's exactly
-how this one went stale.
+onto its own. Critic corrected AGAIN 2026-07-15: gpt_oss_120b_debug was the
+same underlying model family as the Drafter (both GPT-OSS-120B on Groq),
+so critique and draft shared blind spots by construction — swapped to
+qwen36_27b_verifier, a genuinely different architecture. Use
+`FreeManagerTeam.roster_summary()` for the current live roster rather than
+trusting a hardcoded string anywhere — that's exactly how this one went
+stale, twice now.
 
 For REVIEW tasks (structured JSON quality scoring), the full prose
 pipeline doesn't apply — instead two members independently score and
@@ -52,6 +56,9 @@ from typing import Any
 from loguru import logger
 
 from manager.free_manager_helpers import parse_json, merge_reviews
+from manager.intent_contract import IntentContract, build_intent_contract
+from manager.supervisor import log_verdict, supervisor_ping
+from models.registry import generate_resilient
 
 
 # ── Routing: review calls get a 2-model consensus, everything else the ────────
@@ -78,7 +85,14 @@ class Member:
 COUNCIL: list[Member] = [
     Member(role="Planner",     model_id="gemini_flash_council", model_name="Gemini 2.0 Flash", provider="Google"),
     Member(role="Drafter",     model_id="gpt_oss_120b_coder",   model_name="GPT-OSS 120B",      provider="Groq"),
-    Member(role="Critic",      model_id="gpt_oss_120b_debug",   model_name="GPT-OSS 120B",      provider="Groq"),
+    # Critic was gpt_oss_120b_debug -- the SAME model family as the Drafter
+    # (both GPT-OSS-120B on Groq), so a bad draft and its own critique shared
+    # the same blind spots by construction. Swapped 2026-07-15 to Qwen3.6-27B
+    # -- genuinely different architecture/training, still free/fast on Groq
+    # (same provider, but the concern being fixed is model-family correlation,
+    # not provider outage correlation -- that's a separate, already-handled
+    # risk via _FALLBACK_ORDER's cross-provider rotation).
+    Member(role="Critic",      model_id="qwen36_27b_verifier",  model_name="Qwen3.6 27B",       provider="Groq"),
     Member(role="Refiner",     model_id="glm_47_cerebras",      model_name="GLM 4.7",           provider="Cerebras"),
     Member(role="Synthesizer", model_id="glm_47_flash_zai",     model_name="GLM 4.7 Flash",     provider="Z.AI"),
 ]
@@ -154,14 +168,21 @@ original request. Produce the actual content — do not describe what you
 would write, write it. Preserve any code blocks exactly as needed.
 """ + _URL_PRESERVE_RULE + "\n\n" + _QUALITY_BAR,
 
-    "Critic": """You are the Critic in VibeAI's Free Manager Council.
-Critique the draft against the original request. List up to 3 concrete,
-actionable improvements (clarity, correctness, completeness, tone). If the
-draft is already excellent, say so explicitly and keep this brief.
-If the original request/context contained a real generated asset URL and
-the draft dropped it, that is issue #1 — flag it explicitly. Also flag any
-claim, capability, or limitation the draft states without evidence in the
-input.
+    "Critic": """You are the Critic in VibeAI's Free Manager Council. You are the
+ONLY reviewer this draft will get before it ships — there is no second critic
+to catch what you wave through. Critique the draft against the original
+request and the intent contract below. List up to 3 concrete, actionable
+issues. For EACH issue, state: its severity, its exact location (quote the
+line/phrase), which requirement or constraint it violates, and a specific
+fix — not "could be clearer," name what to change. If the original
+request/context contained a real generated asset URL and the draft dropped
+it, that is issue #1 — flag it explicitly.
+If you find no issues: do not just say "looks good" — list which specific
+success criteria and constraints from the intent contract you personally
+checked the draft against, and confirm each one is met. An approval with
+nothing checked is not a review.
+Also flag any claim, capability, or limitation the draft states without
+evidence in the input.
 """ + _QUALITY_BAR,
 
     "Refiner": """You are the Refiner in VibeAI's Free Manager Council.
@@ -271,17 +292,71 @@ class FreeManagerTeam:
         text = (prompt[:300] + " " + system[:300]).lower()
         return any(kw in text for kw in _REVIEW_WORDS)
 
+    # ── Complexity gate ───────────────────────────────────────────────────────
+    #
+    # A real classifier call, not a character-count guess: a short "rewrite
+    # this entire architecture" is complex, a long pasted error log with
+    # "what's this mean" is simple. Cheap (llama31_8b_router, ~200 tokens) --
+    # under free-tier token-per-day caps, this isn't just cost hygiene:
+    # budget exhaustion means truncated context on the tasks that actually
+    # need the full pipeline, so a trivial task wrongly taking the expensive
+    # path steals quality from a hard one queued behind it.
+
+    _COMPLEXITY_MODEL  = "llama31_8b_router"
+    _COMPLEXITY_SYSTEM = (
+        "Classify this request as SIMPLE or COMPLEX. SIMPLE: a direct question "
+        "or a short, focused ask answerable well in one pass. COMPLEX: "
+        "multi-part, needs planning, design/build work, or genuinely benefits "
+        "from a draft-critique-refine pass. Reply with exactly one word: "
+        "SIMPLE or COMPLEX."
+    )
+
+    async def _classify_complexity(self, prompt: str) -> bool:
+        """True = complex (full 5-stage pipeline). Fails open to complex: an
+        unavailable classifier should cost one extra stage of deliberation,
+        not silently downgrade a hard request to the 2-stage fast path."""
+        try:
+            raw = await generate_resilient(
+                self._COMPLEXITY_MODEL, prompt=prompt[:2000],
+                system=self._COMPLEXITY_SYSTEM, max_tokens=10, temperature=0.0,
+            )
+            return "SIMPLE" not in raw.upper()
+        except Exception as exc:
+            logger.warning(
+                f"[free_council] complexity classifier failed ({str(exc)[:60]}) "
+                f"— defaulting to full pipeline"
+            )
+            return True
+
     # ── 5-stage collaborative pipeline (synthesis / dispatch / general) ───────
 
     async def _collaborative_pipeline(
         self, prompt: str, max_tokens: int, temperature: float
     ) -> str:
-        # Short prompts don't need all 5 stages — draft + polish is enough
-        # and cuts Council latency by ~60%.
-        if len(prompt) < 600:
-            draft = await self._run_stage(
-                "Drafter",
-                prompt=f"ORIGINAL REQUEST:\n{prompt}",
+        contract = await build_intent_contract(prompt)
+
+        # Ambiguity gate: guessing at a material ambiguity is the deepest
+        # "doesn't really respect the user" failure. Ask one good question
+        # instead of confidently building the wrong thing.
+        if contract.has_open_ambiguities:
+            questions = "\n".join(f"- {q}" for q in contract.open_ambiguities[:3])
+            logger.info(
+                f"[free_council] ambiguity gate: {len(contract.open_ambiguities)} "
+                f"open question(s) — asking instead of guessing"
+            )
+            return self._with_signature(
+                "Before I build this, I want to make sure I get it right:\n\n"
+                f"{questions}\n\n"
+                "Answer these (or tell me to just use my best judgment) and I'll continue."
+            )
+
+        contract_block = contract.as_prompt_block()
+        is_complex = await self._classify_complexity(prompt)
+
+        if not is_complex:
+            draft = await self._run_stage_supervised(
+                "Drafter", contract,
+                prompt=f"{contract_block}\n\nORIGINAL REQUEST:\n{prompt}",
                 max_tokens=max_tokens, temperature=temperature,
             )
             final = await self._run_stage(
@@ -291,30 +366,32 @@ class FreeManagerTeam:
             )
             return self._with_signature(final or draft)
 
-        plan = await self._run_stage(
-            "Planner",
-            prompt=f"ORIGINAL REQUEST:\n{prompt}",
+        plan = await self._run_stage_supervised(
+            "Planner", contract,
+            prompt=f"{contract_block}\n\nORIGINAL REQUEST:\n{prompt}",
             max_tokens=400, temperature=0.3,
         )
 
-        draft = await self._run_stage(
-            "Drafter",
-            prompt=f"ORIGINAL REQUEST:\n{prompt}\n\nPLAN:\n{plan}",
+        draft = await self._run_stage_supervised(
+            "Drafter", contract,
+            prompt=f"{contract_block}\n\nORIGINAL REQUEST:\n{prompt}\n\nPLAN:\n{plan}",
             max_tokens=max_tokens, temperature=temperature,
         )
 
-        critique = await self._run_stage(
-            "Critic",
-            prompt=f"ORIGINAL REQUEST:\n{prompt}\n\nDRAFT:\n{draft}",
+        critique = await self._run_stage_supervised(
+            "Critic", contract,
+            prompt=f"{contract_block}\n\nORIGINAL REQUEST:\n{prompt}\n\nDRAFT:\n{draft}",
             max_tokens=400, temperature=0.2,
         )
 
-        refined = await self._run_stage(
-            "Refiner",
-            prompt=f"ORIGINAL REQUEST:\n{prompt}\n\nDRAFT:\n{draft}\n\nCRITIC FEEDBACK:\n{critique}",
+        refined = await self._run_stage_supervised(
+            "Refiner", contract,
+            prompt=f"{contract_block}\n\nORIGINAL REQUEST:\n{prompt}\n\nDRAFT:\n{draft}\n\nCRITIC FEEDBACK:\n{critique}",
             max_tokens=max_tokens, temperature=temperature,
         )
 
+        # Synthesizer is a polish pass over an already-supervised chain, not
+        # a fresh judgment call -- no checkpoint needed on top of Refiner's.
         final = await self._run_stage(
             "Synthesizer",
             prompt=f"ORIGINAL REQUEST:\n{prompt}\n\nREFINED RESPONSE:\n{refined}",
@@ -322,6 +399,50 @@ class FreeManagerTeam:
         )
 
         return self._with_signature(final or refined or draft)
+
+    async def _run_stage_supervised(
+        self, role: str, contract: IntentContract,
+        prompt: str, max_tokens: int, temperature: float,
+    ) -> str:
+        """_run_stage, checkpointed against the intent contract immediately
+        after. This is the real fix for "the Council is absent during
+        execution" -- each stage's output is checked before the pipeline
+        commits to the next stage, not just at the end. There is no
+        long-running sub-agent here to send progress events from (each
+        stage is one model call), so this is a checkpoint between stages,
+        not an event-queue watching work-in-progress.
+
+        Bounded to one correction retry and one tier escalation, same
+        reasoning as this project's other fix-cycle caps (core/agent_loop.py's
+        reflexion cycles, verifier fix cycles): a stage that keeps drifting
+        needs a different response, not an unbounded retry loop.
+        """
+        output  = await self._run_stage(role, prompt, max_tokens, temperature)
+        verdict = await supervisor_ping(contract, role, output)
+        log_verdict(role, verdict)
+
+        if verdict.recommend == "correct":
+            logger.warning(
+                f"[free_council] {role} stage drift ({verdict.drift_description[:80]}) "
+                f"— retrying once with correction"
+            )
+            corrected_prompt = (
+                f"{prompt}\n\nSUPERVISION FEEDBACK: your previous attempt drifted "
+                f"from the intent contract — {verdict.drift_description}\n"
+                f"Produce a corrected response that addresses this."
+            )
+            output = await self._run_stage(role, corrected_prompt, max_tokens, temperature)
+            log_verdict(role, await supervisor_ping(contract, role, output), outcome="corrected_once")
+
+        elif verdict.recommend == "escalate":
+            logger.warning(
+                f"[free_council] {role} stage escalating to the next tier "
+                f"({verdict.drift_description[:80]})"
+            )
+            output = await self._run_stage(role, prompt, max_tokens, temperature, skip_primary=True)
+            log_verdict(role, await supervisor_ping(contract, role, output), outcome="escalated_once")
+
+        return output
 
     def _with_signature(self, text: str) -> str:
         """Append the Council signature in code, not by trusting a model to
@@ -354,13 +475,22 @@ class FreeManagerTeam:
     # (Groq ~1s, Cerebras ~2s) — OpenRouter free endpoints can take 10-30s.
     _FALLBACK_ORDER = ["Critic", "Refiner", "Drafter", "Synthesizer", "Planner"]
 
-    async def _run_stage(self, role: str, prompt: str, max_tokens: int, temperature: float) -> str:
-        """Run one pipeline stage, falling back to other Council members on failure."""
-        primary    = self._member_by_role(role)
-        candidates = [primary] + sorted(
+    async def _run_stage(
+        self, role: str, prompt: str, max_tokens: int, temperature: float,
+        skip_primary: bool = False,
+    ) -> str:
+        """Run one pipeline stage, falling back to other Council members on
+        failure. skip_primary=True is the supervisor-escalation path: the
+        primary member DID respond (no exception), but a supervisor_ping
+        verdict judged it drifted enough to want a different model's attempt
+        rather than a same-model retry.
+        """
+        primary  = self._member_by_role(role)
+        rotation = sorted(
             (m for m in COUNCIL if m.role != role),
             key=lambda m: self._FALLBACK_ORDER.index(m.role),
         )
+        candidates = rotation if skip_primary else [primary] + rotation
         self._call_counts[role] += 1
 
         for candidate in candidates:
