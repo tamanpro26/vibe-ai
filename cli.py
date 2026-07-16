@@ -987,6 +987,7 @@ async def handle_command(cmd: str) -> None:
             "  [cyan]/chat list[/cyan]                — list chats in this workspace\n"
             "  [cyan]models[/cyan]                   — list available coding models\n"
             "  [cyan]status[/cyan]                   — show manager health and API call counts\n"
+            "  [cyan]/ceo[/cyan]                      — on-demand AI-organization health report (slow, ~20s)\n"
             "  [cyan]workspace[/cyan]                — list files in workspace\n"
             "  [cyan]clear[/cyan]                    — clear the screen\n"
             "  [cyan]exit / q[/cyan]                 — quit VibeAI",
@@ -1165,6 +1166,35 @@ async def handle_think(problem: str) -> None:
             console.print()
             console.print(f"  " + "  ·  ".join(meta_parts))
 
+    console.print()
+    console.print(Rule(style="dim"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /ceo — on-demand aggregate oversight report (manager/ceo.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def handle_ceo_report() -> None:
+    """Ask the CEO model to synthesize a health report from real Council/
+    team-leader/status signal already logged on disk. Deliberately slow
+    (~20s, big model) and only run when explicitly invoked -- see
+    manager/ceo.py's module docstring for why this never runs per-request.
+    """
+    console.print()
+    console.print(f"  [{C_AI}]CEO[/{C_AI}]  [dim]→ reading Council + team-leader logs  ·  nemotron-3-ultra-550b  ·  ~20s[/dim]")
+
+    try:
+        with console.status("[dim]Synthesizing oversight report...[/dim]", spinner="dots"):
+            from manager.ceo import generate_oversight_report
+            report = await generate_oversight_report()
+    except Exception as exc:
+        console.print(f"\n  [{C_ERR}]CEO report failed:[/{C_ERR}] {exc}\n")
+        return
+
+    console.print()
+    console.print(Rule("[cyan]CEO Oversight Report[/cyan]", style="dim"))
+    console.print()
+    console.print(report)
     console.print()
     console.print(Rule(style="dim"))
 
@@ -1594,6 +1624,11 @@ async def main() -> None:
         if user_input.startswith("/think "):
             problem = user_input[7:].strip()
             await handle_think(problem)
+            continue
+
+        # /ceo — on-demand aggregate oversight report across Council + teams
+        if cmd_lower == "/ceo":
+            await handle_ceo_report()
             continue
 
         # /vision — VisionTeam pipeline for video/image files

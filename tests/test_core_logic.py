@@ -3957,3 +3957,302 @@ class TestFreeManagerSupervisedStage:
         assert roles_called[0] == "Drafter"
         assert roles_called[1] != "Drafter"
         assert result == f"output from {roles_called[1]}"
+
+
+# ── Team leadership: mandatory per-team Leader review (teams/leadership.py) ────
+
+class TestLeaderReview:
+    def test_approved_verdict_parses_clean(self, monkeypatch):
+        import teams.leadership as lead_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return '{"approved": true, "reasoning": "meets the brief", "revision_instruction": ""}'
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(lead_mod.leader_review("code", "build a login form", "<form>...</form>"))
+
+        assert verdict.approved is True
+        assert verdict.reasoning == "meets the brief"
+        assert verdict.revision_instruction == ""
+
+    def test_rejected_verdict_carries_revision_instruction(self, monkeypatch):
+        import teams.leadership as lead_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return (
+                '{"approved": false, "reasoning": "missing validation", '
+                '"revision_instruction": "add email format validation before submit"}'
+            )
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(lead_mod.leader_review("code", "build a login form", "<form>...</form>"))
+
+        assert verdict.approved is False
+        assert "email format validation" in verdict.revision_instruction
+
+    def test_unknown_team_fails_open_approved(self, monkeypatch):
+        # No Leader configured for this team -- absence of review must never
+        # block the team's work.
+        import teams.leadership as lead_mod
+
+        async def fail_if_called(model_id, **kwargs):
+            raise AssertionError("must not call a model for an unconfigured team")
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fail_if_called)
+        verdict = asyncio.run(lead_mod.leader_review("nonexistent_team", "x", "y"))
+
+        assert verdict.approved is True
+
+    def test_system_prompt_carries_team_mandate_not_just_raw_instruction(self, monkeypatch):
+        # Regression test for a live-caught bug (2026-07-16): the Router
+        # Leader rejected a CORRECT routing classification because it judged
+        # the output against the user's raw request ("write a prime-checking
+        # function") instead of Router's actual job (classify, don't solve).
+        # The system prompt must carry each team's real mandate so the
+        # Leader judges against the right bar, not the top-level request.
+        import teams.leadership as lead_mod
+
+        captured = {}
+
+        async def fake_generate(model_id, **kwargs):
+            captured["system"] = kwargs.get("system", "")
+            return '{"approved": true, "reasoning": "ok", "revision_instruction": ""}'
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fake_generate)
+        asyncio.run(lead_mod.leader_review(
+            "router", "write a prime-checking function", '{"task_type": "vibe_coding"}',
+        ))
+
+        system_lower = captured["system"].lower()
+        assert "classification" in system_lower
+        assert "not a solution to the user's request" in system_lower
+
+    def test_unparseable_response_fails_open_approved(self, monkeypatch):
+        import teams.leadership as lead_mod
+
+        async def fake_generate(model_id, **kwargs):
+            return "I approve of this, looks fine!"   # no JSON
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(lead_mod.leader_review("code", "x", "y"))
+
+        assert verdict.approved is True
+
+    def test_model_exception_fails_open_approved(self, monkeypatch):
+        # A down Leader must never block or fail the team it's reviewing.
+        import teams.leadership as lead_mod
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("provider outage")
+
+        monkeypatch.setattr(lead_mod, "generate_resilient", fake_generate)
+        verdict = asyncio.run(lead_mod.leader_review("code", "x", "y"))
+
+        assert verdict.approved is True
+
+    def test_every_team_in_task_json_has_a_configured_leader(self):
+        # Regression guard: the five specialist teams this project actually
+        # dispatches to (see core/imcp.py's TeamActivation) must each resolve
+        # to a real Leader model, or the mandatory review silently no-ops.
+        import teams.leadership as lead_mod
+
+        for team in ("brain", "code", "vision", "design", "router"):
+            assert team in lead_mod.TEAM_LEADERS
+
+    def test_log_verdict_writes_jsonl_and_never_raises(self, tmp_path, monkeypatch):
+        import teams.leadership as lead_mod
+
+        log_path = tmp_path / "leader_verdicts.jsonl"
+        monkeypatch.setattr(lead_mod, "_LOG_PATH", log_path)
+
+        verdict = lead_mod.LeaderVerdict(approved=False, reasoning="too slow", revision_instruction="optimize the query")
+        lead_mod.log_verdict("code", verdict)
+
+        lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["team"] == "code"
+        assert record["approved"] is False
+
+    def test_log_verdict_swallows_write_failures(self, monkeypatch):
+        import teams.leadership as lead_mod
+
+        monkeypatch.setattr(lead_mod, "_LOG_PATH", Path("Z:/nonexistent/impossible/path.jsonl"))
+        verdict = lead_mod.LeaderVerdict(approved=True, reasoning="fine", revision_instruction="")
+        lead_mod.log_verdict("code", verdict)   # must not raise
+
+
+class TestBaseTeamLeaderWiring:
+    @staticmethod
+    def _task_json():
+        from core.imcp import TaskJSON, Classification, TaskType, Complexity, TaskContext
+        return TaskJSON(
+            original_prompt="build a button",
+            refined_prompt="build a button",
+            classification=Classification(
+                primary_type=TaskType.VIBE_CODING,
+                complexity=Complexity.SIMPLE,
+                confidence=0.9,
+            ),
+            context=TaskContext(),
+        )
+
+    def test_approved_verdict_runs_execute_exactly_once(self, monkeypatch):
+        import teams.base_team as bt_mod
+
+        class _FakeTeam(bt_mod.BaseTeam):
+            team_name = "code"
+            calls = 0
+
+            async def _execute(self, task_json, instruction, iteration, extra):
+                self.calls += 1
+                return "final output"
+
+        async def fake_consult(team_name, instruction, result):
+            return result   # no-op passthrough, matches core/peer_consult.py's default behavior
+
+        from teams.leadership import LeaderVerdict
+
+        async def fake_leader_review_ok(team_name, instruction, result):
+            return LeaderVerdict(approved=True, reasoning="fine", revision_instruction="")
+
+        monkeypatch.setattr(bt_mod, "consult_if_unsure", fake_consult)
+        monkeypatch.setattr(bt_mod, "leader_review", fake_leader_review_ok)
+        monkeypatch.setattr(bt_mod, "log_verdict", lambda *a, **kw: None)
+
+        team = _FakeTeam()
+        result = asyncio.run(team.run(self._task_json(), "build a button"))
+
+        assert result == "final output"
+        assert team.calls == 1   # approved on the first pass -- no revision retry
+
+    def test_rejected_verdict_triggers_exactly_one_revision_retry(self, monkeypatch):
+        import teams.base_team as bt_mod
+        from teams.leadership import LeaderVerdict
+
+        instructions_seen: list[str] = []
+
+        class _FakeTeam(bt_mod.BaseTeam):
+            team_name = "code"
+
+            async def _execute(self, task_json, instruction, iteration, extra):
+                instructions_seen.append(instruction)
+                return f"attempt {len(instructions_seen)}"
+
+        async def fake_consult(team_name, instruction, result):
+            return result
+
+        verdicts = iter([
+            LeaderVerdict(approved=False, reasoning="missing validation", revision_instruction="add validation"),
+        ])
+
+        async def fake_leader_review(team_name, instruction, result):
+            return next(verdicts)
+
+        monkeypatch.setattr(bt_mod, "consult_if_unsure", fake_consult)
+        monkeypatch.setattr(bt_mod, "leader_review", fake_leader_review)
+        monkeypatch.setattr(bt_mod, "log_verdict", lambda *a, **kw: None)
+
+        team = _FakeTeam()
+        result = asyncio.run(team.run(self._task_json(), "build a button"))
+
+        # Exactly one revision retry -- no second Leader re-check that could loop.
+        assert result == "attempt 2"
+        assert len(instructions_seen) == 2
+        assert "add validation" in instructions_seen[1]
+
+
+# ── CEO oversight report (manager/ceo.py) ───────────────────────────────────────
+
+class TestCeoOversightReport:
+    def test_no_activity_returns_placeholder_without_calling_model(self, tmp_path, monkeypatch):
+        import manager.ceo as ceo_mod
+
+        monkeypatch.setattr(ceo_mod, "_SUPERVISOR_LOG", tmp_path / "missing_supervisor.jsonl")
+        monkeypatch.setattr(ceo_mod, "_LEADER_LOG", tmp_path / "missing_leader.jsonl")
+
+        class _FakeCouncil:
+            def status(self):
+                return {"total_calls": 0}
+
+        monkeypatch.setattr("manager.free_manager.free_manager_team", _FakeCouncil())
+
+        async def fail_if_called(model_id, **kwargs):
+            raise AssertionError("must not call the CEO model when there is no activity")
+
+        monkeypatch.setattr(ceo_mod, "generate_resilient", fail_if_called)
+
+        report = asyncio.run(ceo_mod.generate_oversight_report())
+        assert "no activity" in report.lower() or "nothing to evaluate" in report.lower()
+
+    def test_aggregates_logs_and_calls_ceo_model(self, tmp_path, monkeypatch):
+        import manager.ceo as ceo_mod
+
+        supervisor_log = tmp_path / "supervisor.jsonl"
+        leader_log = tmp_path / "leader.jsonl"
+        supervisor_log.write_text(
+            json.dumps({"stage": "Drafter", "recommend": "continue", "drift_detected": False}) + "\n",
+            encoding="utf-8",
+        )
+        leader_log.write_text(
+            json.dumps({"team": "code", "approved": False}) + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(ceo_mod, "_SUPERVISOR_LOG", supervisor_log)
+        monkeypatch.setattr(ceo_mod, "_LEADER_LOG", leader_log)
+
+        class _FakeCouncil:
+            def status(self):
+                return {"total_calls": 5, "call_counts": {"Drafter": 5}}
+
+        monkeypatch.setattr("manager.free_manager.free_manager_team", _FakeCouncil())
+
+        captured_prompt = {}
+
+        async def fake_generate(model_id, **kwargs):
+            captured_prompt["prompt"] = kwargs.get("prompt", "")
+            return "Everything is healthy. Code team had one rejection worth watching."
+
+        monkeypatch.setattr(ceo_mod, "generate_resilient", fake_generate)
+
+        report = asyncio.run(ceo_mod.generate_oversight_report())
+
+        assert "healthy" in report.lower()
+        assert '"code"' in captured_prompt["prompt"]
+        assert "Drafter" in captured_prompt["prompt"]
+
+    def test_model_failure_falls_back_to_raw_metrics(self, tmp_path, monkeypatch):
+        import manager.ceo as ceo_mod
+
+        supervisor_log = tmp_path / "supervisor.jsonl"
+        supervisor_log.write_text(
+            json.dumps({"stage": "Drafter", "recommend": "escalate", "drift_detected": True}) + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(ceo_mod, "_SUPERVISOR_LOG", supervisor_log)
+        monkeypatch.setattr(ceo_mod, "_LEADER_LOG", tmp_path / "missing_leader.jsonl")
+
+        class _FakeCouncil:
+            def status(self):
+                return {"total_calls": 3}
+
+        monkeypatch.setattr("manager.free_manager.free_manager_team", _FakeCouncil())
+
+        async def fake_generate(model_id, **kwargs):
+            raise RuntimeError("provider outage")
+
+        monkeypatch.setattr(ceo_mod, "generate_resilient", fake_generate)
+
+        report = asyncio.run(ceo_mod.generate_oversight_report())
+        assert "unavailable" in report.lower()
+        assert "Drafter" in report   # raw metrics still surfaced, not silently swallowed
+
+    def test_read_jsonl_missing_file_returns_empty_list(self, tmp_path):
+        import manager.ceo as ceo_mod
+        assert ceo_mod._read_jsonl(tmp_path / "does_not_exist.jsonl") == []
+
+    def test_read_jsonl_corrupt_file_returns_empty_list_not_raise(self, tmp_path):
+        import manager.ceo as ceo_mod
+        bad = tmp_path / "corrupt.jsonl"
+        bad.write_text("{not valid json at all", encoding="utf-8")
+        assert ceo_mod._read_jsonl(bad) == []

@@ -13,6 +13,7 @@ from loguru import logger
 from core.imcp import TaskJSON
 from core.peer_consult import consult_if_unsure
 from models.registry import registry, generate_resilient
+from teams.leadership import leader_review, log_verdict
 
 
 class _ResilientModel:
@@ -58,6 +59,25 @@ class BaseTeam(ABC):
         # (see core/peer_consult.py) and the model actually flagged low
         # confidence on part of its answer.
         result = await consult_if_unsure(self.team_name, instruction, result)
+
+        # Mandatory Leader sign-off (teams/leadership.py) -- unlike the
+        # CONFIDENCE-tag path above, this runs every time regardless of
+        # self-reported confidence. Bounded to one revision retry so a
+        # Leader that keeps rejecting can't loop the team forever.
+        verdict = await leader_review(self.team_name, instruction, result)
+        log_verdict(self.team_name, verdict)
+        if not verdict.approved:
+            logger.info(
+                f"[{self.team_name}] Leader sent work back: {verdict.reasoning}"
+            )
+            revised_instruction = (
+                f"{instruction}\n\n"
+                f"Your team Leader reviewed your previous attempt and sent it back "
+                f"with this required fix: {verdict.revision_instruction}"
+            )
+            result = await self._execute(task_json, revised_instruction, iteration, extra)
+            result = await consult_if_unsure(self.team_name, instruction, result)
+
         logger.info(
             f"[{self.team_name}] done | output_len={len(result)} chars"
         )

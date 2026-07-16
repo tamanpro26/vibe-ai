@@ -130,6 +130,25 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
         context_window=1_000_000,
         capabilities=["reasoning", "planning"],
     ),
+    # CEO — system-wide oversight above the Free Manager Council (see
+    # manager/ceo.py). Deliberately the single largest model in this entire
+    # registry: 550B parameters, live-verified 2026-07-16 direct against
+    # OpenRouter's real /api/v1/models catalog (not a secondhand list) and
+    # confirmed working with a real API call (19.9s, correct response).
+    # Reserved for aggregate oversight reports, NOT per-request use -- a
+    # 550B free-tier model in the path of every single Council response
+    # would defeat the whole point of a fast free-tier pipeline. This is
+    # exactly the right way to spend a slow/heavy model's budget: rarely,
+    # for judgment that actually needs the extra capability.
+    "nemotron_ultra_ceo": ModelDef(
+        model_id="nemotron_ultra_ceo",
+        provider="openrouter",
+        api_model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        team="manager",
+        role="CEO — system-wide oversight (on-demand reports only, not per-request)",
+        context_window=1_000_000,
+        capabilities=["reasoning", "oversight"],
+    ),
 
     # ── PROMPT REFINER TEAM (all free) ────────────────────────────────────
     "gpt_oss_120b_free_intent": ModelDef(
@@ -312,6 +331,24 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
         role="Bulk processor",
         context_window=128_000,
         capabilities=["bulk_generation", "test_writing", "boilerplate"],
+    ),
+    # Registered 2026-07-16 for teams/leadership.py's Code-team-leader
+    # candidate search: a real, currently-live OpenRouter free model
+    # (confirmed via direct /api/v1/models fetch, not a secondhand list),
+    # 1M context, coding-specialized. NOT used as the automatic team leader
+    # despite that -- verified live TWICE the same day and failed both times
+    # with "temporarily rate-limited upstream" (OpenRouter's own shared free
+    # pool for this popular model is oversubscribed, ~155s and ~183s before
+    # giving up). Manual-select only until it proves reliable; glm_47_cerebras
+    # holds the Code team Leader role instead (proven 0% failure rate).
+    "qwen3_coder_openrouter": ModelDef(
+        model_id="qwen3_coder_openrouter",
+        provider="openrouter",
+        api_model="qwen/qwen3-coder:free",
+        team="code",
+        role="Manual-select coder (live-verified 2026-07-16: real but currently oversubscribed upstream)",
+        context_window=1_048_576,
+        capabilities=["code_generation"],
     ),
 
     # ── VISION TEAM (all free) ────────────────────────────────────────────
