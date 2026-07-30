@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VibeAI Heat Monitor — Fire Alert Demo</title>
+  <style>
+    :root {
+      --bg: #05070a;
+      --panel: #0a1119;
+      --line: rgba(43, 232, 255, 0.15);
+      --cyan: #2be8ff;
+      --mint: #7dffb0;
+      --rose: #ff3f7f;
+      --amber: #ffb020;
+      --text: #d9f6fb;
+      --text-dim: #8fb3ba;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse at 50% 20%, #0a1420 0%, var(--bg) 60%);
+      color: var(--text);
+      font-family: ui-monospace, "IBM Plex Mono", monospace;
+      padding: 24px;
+    }
+    .panel {
+      width: min(480px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 28px;
+    }
+    h1 {
+      font-size: 15px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--cyan);
+      margin: 0 0 4px;
+    }
+    .sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin: 0 0 24px;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      margin-bottom: 18px;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      flex-shrink: 0;
+    }
+    .dot.high { background: var(--rose); box-shadow: 0 0 10px var(--rose); }
+    .dot.normal { background: var(--mint); box-shadow: 0 0 10px var(--mint); }
+    #statusText { font-size: 13px; }
+    button {
+      width: 100%;
+      font-family: inherit;
+      font-size: 13px;
+      letter-spacing: 1px;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 63, 127, 0.4);
+      background: transparent;
+      color: var(--rose);
+      cursor: pointer;
+    }
+    button:disabled {
+      color: var(--mint);
+      border-color: rgba(125, 255, 176, 0.4);
+      cursor: default;
+    }
+    button:hover:not(:disabled) { background: rgba(255, 63, 127, 0.1); }
+    .log {
+      margin-top: 18px;
+      max-height: 180px;
+      overflow-y: auto;
+      font-size: 11.5px;
+      color: var(--text-dim);
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .log div { padding: 3px 0; }
+    .note {
+      margin-top: 16px;
+      font-size: 11px;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>🔥 Fire Alert Demo</h1>
+    <p class="sub">Local-only test page for hardware/controller.py -- not part of the deployed site.</p>
+
+    <div class="status-row">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">Waiting for sensor event...</span>
+    </div>
+
+    <button id="subscribeBtn">🔔 Subscribe to fire alerts</button>
+
+    <div class="log" id="log"></div>
+
+    <p class="note">
+      Subscribes this browser to Web Push from the local server (127.0.0.1:8000).
+      Trigger a real event by heating the sensor past the threshold, or simulate one:<br />
+      <code>curl -X POST http://localhost:8000/api/sensor -H "Content-Type: application/json" -d "{\"message\":\"HIGH TEMPERATURE DETECTED\",\"temperature\":57}"</code>
+    </p>
+  </div>
+
+  <script>
+    const btn = document.getElementById('subscribeBtn')
+    const logEl = document.getElementById('log')
+    const statusDot = document.getElementById('statusDot')
+    const statusText = document.getElementById('statusText')
+
+    function log(msg) {
+      const line = document.createElement('div')
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`
+      logEl.prepend(line)
+    }
+
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+      const raw = atob(base64)
+      return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)))
+    }
+
+    async function subscribe() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        log('Push not supported in this browser.')
+        return
+      }
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        log('Notification permission denied.')
+        return
+      }
+      const registration = await navigator.serviceWorker.register('/sw.js')
+      await navigator.serviceWorker.ready
+
+      const { publicKey } = await fetch('/api/push/vapid-public-key').then((r) => r.json())
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      })
+      const res = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      })
+      if (!res.ok) throw new Error(`subscribe failed: ${res.status}`)
+      btn.textContent = '✅ Subscribed'
+      btn.disabled = true
+      log('Subscribed to fire alerts on this browser.')
+    }
+
+    btn.addEventListener('click', () => subscribe().catch((e) => log('Error: ' + e.message)))
+
+    // Page-visible confirmation in addition to the OS notification -- lets
+    // a judge watching the screen see the event land even if the system
+    // notification banner is easy to miss on a shared display.
+    navigator.serviceWorker?.addEventListener('message', (event) => {
+      if (event.data?.type !== 'push-received') return
+      log(`Push received: ${event.data.title} -- ${event.data.body}`)
+      const isHigh = /high/i.test(event.data.title)
+      statusDot.className = 'dot ' + (isHigh ? 'high' : 'normal')
+      statusText.textContent = event.data.title
+    })
+  </script>
+</body>
+</html>

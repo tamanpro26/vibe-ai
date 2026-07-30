@@ -18,7 +18,6 @@ import {
 import Sidebar from './Sidebar.jsx'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
-import { pushSubscriptionStatus, subscribeToPushAlerts } from './pushAlerts.js'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -58,7 +57,6 @@ export default function ChatApp() {
   const [manager, setManager] = useState(false)
   const [omni, setOmni] = useState(false)
   const [edge, setEdge] = useState(false)
-  const [pushStatus, setPushStatus] = useState('unsupported')
   const timerRef = useRef(null)
   const stopRef = useRef(false)
   const dragDepth = useRef(0)
@@ -106,19 +104,6 @@ export default function ChatApp() {
       clearInterval(id)
     }
   }, [])
-
-  useEffect(() => {
-    pushSubscriptionStatus().then(setPushStatus)
-  }, [])
-
-  const handleSubscribeAlerts = async () => {
-    try {
-      await subscribeToPushAlerts()
-      setPushStatus('subscribed')
-    } catch {
-      setPushStatus(await pushSubscriptionStatus())
-    }
-  }
 
   const active = chats.find((c) => c.id === activeId) || null
 
@@ -526,23 +511,6 @@ export default function ChatApp() {
                 </button>
               ))}
             </div>
-            {pushStatus !== 'unsupported' && (
-              <button
-                type="button"
-                className={`alert-btn${pushStatus === 'subscribed' ? ' is-on' : ''}`}
-                onClick={pushStatus === 'unsubscribed' ? handleSubscribeAlerts : undefined}
-                disabled={pushStatus !== 'unsubscribed'}
-                title={
-                  pushStatus === 'subscribed'
-                    ? 'Fire alerts on: this browser gets notified if the heat sensor trips'
-                    : pushStatus === 'denied'
-                      ? 'Notifications blocked in browser settings'
-                      : 'Get notified if the heat sensor detects a fire'
-                }
-              >
-                {pushStatus === 'subscribed' ? '🔔 Alerts on' : pushStatus === 'denied' ? '🔕 Blocked' : '🔔 Fire alerts'}
-              </button>
-            )}
             <span className={`engine-badge${live || manager || omni || edge ? ' is-live' : ''}`}>
               {live
                 ? 'LIVE ENGINE'

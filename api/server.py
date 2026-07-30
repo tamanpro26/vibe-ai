@@ -5,6 +5,7 @@ FastAPI server with:
   POST /api/sensor        — edge-triggered hardware alerts (school heat monitor)
   GET  /api/push/vapid-public-key — Web Push public key
   POST /api/push/subscribe        — register a browser for fire alerts
+  GET  /demo, /sw.js      — local-only fire-alert demo page (not deployed)
   POST /api/video         — video file upload → .frames pipeline
   POST /api/screenshot    — screenshot → vision team
   GET  /api/health
@@ -27,6 +28,7 @@ from fastapi import (
     UploadFile, File, Form, Depends, Header, Query, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -117,7 +119,6 @@ app.add_middleware(
         "http://localhost:3000", "http://127.0.0.1:3000",   # web GUI dev server
         "http://localhost:5173", "http://127.0.0.1:5173",   # vite previews
         "vscode-webview://*",                                # VS Code extension
-        "https://vibeai-showcase.vercel.app",                # showcase site (push subscribe)
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
@@ -245,6 +246,24 @@ async def push_subscribe(req: PushSubscribeRequest) -> dict:
         raise HTTPException(400, "subscription.endpoint is required")
     await push_store.add(req.subscription)
     return {"ok": True}
+
+
+# ── Local-only fire-alert demo page ────────────────────────────────────────
+# Standalone, not part of the deployed showcase site: this is what actually
+# gets demoed for hardware/controller.py, served same-origin by this exact
+# server so the demo needs no separate dev server, no CORS config, and no
+# public deployment -- it only needs `uvicorn api.server:app` running.
+DEMO_DIR = Path(__file__).resolve().parent.parent / "hardware" / "demo"
+
+
+@app.get("/demo")
+async def fire_alert_demo() -> FileResponse:
+    return FileResponse(DEMO_DIR / "index.html")
+
+
+@app.get("/sw.js")
+async def demo_service_worker() -> FileResponse:
+    return FileResponse(DEMO_DIR / "sw.js", media_type="application/javascript")
 
 
 # ── REST: standalone image generation ─────────────────────────────────────────

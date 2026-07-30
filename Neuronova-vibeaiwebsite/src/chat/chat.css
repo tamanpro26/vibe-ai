@@ -331,42 +331,6 @@
   background: rgba(43, 232, 255, 0.1);
 }
 
-/* Fire-alert Web Push opt-in (school heat monitor). Three states: an
-   actionable unsubscribed pill, a quiet confirmed "on" state once
-   subscribed (no reason to invite a re-click), and a muted blocked state
-   the user can't fix from here (browser-level permission, not ours to
-   re-prompt). */
-.alert-btn {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 1px;
-  color: var(--rose);
-  background: none;
-  border: 1px solid rgba(255, 63, 127, 0.4);
-  border-radius: 3px;
-  padding: 5px 9px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.18s ease, box-shadow 0.18s ease;
-}
-
-.alert-btn:hover:not(:disabled) {
-  background: rgba(255, 63, 127, 0.1);
-  box-shadow: 0 0 12px -4px var(--rose);
-}
-
-.alert-btn.is-on {
-  color: var(--mint);
-  border-color: rgba(125, 255, 176, 0.4);
-  cursor: default;
-}
-
-.alert-btn:disabled:not(.is-on) {
-  color: var(--text-faint);
-  border-color: var(--line);
-  cursor: not-allowed;
-}
-
 .engine-badge {
   font-family: var(--font-mono);
   font-size: 9.5px;
