@@ -131,6 +131,19 @@ async def ssh_exec(
             f"Active connections: {active if active else ['none — use ssh_connect first']}"
         )
 
+    # Found in code review (2026-07-13): ssh_exec had none of bash()'s
+    # destructive-command tripwires -- a "deploy to server" task grants SSH
+    # tools, and commands blocked locally (sudo rm -rf, shutdown, mkfs, ...)
+    # executed unfiltered over SSH. Reusing ToolExecutor's own list (a class
+    # attribute, no instantiation needed) rather than a second copy here --
+    # two independent copies of a security tripwire list drifting apart is
+    # exactly the failure shape documented repeatedly elsewhere in this
+    # codebase's own history.
+    from tools.agent_tools import ToolExecutor
+    for pattern in ToolExecutor._BLOCKED_RE:
+        if pattern.search(command):
+            return f"ERROR: Blocked command pattern detected: {command[:60]}"
+
     try:
         result = await asyncio.wait_for(
             sess._conn.run(command, check=False),

@@ -55,11 +55,19 @@ class OllamaConnector(BaseModelConnector):
     No API key required — Ollama uses a dummy key.
     """
 
+    # Longer than the other connectors' default_timeout_ms (30s): unlike a
+    # stalled cloud provider, a local model's first call can legitimately take
+    # ~45s loading into VRAM (documented elsewhere in this codebase) before it
+    # ever starts generating -- the generic 30s floor other connectors use
+    # would cut off that cold start, not just a genuine hang.
+    _TIMEOUT_S = 90
+
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
         self._client = AsyncOpenAI(
             api_key="ollama",   # Ollama ignores the key value
             base_url=settings.ollama_base_url,
+            timeout=self._TIMEOUT_S,
         )
 
     async def _call(

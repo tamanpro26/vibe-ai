@@ -1,8 +1,9 @@
 import SectionHeader from './SectionHeader.jsx'
 import { PROVIDERS } from '../data.js'
+import CountUp from './CountUp.jsx'
 
 const NUMBERS = [
-  { n: '439', label: 'automated tests', note: 'all offline & deterministic — engineered, not demoed' },
+  { n: '475', label: 'automated tests', note: 'all offline and deterministic. Engineered, not demoed.' },
   { n: '38', label: 'model registry entries', note: 'model × provider × role slots for redundancy' },
   { n: '10', label: 'free-tier providers', note: 'no single quota can stop the system' },
   { n: '2', label: 'interfaces', note: 'Rich terminal UI + FastAPI REST/WebSocket server' },
@@ -15,13 +16,15 @@ export default function Engineering() {
     <section className="section section-alt" id="engineering">
       <div className="container">
         <SectionHeader index="06" label="ENGINEERING" title="Tested, not just demoed.">
-          The claim isn't "it works on my machine" — it's 439 deterministic tests that run with
+          The claim isn't "it works on my machine". It's 475 deterministic tests that run with
           the network unplugged.
         </SectionHeader>
         <div className="num-grid">
           {NUMBERS.map((x, i) => (
-            <div className="num-card" key={x.label} data-reveal style={{ transitionDelay: `${i * 0.08}s` }}>
-              <span className="num-big">{x.n}</span>
+            <div className="num-card spotlight-card" key={x.label} data-reveal style={{ transitionDelay: `${i * 0.08}s` }}>
+              <span className="num-big">
+                <CountUp value={x.n} />
+              </span>
               <span className="num-label">{x.label}</span>
               <span className="num-note">{x.note}</span>
             </div>
@@ -51,7 +54,7 @@ export default function Engineering() {
             </div>
             <h3 className="eng-col-title eng-col-title-gap">STATUS</h3>
             <p className="eng-note">
-              Proprietary codebase — all rights reserved. The API server is a code-execution
+              Proprietary codebase, all rights reserved. The API server is a code-execution
               surface by design and binds to localhost only; there is deliberately no public
               live demo.
             </p>

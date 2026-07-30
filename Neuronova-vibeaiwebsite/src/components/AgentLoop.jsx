@@ -4,7 +4,7 @@ const STEPS = [
   {
     n: '1',
     title: 'Task in plain English',
-    desc: '"Build a landing page", "fix this import bug" — no structured prompt required.',
+    desc: '"Build a landing page", "fix this import bug". No structured prompt required.',
   },
   {
     n: '2',
@@ -14,7 +14,7 @@ const STEPS = [
   {
     n: '3',
     title: 'Deterministic verifier battery',
-    desc: 'Not vibes — checks. A deterministic pass scans the output for concrete defects:',
+    desc: 'Not vibes. Checks. A deterministic pass scans the output for concrete defects:',
     checks: ['broken imports', 'placeholder stubs', 'dead images', 'unstyled CSS'],
   },
   {
@@ -25,7 +25,7 @@ const STEPS = [
   },
   {
     n: '5',
-    title: 'Reports done — verified',
+    title: 'Reports done, verified',
     desc: 'Only after the battery passes does the agent call the task complete.',
   },
 ]
@@ -35,7 +35,7 @@ export default function AgentLoop() {
     <section className="section section-alt" id="agent">
       <div className="container">
         <SectionHeader index="04" label="AUTONOMY" title="An agent that checks its own work.">
-          <code className="inline-code">core/agent_loop.py</code> — an autonomous coding agent
+          <code className="inline-code">core/agent_loop.py</code> is an autonomous coding agent
           that treats "done" as something to prove, not declare.
         </SectionHeader>
         <ol className="agent-steps">

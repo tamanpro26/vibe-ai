@@ -19,7 +19,7 @@ export default function Council() {
         </SectionHeader>
         <div className="council-track" data-reveal>
           {COUNCIL_STAGES.map((s, i) => (
-            <div className={`council-stage${i === active ? ' is-active' : ''}`} key={s.name}>
+            <div className={`council-stage spotlight-card${i === active ? ' is-active' : ''}`} key={s.name}>
               <span className="council-n">{s.n}</span>
               <h3 className="council-name">{s.name}</h3>
               <p className="council-desc">{s.desc}</p>

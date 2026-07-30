@@ -72,6 +72,19 @@ class ModelDef:
     # while using different keys — e.g. claude_opus_4_6 uses anthropic_api_key_2
     # instead of the intentionally-invalid anthropic_api_key.
     api_key_field:  str | None = None
+    # Provider-specific request-body fields merged verbatim into the OpenAI SDK
+    # call via its native extra_body= kwarg (deep-merged, this wins on key
+    # collisions). Concept ported from jcode v0.54.4 (MIT). The headline case:
+    # NVIDIA NIM DeepSeek models only enable their thinking phase when the
+    # request carries chat_template_kwargs -- without it they answer with
+    # reasoning OFF (or hang). A bad value here is logged and ignored, never
+    # fails the call.
+    extra_body:     dict | None = None
+    # Per-request total timeout override (seconds). The non-streaming
+    # equivalent of jcode's stream_idle_timeout: a silently-thinking reasoning
+    # model can exceed the default 30s client timeout before emitting anything,
+    # so reasoning seats get a longer ceiling. None = the connector default.
+    request_timeout_s: float | None = None
 
 
 MODEL_REGISTRY: dict[str, ModelDef] = {
@@ -310,6 +323,14 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
         role="Deep fallback (different provider, thin ~40 RPM quota)",
         context_window=1_000_000,
         capabilities=["code_generation", "reasoning", "agentic_coding"],
+        # jcode Feature 1 headline case: NIM DeepSeek enables its thinking phase
+        # only when the request carries chat_template_kwargs. NOT live-verified
+        # here (NVIDIA_API_KEY unset in this environment) -- value is from the
+        # jcode v0.54.4 doc; verify with a live call once a key is added (assert
+        # usage.reasoning_tokens > 0 with vs. without). request_timeout gives
+        # the silent thinking phase room past the 30s client default.
+        extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "medium"}},
+        request_timeout_s=120.0,
     ),
     # Manual-selection-only (see provider docstring above) — NOT in the
     # automatic fallback chain out of respect for Mistral's own eval/prototype-
@@ -512,6 +533,30 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
         role="Edge micro-router",
         context_window=32_768,                   # verified via ollama /api/show
         capabilities=["routing", "edge", "micro_tasks", "on_device"],
+    ),
+
+    # Local OmniRoute gateway (github.com/diegosouzapw/OmniRoute), run
+    # manually via `npm run dev` in a separate checkout, NOT started by
+    # VibeAI. Live-verified 2026-07-28 against a local instance on :20128
+    # with 6 providers connected -- "auto/best-coding" resolved to
+    # nvidia/llama-3.1-nemotron-nano-vl-8b-v1, real content, finish_reason
+    # "stop", real token usage. Manual-select only, same treatment as
+    # qwen3_coder_openrouter above: excluded from _LLM_PROVIDERS (models/
+    # registry.py) so it is never auto-eligible for escalation/peer-consult
+    # pools, since the local server is not guaranteed to be running. Most of
+    # OmniRoute's connected providers (groq, cerebras, gemini, nvidia) are
+    # ALSO reached directly elsewhere in this registry -- the real value here
+    # is OmniRoute's own "auto/*" meta-routing across whichever of its
+    # connected providers is currently available, which VibeAI has no direct
+    # equivalent for.
+    "omniroute_auto_coding": ModelDef(
+        model_id="omniroute_auto_coding",
+        provider="omniroute",
+        api_model="auto/best-coding",
+        team="code",
+        role="Manual-select fallback -- OmniRoute's own best-available-coding-model router",
+        context_window=1_048_576,
+        capabilities=["coding", "tool_calling", "reasoning"],
     ),
 }
 

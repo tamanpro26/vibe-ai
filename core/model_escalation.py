@@ -49,6 +49,29 @@ from models.registry import _LLM_PROVIDERS
 
 _AGENTIC_CAPS = {"code_generation", "agentic_coding"}
 
+# Phase 1, UPGRADE_ROADMAP.md §4a ("leave the gap empty" / gap principle):
+# register_dynamic_ollama() grants full agentic_coding capability to ANY
+# locally-pulled tag regardless of size -- confirmed live (2026-07-16) that
+# this let a 0.8B model get escalated into continuing a precision edit-
+# continuation task, where it only ever managed a bare list_dir/read_file,
+# never a real edit. qwen25_3b_ollama (the STATIC router entry) was never
+# the gap -- its capabilities are routing/edge-only, already excluded by
+# _AGENTIC_CAPS above. The gap is specifically DYNAMIC discovery blindly
+# trusting any tag. Better to have no local-model candidate at all (the
+# existing "all fallbacks exhausted" path already ends the run gracefully)
+# than to reach one with no realistic chance of finishing the step.
+_MIN_AGENTIC_MODEL_SIZE_B = 7.0
+_SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*b(?:[^a-z]|$)", re.IGNORECASE)
+
+
+def _parse_model_size_b(tag: str) -> float | None:
+    """Extract a parameter-count-in-billions indicator from an Ollama tag
+    (e.g. "qwen3.5:0.8b" -> 0.8, "mystery-coder:13b" -> 13.0). Returns None
+    if the tag has no parseable size -- callers should fail OPEN (include
+    the candidate) on None, not exclude on ambiguity."""
+    m = _SIZE_RE.search(tag)
+    return float(m.group(1)) if m else None
+
 # Prefix for auto-discovered Ollama entries, so they're recognisable in logs
 # and never collide with a hand-written model_id in models_config.py.
 _DYNAMIC_OLLAMA_PREFIX = "ollama_escalation_"
@@ -114,6 +137,15 @@ async def agentic_candidates(exclude: set[str]) -> list[str]:
     pool.sort(key=lambda mid: MODEL_REGISTRY[mid].context_window, reverse=True)
 
     for tag in await discover_ollama_tags():
+        size_b = _parse_model_size_b(tag)
+        if size_b is not None and size_b < _MIN_AGENTIC_MODEL_SIZE_B:
+            logger.info(
+                f"[escalation] skipping '{tag}' ({size_b}B) for the agentic pool — "
+                f"below {_MIN_AGENTIC_MODEL_SIZE_B}B, no realistic chance at a real "
+                f"edit/tool-call continuation (leave the gap empty rather than "
+                f"reach a candidate known not to finish the step)"
+            )
+            continue
         mid = register_dynamic_ollama(tag)
         if mid not in exclude and mid not in pool:
             pool.append(mid)

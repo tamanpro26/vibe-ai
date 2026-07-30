@@ -1,75 +1,55 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext } from 'react'
+import { ClerkProvider, useUser, useClerk, useAuth as useClerkAuth } from '@clerk/clerk-react'
 
 /*
- * Demo-only client-side auth. Users live in this browser's localStorage;
- * passwords are salted + SHA-256 hashed so nothing is stored in plain text.
- * Swap `signup`/`login` for calls to the real VibeAI FastAPI server when
- * the backend auth endpoints exist.
+ * Real auth via Clerk, replacing the old localStorage-only demo (accounts
+ * lived only in one browser, no recovery, no cross-device session).
+ *
+ * useAuth() keeps the SAME shape the rest of the app already consumed
+ * ({ user: { id, name, email } | null, logout }) so App.jsx, ChatApp.jsx and
+ * Sidebar.jsx needed no changes -- only this file and AuthPage.jsx (which now
+ * renders Clerk's own <SignIn>/<SignUp>) changed. `login`/`signup` are gone:
+ * Clerk's prebuilt components own that flow directly.
  */
 
-const USERS_KEY = 'vibeai_users'
-const SESSION_KEY = 'vibeai_session'
-
-const loadUsers = () => JSON.parse(localStorage.getItem(USERS_KEY) || '[]')
-const saveUsers = (users) => localStorage.setItem(USERS_KEY, JSON.stringify(users))
-
-async function hashPassword(password, salt) {
-  const data = new TextEncoder().encode(`${salt}:${password}`)
-  const digest = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function randomSalt() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function loadSession() {
-  const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null')
-  if (!s) return null
-  const user = loadUsers().find((u) => u.id === s.userId)
-  return user ? { id: user.id, name: user.name, email: user.email } : null
-}
+const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
 const AuthCtx = createContext(null)
 
+function AuthBridge({ children }) {
+  const { user: clerkUser, isLoaded } = useUser()
+  const { signOut } = useClerk()
+  // getToken() mints a short-lived session JWT on demand; this is what proves
+  // to api/chat.js that a request came from a real logged-in browser, not an
+  // anonymous script hitting our provider-key-holding endpoint directly.
+  const { getToken } = useClerkAuth()
+
+  const user = clerkUser
+    ? {
+        id: clerkUser.id,
+        name: clerkUser.fullName || clerkUser.firstName || clerkUser.username || 'there',
+        email: clerkUser.primaryEmailAddress?.emailAddress || '',
+      }
+    : null
+
+  return (
+    <AuthCtx.Provider value={{ user, isLoaded, logout: () => signOut(), getToken }}>
+      {children}
+    </AuthCtx.Provider>
+  )
+}
+
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(loadSession)
-
-  const signup = async (name, email, password) => {
-    const users = loadUsers()
-    if (users.some((u) => u.email === email.toLowerCase())) {
-      throw new Error('An account with this email already exists.')
-    }
-    const salt = randomSalt()
-    const record = {
-      id: crypto.randomUUID(),
-      name: name.trim(),
-      email: email.toLowerCase(),
-      salt,
-      hash: await hashPassword(password, salt),
-      createdAt: Date.now(),
-    }
-    saveUsers([...users, record])
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ userId: record.id }))
-    setUser({ id: record.id, name: record.name, email: record.email })
+  if (!PUBLISHABLE_KEY) {
+    throw new Error(
+      'Missing VITE_CLERK_PUBLISHABLE_KEY. Add it to Neuronova-vibeaiwebsite/.env (get it from dashboard.clerk.com -> API Keys).',
+    )
   }
-
-  const login = async (email, password) => {
-    const record = loadUsers().find((u) => u.email === email.toLowerCase())
-    if (!record) throw new Error('No account found for this email.')
-    const hash = await hashPassword(password, record.salt)
-    if (hash !== record.hash) throw new Error('Incorrect password.')
-    localStorage.setItem(SESSION_KEY, JSON.stringify({ userId: record.id }))
-    setUser({ id: record.id, name: record.name, email: record.email })
-  }
-
-  const logout = () => {
-    localStorage.removeItem(SESSION_KEY)
-    setUser(null)
-  }
-
-  return <AuthCtx.Provider value={{ user, signup, login, logout }}>{children}</AuthCtx.Provider>
+  return (
+    <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="#/">
+      <AuthBridge>{children}</AuthBridge>
+    </ClerkProvider>
+  )
 }
 
 export const useAuth = () => useContext(AuthCtx)

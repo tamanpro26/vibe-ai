@@ -25,6 +25,8 @@ class OpenRouterConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
         self._client = AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
@@ -32,6 +34,7 @@ class OpenRouterConnector(BaseModelConnector):
                 "HTTP-Referer": "https://vibe-ai.local",
                 "X-Title": "VibeAI System",
             },
+            timeout=settings.default_timeout_ms / 1000,
         )
 
     async def _call(

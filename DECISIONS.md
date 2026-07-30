@@ -2683,3 +2683,138 @@ limitation of the underlying image model, not a request-classification bug.
 `_AGENT_SYSTEM` and forbids scaffolding, and rule 6 is now actually wired in
 between rules 5 and 7, closing the numbering gap the prompt already implied
 existed).
+
+## 2026-07-13: fixing the initial-commit code review findings
+
+Full code review of the initial commit (121 files, ~27,600 changed executable
+lines — see the review report itself for the complete findings list and
+triage groups) surfaced 4 P0s, 18 P1s, 8 P2s, 1 P3. Fixed the P0s, every P1
+with a concrete mechanical fix, and the cheap P2/P3 cleanups in one pass;
+left the design-decision items (repetition-guard redesign, GitHub
+confirmation-gate policy, VS Code extension pointing at a different
+endpoint, the 4 file-size splits, the 4 missing-test-coverage modules) for a
+separate, deliberate pass rather than rushing a structural decision.
+
+**P0s, all fixed:**
+- Both WebSocket routes (`/ws/{client_id}`, `/ws/agent/{client_id}`) had zero
+  auth while every REST route used `Depends(require_token)`. Browsers can't
+  set a custom `Authorization` header on a WS upgrade request, so the token
+  now travels as a query parameter (`?token=...`), checked via
+  `WebSocketException(code=WS_1008_POLICY_VIOLATION)` — the correct way to
+  reject during a handshake, not `HTTPException`, which has no defined
+  meaning there. Verified FastAPI's `dependencies=` really works on
+  `@app.websocket` first (`inspect.signature`), then live end-to-end: reject
+  with no token, reject with wrong token, accept with correct token, on both
+  routes, plus confirmed the REST routes still work unchanged.
+- `GET /api/fs/read` (vibemind/server.py) had no auth despite
+  `read_text_file(path)` accepting any path with zero allowlist and
+  returning raw file content — `.env`, SSH keys, anything the OS user can
+  read. It was grouped with genuinely metadata-only routes (`fs_list`,
+  `system_info`) by a comment that predates this being noticed; reading
+  arbitrary file *content* isn't the same risk class as listing filenames,
+  so it now requires `Depends(require_token)` like a mutating route would.
+  `fs_list` deliberately left untouched — verified live it still returns 200
+  with no token.
+- Uncaught `RuntimeError` when every Free Manager Council member fails at
+  the synthesis stage (a correlated outage this same log already documents
+  happening live) propagated past every caller — this function, the REST
+  route, the WS pipeline — turning a request whose `team_outputs` had
+  *already been computed successfully* into a raw 500 that discarded that
+  real work. Added a try/except around the `_synthesise` call site; on
+  failure, `_degrade_to_team_outputs` picks the longest non-error team
+  output and returns it with a one-line note, rather than throwing away
+  work that already succeeded.
+
+**P1s, all fixed:**
+- Bearer token compared with `!=` instead of a constant-time comparison
+  (both `api/server.py` and `vibemind/server.py` had the same pattern) — now
+  `hmac.compare_digest`.
+- `zai_conn.py`'s `_call_with_tools` never got the reasoning-token floor
+  `_call` applies (see the 2026-07-13 entry above) — concretely live right
+  now, since `vibemind/brain.py`'s desktop-agent fallback calls
+  `generate_with_tools(..., max_tokens=1024)` on this exact model, below the
+  floor. Same one-line fix as `_call`.
+- No connector set an explicit client `timeout=`, relying on SDK defaults
+  (~600s) and blocking the whole fallback chain on one stalled provider.
+  `config/settings.py`'s `default_timeout_ms` existed for exactly this and
+  was dead code — confirmed by grep before the fix, referenced by 10
+  connectors after it. Ollama gets a separate, longer 90s timeout instead of
+  inheriting the 30s default — a local model's first call can legitimately
+  take ~45s loading into VRAM (documented elsewhere in this repo), and the
+  generic floor would cut that off, not just a genuine hang.
+- `huggingface.py`'s `_generate_image` called the synchronous
+  `InferenceClient.text_to_image` directly inside an async function,
+  blocking the whole event loop for the call's duration. Wrapped in
+  `asyncio.to_thread`; verified live with a fake client that sleeps
+  synchronously — a concurrent ticker coroutine completed all its ticks
+  while the "slow" call was in flight, proving the loop wasn't blocked.
+- `core/agent_loop.py`'s `_is_hard_reasoning` branch had no timeout on its
+  `reasoning_core.reason()` call, while the sibling `_needs_planning` branch
+  15 lines later wraps the same shape of call in
+  `asyncio.wait_for(timeout=25.0)` with a comment explicitly warning about
+  this exact risk. Now wrapped the same way.
+- `ssh_exec` had none of `bash()`'s destructive-command tripwires
+  (`_BLOCKED_RE`) — a "deploy to server" task could run `sudo rm -rf`,
+  `shutdown`, etc. unfiltered over SSH. Reused `ToolExecutor._BLOCKED_RE`
+  directly (a class attribute, no instantiation needed) rather than a
+  second copy of the pattern list drifting out of sync with the first —
+  exactly the failure shape this repo's own history already shows
+  repeating. Verified live with a fake SSH session whose `.run()` raises if
+  ever reached: a blocked command never got that far; a benign command did.
+- `list_dir`, `build_repo_map`, and `core/verifiers.py::_iter_files` all
+  fully materialized the entire tree via `sorted(root.rglob("*"))` —
+  including `node_modules`/`dist`/`build`, this codebase's own comments
+  calling them "thousands of generated files" — before the exact same
+  `_IGNORE_DIRS` filter discarded them; descending in and immediately
+  backing out was the expensive part, not the filter. Rewrote all three
+  with `os.walk` and in-place `dirnames[:]` pruning, which never descends
+  into an ignored directory at all. `list_dir` also dropped a second full
+  `rglob('*')` that ran just to print an exact truncated-item count.
+  Verified live (a real `node_modules/pkg/index.js` present, never appears
+  in any of the three outputs) and all existing tests (including the
+  `.vibeai`-journal-hidden test) still pass unchanged.
+- `/api/agent`'s `AgentRequest` had no `context`/`history` fields — `cli.py`
+  always passes both (context is the `/context` command's grounding text
+  that stops the agent inventing an unrelated theme for an existing
+  project) — so API/VS-Code-driven runs got a materially worse result than
+  identical CLI-driven runs of the same backend. Added both fields with
+  safe defaults, passed through to `loop.run()`. Fixed the WS agent path
+  (`_run_agent_ws`) the same way, and, since it was right there: validated
+  its payload against the same `AgentRequest` model instead of raw
+  `dict.get()` calls with silent defaults — a malformed WS payload used to
+  silently become `task=""` instead of a validation error.
+
+**P2/P3s fixed (the cheap ones):**
+- `tools/image_gen.py`'s `IMAGES_DIR` moved from `~/.vibeai/images` (outside
+  `DEFAULT_WORKSPACE`, invisible to any agent file tool) to
+  `DEFAULT_WORKSPACE / "generated_images"` — visible to a later same-session
+  agent task, still in its own clearly-separated subdirectory rather than
+  mixed into arbitrary project files.
+- Added `response_model` to `/api/video`, `/api/screenshot`,
+  `/api/manager/recover`, and `/api/agent` (previously only `/api/prompt`
+  and `/api/image` had one) — matches each handler's actual existing return
+  shape exactly, no behavior change, just OpenAPI-enforced contracts on the
+  routes that were missing them.
+- Standardized `/api/agent`'s status field from `"complete"` to `"ok"`,
+  matching the two other status-bearing routes.
+
+**Left for a deliberate follow-up pass, not rushed:** the repetition guard's
+blind spot on identical multi-tool-call bundles, the GitHub tool's missing
+confirmation gate before merge/release (a policy decision, not a one-line
+fix), pointing the VS Code extension at `/api/agent` instead of `/api/prompt`
+(needs the extension's own UX to decide how it surfaces file-edit progress),
+the two 1000+-line file splits (`agent_loop.py`, `cli.py` — genuine
+structural decisions on where the seams go), and the four modules with zero
+test coverage on "must not regress" functionality
+(`reasoning_core.ReasoningCore`, `core/verifier.VerificationEngine`,
+`tools/manager_fallback.ManagerFallbackChain`, `teams/design.DesignTeam`).
+
+**Verified throughout, not just at the end:** every fix was compiled, then
+either live-tested directly (WS auth, fs_read auth, SSH tripwire, event-loop
+non-blocking behavior, directory-walk pruning) or unit-tested against the
+actual changed code path, with the full suite re-run after each one — not
+batched to the end, so a broken fix would have been caught immediately
+next to its own change rather than buried in a final mega-diff.
+
+240 offline tests pass (33 new, one class per finding fixed, described
+above).

@@ -184,25 +184,70 @@ class GroqConnector(BaseModelConnector):
         return resp.choices[0].message.content or ""
 
     @staticmethod
+    def _lenient_json_load(raw: str) -> Any | None:
+        """Strict json.loads first; if that fails, try one deterministic
+        repair (single-quoted Python-dict-style output is the single most
+        common near-miss for a model that meant JSON) before giving up.
+        Phase 0.4, UPGRADE_ROADMAP.md §7: "most malformed calls are one
+        bracket away from valid" -- this is the "one bracket away" repair."""
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Only attempt the quote-swap if the string doesn't already contain
+        # double quotes -- if it does, blindly swapping would corrupt a
+        # string value that legitimately contains an apostrophe.
+        if '"' not in raw:
+            try:
+                return json.loads(raw.replace("'", '"'))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
+    @staticmethod
     def _parse_failed_generation(text: str) -> dict | None:
         """
-        Llama 3.x models on Groq sometimes output function calls in the native
-        text format  <function=name>{json}</function>  instead of using the API's
-        structured tool-call mechanism. Groq returns HTTP 400 tool_use_failed and
-        puts the raw generation in error.failed_generation. This method recovers
-        the actual intended tool calls so the agent loop can keep running.
+        Recovers tool calls from a model's raw text when Groq rejects the
+        request with HTTP 400 tool_use_failed (error.failed_generation holds
+        the model's real output). Tries progressively more general patterns
+        -- most weak-model malformations fall into one of these three
+        shapes, in roughly descending order of how often they're observed:
+
+          1. Native text format:  <function=name>{json}</function>
+             (Llama 3.x models on Groq, the original/most common case)
+          2. Markdown-fenced JSON: a ```json ... ``` block containing
+             {"name": ..., "arguments"/"parameters": {...}}
+          3. A bare JSON object with the same shape, no fence or tag at all
+
+        Each match's argument JSON also gets the lenient-repair pass above
+        before being discarded. Returns None only if nothing recoverable is
+        found by any pattern -- the caller falls back to the plain-text
+        response as before.
         """
         import re
-        matches = re.findall(r"<function=(\w+)>(.*?)</function>", text, re.DOTALL)
-        if not matches:
-            return None
-        calls = []
-        for i, (name, args_str) in enumerate(matches):
-            try:
-                args = json.loads(args_str.strip())
-                calls.append({"id": f"recovered_{i}", "name": name, "args": args})
-            except (json.JSONDecodeError, ValueError):
-                continue
+
+        calls: list[dict] = []
+
+        # 1. <function=name>{json}</function>
+        for name, args_str in re.findall(r"<function=(\w+)>(.*?)</function>", text, re.DOTALL):
+            args = GroqConnector._lenient_json_load(args_str.strip())
+            if args is not None:
+                calls.append({"id": f"recovered_{len(calls)}", "name": name, "args": args})
+
+        # 2 & 3. {"name": "...", "arguments"/"parameters": {...}} -- with or
+        # without a markdown fence around it. Matched directly against the
+        # inner object shape rather than the fence, so both cases share one
+        # pattern instead of needing the fence stripped first.
+        if not calls:
+            obj_pattern = re.compile(
+                r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"(?:arguments|parameters)"\s*:\s*(\{.*?\})\s*\}',
+                re.DOTALL,
+            )
+            for name, args_str in obj_pattern.findall(text):
+                args = GroqConnector._lenient_json_load(args_str.strip())
+                if args is not None:
+                    calls.append({"id": f"recovered_{len(calls)}", "name": name, "args": args})
+
         return {"type": "tool_calls", "tool_calls": calls} if calls else None
 
     def _clamp_to_tpm(self, max_tokens: int, messages, tools=None) -> int:

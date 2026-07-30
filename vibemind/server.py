@@ -13,6 +13,7 @@ is restricted to the known local Vite dev origins.
 """
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 import tempfile
@@ -54,7 +55,7 @@ def _is_localhost_bind() -> bool:
 async def require_token(authorization: str | None = Header(default=None)) -> None:
     token = os.getenv("VIBEMIND_API_TOKEN", "")
     if token:
-        if authorization != f"Bearer {token}":
+        if not (authorization and hmac.compare_digest(authorization, f"Bearer {token}")):
             raise HTTPException(status_code=401, detail="Missing or invalid bearer token")
         return
     if not _is_localhost_bind():
@@ -206,9 +207,17 @@ async def voice(conversation_id: int, file: UploadFile = File(...)):
 
 
 # ── System / filesystem / apps ───────────────────────────────────────────
-# The "fully connected to PC storage and all the apps" surface. GET routes are
-# read-only (browse, list apps, system info). Mutating/OS-affecting routes
-# (write, open) go through require_token like every other side-effecting route.
+# The "fully connected to PC storage and all the apps" surface. Routes that
+# only reveal metadata (directory listings, installed app names, drive
+# letters) stay unauthenticated read-only. Mutating/OS-affecting routes
+# (write, open) go through require_token like every other side-effecting
+# route. fs_read is neither -- found in code review (2026-07-13): it was
+# grouped with the metadata-only routes, but read_text_file(path) takes any
+# path with no allowlist and returns up to _MAX_READ_BYTES of raw content --
+# .env, SSH keys, browser credential stores, anything the OS user can read.
+# Listing that a file named ".env" exists is metadata; returning its
+# contents is not the same risk class, so it gets require_token like a
+# mutating route would.
 
 @app.get("/api/system/info")
 async def system_info():
@@ -228,7 +237,7 @@ async def fs_list(path: str | None = None):
     return system.list_directory(path)
 
 
-@app.get("/api/fs/read")
+@app.get("/api/fs/read", dependencies=[Depends(require_token)])
 async def fs_read(path: str):
     from vibemind import system
     return system.read_text_file(path)

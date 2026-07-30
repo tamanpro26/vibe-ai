@@ -246,6 +246,66 @@ class TestCerebrasTruncateAnchor:
         assert len(str(anchor["content"])) <= c._ANCHOR_MAX_CHARS + 10
 
 
+# ── Cerebras truncation must account for tool-schema cost ──────────────────────
+# Live-caught bug (2026-07-16, during the unattended showcase-site build): the
+# primary model (glm_47_cerebras) died with context_length_exceeded on
+# iteration 2 of every run -- "Current length is 10366 while limit is 8192"
+# despite _truncate()'s own 6000-token budget. Measured directly: the real
+# tool schema this task sends is ~3400 real tokens (GPT2 tokenizer) -- over
+# half the default budget -- and _truncate()/_budget() never subtracted it,
+# unlike groq_conn.py's _truncate_messages(), which already does
+# `remaining = budget - self._est(json.dumps(tools))`. The primary model
+# wasn't too weak or the free tier too small -- the truncation math had a
+# blind spot that let every real request run over budget by design.
+
+class TestCerebrasTruncateAccountsForToolsSchema:
+    @staticmethod
+    def _connector():
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.cerebras_conn import CerebrasConnector
+        return CerebrasConnector(MODEL_REGISTRY["glm_47_cerebras"])
+
+    @staticmethod
+    def _turn(content_len: int, call_id: str) -> list[dict]:
+        return [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": call_id, "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": call_id, "content": "x" * content_len},
+        ]
+
+    def test_large_tools_schema_shrinks_effective_budget(self):
+        c = self._connector()
+        # Two turns (~2800 est-tokens each -> ~5600 total) that both fit
+        # comfortably under the default 6000-token budget with no tools.
+        messages = [{"role": "system", "content": "sys"}]
+        messages += self._turn(8_400, "1")
+        messages += self._turn(8_400, "2")
+
+        without_tools = c._truncate(messages)
+        kept_turns_no_tools = sum(
+            1 for m in without_tools if m.get("role") == "assistant" and m.get("tool_calls")
+        )
+        assert kept_turns_no_tools == 2, "both turns should fit with no tools schema counted"
+
+        # A tools schema costing ~2500 est-tokens (json ~7500 chars) leaves
+        # only ~3500 tokens of real headroom -- not enough for both turns.
+        big_tools = [{"type": "function", "function": {
+            "name": "x", "description": "y" * 7_500, "parameters": {},
+        }}]
+        with_tools = c._truncate(messages, big_tools)
+        kept_turns_with_tools = sum(
+            1 for m in with_tools if m.get("role") == "assistant" and m.get("tool_calls")
+        )
+        assert kept_turns_with_tools < kept_turns_no_tools, (
+            "a large tools schema must shrink the effective budget for "
+            "conversation history -- otherwise the real API request (which "
+            "always includes the tools schema) can exceed the model's "
+            "actual context limit even though _truncate() reported success"
+        )
+
+
 # ── Path sandbox (tools/agent_tools.ToolExecutor._safe_path) ──────────────────
 
 class TestSafePath:
@@ -296,6 +356,124 @@ class TestEditFile:
             await executor.edit_file("b.txt", "world", "there")
             return (executor.workspace / "b.txt").read_text(encoding="utf-8")
         assert asyncio.run(run()) == "hello there"
+
+
+# ── edit_file auto-repair (Phase 0.1, UPGRADE_ROADMAP.md §1) ───────────────────
+# Weak fallback models reproduce old_str from memory instead of the file's
+# real current content -- confirmed reproducible on 2 separate live runs
+# (2026-07-16), same file (App.jsx), different models both times. Rather than
+# bounce the raw "old_str not found" error straight back to the model (which
+# is exactly what triggers the guess -> fail -> abandon spiral fix #3 already
+# guards against), try a whitespace-normalized match, then a fuzzy line-block
+# match, before giving up.
+
+class TestEditFileAutoRepair:
+    @pytest.fixture()
+    def executor(self, tmp_path):
+        from tools.agent_tools import ToolExecutor
+        return ToolExecutor(workspace=tmp_path / "ws")
+
+    def test_whitespace_only_mismatch_is_auto_repaired(self, executor):
+        """Model reproduces the right content with different indentation --
+        the single most common real-world near-miss."""
+        async def run():
+            await executor.create_file("App.jsx", "function App() {\n    return (\n        <div>hi</div>\n    );\n}\n")
+            # old_str uses 2-space indent; real file uses 4-space.
+            result = await executor.edit_file(
+                "App.jsx",
+                "function App() {\n  return (\n    <div>hi</div>\n  );\n}",
+                "function App() {\n  return (\n    <div>bye</div>\n  );\n}",
+            )
+            content = (executor.workspace / "App.jsx").read_text(encoding="utf-8")
+            return result, content
+        result, content = asyncio.run(run())
+        assert result.startswith("✓ Edited")
+        assert "auto-repaired" in result
+        assert "bye" in content and "hi" not in content
+
+    def test_fuzzy_line_match_repairs_a_near_miss(self, executor):
+        """Model gets one word wrong inside an otherwise-correct multi-line
+        block -- close enough (>=0.9 similarity) to repair, not force a
+        blind failure."""
+        async def run():
+            await executor.create_file(
+                "Nav.jsx",
+                "function Nav() {\n  return (\n    <nav className=\"navbar\">\n      <a href=\"/\">Home</a>\n    </nav>\n  );\n}\n",
+            )
+            # old_str says "navigation" instead of "navbar" -- one token off.
+            result = await executor.edit_file(
+                "Nav.jsx",
+                "function Nav() {\n  return (\n    <nav className=\"navigation\">\n      <a href=\"/\">Home</a>\n    </nav>\n  );\n}",
+                "function Nav() {\n  return (\n    <nav className=\"navbar\">\n      <a href=\"/\">Home</a>\n      <a href=\"/about\">About</a>\n    </nav>\n  );\n}",
+            )
+            content = (executor.workspace / "Nav.jsx").read_text(encoding="utf-8")
+            return result, content
+        result, content = asyncio.run(run())
+        assert result.startswith("✓ Edited")
+        assert "fuzzy-line-match" in result
+        assert "About" in content
+
+    def test_ambiguous_whitespace_match_is_rejected_not_silently_guessed(self, executor):
+        """Two near-duplicate blocks (e.g. repeated boilerplate) both match
+        old_str once whitespace is normalized -- picking the first silently
+        would risk editing the wrong one. Must fail loudly instead, same as
+        a genuinely-absent old_str, so the model retries with more context."""
+        async def run():
+            await executor.create_file(
+                "Cards.jsx",
+                "function Cards() {\n"
+                "  return (\n"
+                "    <div>\n"
+                "      <Card>\n"
+                "        <h3>Alpha</h3>\n"
+                "      </Card>\n"
+                "      <Card>\n"
+                "        <h3>Alpha</h3>\n"
+                "      </Card>\n"
+                "    </div>\n"
+                "  );\n"
+                "}\n",
+            )
+            # old_str uses 4-space indent for the <Card> block; file uses 6-space --
+            # a whitespace-only mismatch that matches BOTH identical <Card> blocks.
+            result = await executor.edit_file(
+                "Cards.jsx",
+                "<Card>\n    <h3>Alpha</h3>\n  </Card>",
+                "<Card>\n    <h3>Beta</h3>\n  </Card>",
+            )
+            content = (executor.workspace / "Cards.jsx").read_text(encoding="utf-8")
+            return result, content
+        result, content = asyncio.run(run())
+        # Must fail loudly rather than silently repair against whichever
+        # duplicate the (first-match-wins) regex happened to find first.
+        assert result.startswith("ERROR: old_str not found")
+        assert "Beta" not in content
+        assert content.count("Alpha") == 2
+
+    def test_genuinely_absent_old_str_still_errors_with_numbered_view(self, executor):
+        """Not every mismatch is repairable -- content that's nothing like
+        the file must still fail, but with an actionable, line-numbered
+        current-content view instead of a bare 300-char prefix."""
+        async def run():
+            await executor.create_file("Foo.jsx", "function Foo() {\n  return <div>foo</div>;\n}\n")
+            return await executor.edit_file(
+                "Foo.jsx",
+                "completely unrelated content that shares nothing with the file",
+                "new content",
+            )
+        result = asyncio.run(run())
+        assert result.startswith("ERROR: old_str not found")
+        assert "1  function Foo()" in result or "   1  function Foo()" in result
+
+    def test_exact_match_unaffected_no_repair_suffix(self, executor):
+        """An exact match must behave exactly as before -- no 'auto-repaired'
+        noise on the common, already-correct path."""
+        async def run():
+            await executor.create_file("c.txt", "hello world")
+            return await executor.edit_file("c.txt", "world", "there")
+        result = asyncio.run(run())
+        assert result == "✓ Edited c.txt"
+        assert "auto-repaired" not in result
 
 
 # ── Scaffold-command name extraction ──────────────────────────────────────────
@@ -505,6 +683,81 @@ class TestVerifiers:
         assert asyncio.run(run_all(root)) == []
 
 
+class TestThinPageVerifier:
+    """
+    Phase 1.7, UPGRADE_ROADMAP.md §6. Live-caught (2026-07-16, run v7): a
+    react-router route pointed at a real, existing component file whose
+    entire content was a bare placeholder heading. Every other check passed
+    (file exists, no TODO/lorem-ipsum marker) -- this check catches "real
+    file, not-real content" specifically for routed pages.
+    """
+
+    def _make_router_project(self, tmp_path, page_content: str):
+        root = tmp_path / "proj"
+        (root / "src" / "pages").mkdir(parents=True)
+        (root / "src" / "App.jsx").write_text(
+            "import { Routes, Route } from 'react-router-dom';\n"
+            "import Home from './pages/Home';\n"
+            "function App() {\n"
+            "  return (\n"
+            "    <Routes>\n"
+            "      <Route path=\"/\" element={<Home />} />\n"
+            "    </Routes>\n"
+            "  );\n"
+            "}\n"
+            "export default App;\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "pages" / "Home.jsx").write_text(page_content, encoding="utf-8")
+        return root
+
+    def test_thin_routed_page_is_flagged(self, tmp_path):
+        from core.verifiers import check_thin_pages
+        root = self._make_router_project(
+            tmp_path, "function Home() {\n  return <h1>Welcome to VibeAI</h1>;\n}\nexport default Home;\n",
+        )
+        findings = check_thin_pages(root)
+        assert any("Home.jsx" in f and "thin-page" in f for f in findings)
+
+    def test_substantial_routed_page_not_flagged(self, tmp_path):
+        from core.verifiers import check_thin_pages
+        real_content = (
+            "function Home() {\n  return (\n    <div>\n"
+            + "      <p>Real paragraph content describing the product in detail.</p>\n" * 10
+            + "    </div>\n  );\n}\nexport default Home;\n"
+        )
+        root = self._make_router_project(tmp_path, real_content)
+        assert check_thin_pages(root) == []
+
+    def test_missing_routed_page_not_double_flagged_by_this_check(self, tmp_path):
+        """A missing file is check_relative_imports's job -- this check must
+        not also report it (would be a confusing duplicate finding)."""
+        from core.verifiers import check_thin_pages
+        root = tmp_path / "proj"
+        (root / "src" / "pages").mkdir(parents=True)
+        (root / "src" / "App.jsx").write_text(
+            "import { Routes, Route } from 'react-router-dom';\n"
+            "import Missing from './pages/Missing';\n"
+            "function App() {\n"
+            "  return <Routes><Route path=\"/\" element={<Missing />} /></Routes>;\n"
+            "}\nexport default App;\n",
+            encoding="utf-8",
+        )
+        assert check_thin_pages(root) == []
+
+    def test_non_routed_thin_file_not_flagged(self, tmp_path):
+        """This check only judges components that are actual routed
+        destinations -- an arbitrary thin helper/util file is not its job."""
+        from core.verifiers import check_thin_pages
+        root = tmp_path / "proj"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "App.jsx").write_text(
+            "export default () => <div>no routing here</div>;", encoding="utf-8",
+        )
+        (root / "src" / "tiny.jsx").write_text("export const x = 1;", encoding="utf-8")
+        assert check_thin_pages(root) == []
+
+
 # ── Compact-context builder carries action memory ─────────────────────────────
 
 class TestCompactMessages:
@@ -588,6 +841,47 @@ class TestFailedGenerationParse:
     def test_pure_text_returns_none(self):
         from models.connectors.groq_conn import GroqConnector
         assert GroqConnector._parse_failed_generation("just an explanation") is None
+
+    # ── Phase 0.4, UPGRADE_ROADMAP.md §7: generalized repair shim ────────────
+    # The original shim only recovered ONE malformed shape (the native
+    # <function=name>{json}</function> text format). These pin the two
+    # additional shapes it now recovers, plus the lenient single-quote JSON
+    # repair, without changing the two tests above.
+
+    def test_recovers_markdown_fenced_json_tool_call(self):
+        from models.connectors.groq_conn import GroqConnector
+        text = (
+            "I'll create that file now.\n\n"
+            '```json\n{"name": "create_file", "arguments": '
+            '{"path": "b.txt", "content": "hi"}}\n```'
+        )
+        out = GroqConnector._parse_failed_generation(text)
+        assert out and out["tool_calls"][0]["name"] == "create_file"
+        assert out["tool_calls"][0]["args"]["path"] == "b.txt"
+
+    def test_recovers_bare_json_object_no_fence_no_tag(self):
+        from models.connectors.groq_conn import GroqConnector
+        text = 'Sure: {"name": "read_file", "parameters": {"path": "c.txt"}}'
+        out = GroqConnector._parse_failed_generation(text)
+        assert out and out["tool_calls"][0]["name"] == "read_file"
+        assert out["tool_calls"][0]["args"]["path"] == "c.txt"
+
+    def test_lenient_json_repairs_single_quoted_args(self):
+        from models.connectors.groq_conn import GroqConnector
+        # Python-dict-style single quotes instead of JSON double quotes --
+        # the "one bracket away from valid" case.
+        text = "<function=edit_file>{'path': 'd.txt', 'old_str': 'x', 'new_str': 'y'}</function>"
+        out = GroqConnector._parse_failed_generation(text)
+        assert out and out["tool_calls"][0]["args"]["path"] == "d.txt"
+
+    def test_lenient_repair_does_not_corrupt_legit_double_quoted_args(self):
+        """The quote-swap repair must only fire when there are NO double
+        quotes at all -- otherwise it would corrupt an apostrophe inside an
+        already-valid double-quoted string value."""
+        from models.connectors.groq_conn import GroqConnector
+        text = '<function=create_file>{"path": "e.txt", "content": "it\'s fine"}</function>'
+        out = GroqConnector._parse_failed_generation(text)
+        assert out and out["tool_calls"][0]["args"]["content"] == "it's fine"
 
     def test_call_with_tools_recovers_from_400_not_raises(self):
         """
@@ -1766,6 +2060,62 @@ class TestModelEscalation:
         finally:
             self._cleanup_dynamic()
 
+    # ── Phase 1, UPGRADE_ROADMAP.md §4a: gap principle for the agentic pool ──
+    # Live-caught (2026-07-16): a dynamically-discovered 0.8B local model got
+    # escalated into continuing a precision edit-continuation task and only
+    # ever managed a bare list_dir/read_file -- register_dynamic_ollama()
+    # grants full agentic_coding capability to any tag regardless of size.
+    # Better to leave the gap empty (fall through to the existing "all
+    # fallbacks exhausted" path) than reach a candidate with no realistic
+    # chance of finishing the step.
+
+    def test_tiny_local_model_excluded_from_agentic_pool(self, monkeypatch):
+        self._fake_ollama_tags(monkeypatch, ["qwen3.5:0.8b"])
+        from core.model_escalation import agentic_candidates
+        try:
+            pool = asyncio.run(agentic_candidates(exclude=set()))
+            assert not any(p.startswith("ollama_escalation_") for p in pool)
+        finally:
+            self._cleanup_dynamic()
+
+    def test_small_but_not_tiny_local_model_also_excluded(self, monkeypatch):
+        self._fake_ollama_tags(monkeypatch, ["qwen2.5:3b-instruct-test"])
+        from core.model_escalation import agentic_candidates
+        try:
+            pool = asyncio.run(agentic_candidates(exclude=set()))
+            assert not any(p.startswith("ollama_escalation_") for p in pool)
+        finally:
+            self._cleanup_dynamic()
+
+    def test_large_local_model_still_included(self, monkeypatch):
+        """The gap principle excludes models KNOWN to be too small -- it
+        must not become a blanket local-model ban."""
+        self._fake_ollama_tags(monkeypatch, ["llama3.1:70b-test-unique"])
+        from core.model_escalation import agentic_candidates
+        try:
+            pool = asyncio.run(agentic_candidates(exclude=set()))
+            assert any(p.startswith("ollama_escalation_") for p in pool)
+        finally:
+            self._cleanup_dynamic()
+
+    def test_unparseable_size_fails_open_and_is_included(self, monkeypatch):
+        """No size in the tag at all -> ambiguous, not "known too small" --
+        must fail open (include) rather than exclude on ambiguity."""
+        self._fake_ollama_tags(monkeypatch, ["mystery-model-no-size-test"])
+        from core.model_escalation import agentic_candidates
+        try:
+            pool = asyncio.run(agentic_candidates(exclude=set()))
+            assert any(p.startswith("ollama_escalation_") for p in pool)
+        finally:
+            self._cleanup_dynamic()
+
+    def test_parse_model_size_b(self):
+        from core.model_escalation import _parse_model_size_b
+        assert _parse_model_size_b("qwen3.5:0.8b") == 0.8
+        assert _parse_model_size_b("mystery-coder:13b") == 13.0
+        assert _parse_model_size_b("llama3.1:70b") == 70.0
+        assert _parse_model_size_b("no-size-here") is None
+
     def test_single_shot_candidates_broader_than_agentic(self, monkeypatch):
         self._fake_ollama_tags(monkeypatch, [])
         from core.model_escalation import agentic_candidates, single_shot_candidates
@@ -1789,66 +2139,171 @@ class TestModelEscalation:
         assert "codestral_mistral" not in pool
 
 
-# ── tools/search.py: DDG web-search parsing (pure logic, offline) ────────────
-# Added 2026-07-12 after the "Haunted Adline -> 0 results" incident: the only
-# live source was DDG Instant Answers (not web search), so nearly every real
-# query returned nothing. These tests pin the new HTML-parsing layer.
+# ── tools/search.py: Firecrawl + Exa parsing (pure logic, offline) ───────────
+# Replaced the DuckDuckGo-HTML-scraping stack entirely (2026-07-27) after it
+# repeatedly soft-blocked (HTTP 202) entire query TOPICS under completely
+# normal chat use -- no official contract, just an anti-scraping heuristic.
+# Both new sources are real, documented APIs, live-verified working the same
+# day before this rewrite (real Wikipedia/Wimbledon-news content returned).
 
-class TestSearchDdgParsing:
-    def test_decode_ddg_redirect_uddg(self):
-        from tools.search import _decode_ddg_redirect
-        href = ("//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.supersummary.com"
-                "%2Fhaunting%2Dadeline%2Fsummary%2F&rut=7ae078")
-        assert _decode_ddg_redirect(href) == "https://www.supersummary.com/haunting-adeline/summary/"
+class TestFirecrawlParsing:
+    _RESPONSE = {
+        "success": True,
+        "data": {
+            "web": [
+                {
+                    "url": "https://real.example/book",
+                    "title": "Real Result Title",
+                    "description": "A real snippet about the book.",
+                    "markdown": "# Real Result Title\n\nFull page content here.",
+                    "metadata": {"title": "Real Result Title"},
+                },
+                {
+                    "url": "https://second.example/",
+                    "title": "Second",
+                    "description": "Second snippet.",
+                    "markdown": "Second page markdown.",
+                },
+            ]
+        },
+    }
 
-    def test_decode_ddg_redirect_plain_http_passthrough(self):
-        from tools.search import _decode_ddg_redirect
-        assert _decode_ddg_redirect("https://example.org/page") == "https://example.org/page"
-
-    def test_decode_ddg_redirect_junk_rejected(self):
-        from tools.search import _decode_ddg_redirect
-        assert _decode_ddg_redirect("") == ""
-        assert _decode_ddg_redirect("javascript:void(0)") == ""
-        # uddg present but not a real URL
-        assert _decode_ddg_redirect("//duckduckgo.com/l/?uddg=notaurl") == ""
-
-    _FIXTURE = """
-    <html><body>
-      <div class="result results_links results_links_deep web-result">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.example%2Fbook&rut=x">
-          Real Result Title</a>
-        <a class="result__snippet">A real snippet about the book.</a>
-      </div>
-      <div class="result result--ad">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fads.example%2Fbuy&rut=y">Sponsored</a>
-      </div>
-      <div class="result">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fsecond.example%2F&rut=z">Second</a>
-      </div>
-    </body></html>
-    """
-
-    def test_parse_extracts_results_and_decodes_urls(self):
-        from tools.search import _parse_ddg_html
-        results = _parse_ddg_html(self._FIXTURE)
+    def test_parse_extracts_results(self):
+        from tools.search import _parse_firecrawl_response
+        results = _parse_firecrawl_response(self._RESPONSE)
         assert [r.url for r in results] == ["https://real.example/book", "https://second.example/"]
         assert results[0].title == "Real Result Title"
         assert results[0].snippet == "A real snippet about the book."
-        assert results[0].source == "ddg_web"
-
-    def test_parse_skips_sponsored_blocks(self):
-        from tools.search import _parse_ddg_html
-        urls = [r.url for r in _parse_ddg_html(self._FIXTURE)]
-        assert "https://ads.example/buy" not in urls
+        assert results[0].full_text == "# Real Result Title\n\nFull page content here."
+        assert results[0].source == "firecrawl"
 
     def test_parse_respects_max_results(self):
-        from tools.search import _parse_ddg_html
-        assert len(_parse_ddg_html(self._FIXTURE, max_results=1)) == 1
+        from tools.search import _parse_firecrawl_response
+        assert len(_parse_firecrawl_response(self._RESPONSE, max_results=1)) == 1
 
-    def test_parse_empty_html_is_safe(self):
-        from tools.search import _parse_ddg_html
-        assert _parse_ddg_html("") == []
-        assert _parse_ddg_html("<html><body>no results here</body></html>") == []
+    def test_parse_unsuccessful_response_is_safe(self):
+        from tools.search import _parse_firecrawl_response
+        assert _parse_firecrawl_response({"success": False}) == []
+        assert _parse_firecrawl_response({}) == []
+
+    def test_parse_missing_web_key_is_safe(self):
+        from tools.search import _parse_firecrawl_response
+        assert _parse_firecrawl_response({"success": True, "data": {}}) == []
+
+    def test_parse_falls_back_to_markdown_snippet_when_no_description(self):
+        from tools.search import _parse_firecrawl_response
+        resp = {"success": True, "data": {"web": [
+            {"url": "https://x.example/", "title": "X", "markdown": "A" * 400},
+        ]}}
+        results = _parse_firecrawl_response(resp)
+        assert results[0].snippet == "A" * 300
+
+
+class TestExaParsing:
+    _RESPONSE = {
+        "results": [
+            {"url": "https://real.example/book", "title": "Real Result Title",
+             "text": "A real excerpt about the book."},
+            {"url": "https://second.example/", "title": "Second",
+             "highlights": ["Second highlight excerpt."]},
+        ]
+    }
+
+    def test_parse_extracts_results_in_order(self):
+        from tools.search import _parse_exa_response
+        results = _parse_exa_response(self._RESPONSE)
+        assert [r.url for r in results] == ["https://real.example/book", "https://second.example/"]
+        assert results[0].snippet == "A real excerpt about the book."
+        assert results[0].source == "exa"
+
+    def test_parse_uses_highlights_when_text_absent(self):
+        from tools.search import _parse_exa_response
+        results = _parse_exa_response(self._RESPONSE)
+        assert results[1].snippet == "Second highlight excerpt."
+
+    def test_parse_encodes_neural_ranking_as_descending_score(self):
+        # Exa returns results already ordered by relevance -- that ordering
+        # must survive as a descending relevance_score so the later merge
+        # with Firecrawl keeps Exa's own top result first.
+        from tools.search import _parse_exa_response
+        results = _parse_exa_response(self._RESPONSE)
+        assert results[0].relevance_score > results[1].relevance_score
+
+    def test_parse_respects_max_results(self):
+        from tools.search import _parse_exa_response
+        assert len(_parse_exa_response(self._RESPONSE, max_results=1)) == 1
+
+    def test_parse_empty_results_is_safe(self):
+        from tools.search import _parse_exa_response
+        assert _parse_exa_response({}) == []
+        assert _parse_exa_response({"results": []}) == []
+
+    def test_parse_skips_results_with_no_url(self):
+        from tools.search import _parse_exa_response
+        resp = {"results": [{"title": "No URL", "text": "..."}]}
+        assert _parse_exa_response(resp) == []
+
+
+class TestSearchMergeAndRanking:
+    """SearchIntelligenceStack.search() -- Exa's neural ranking is the
+    relevance signal now (no more LLM re-rank call), so its results are
+    kept first; Firecrawl fills remaining slots for URLs Exa didn't
+    surface, deduplicated by URL."""
+
+    def _stack(self, firecrawl_results=None, exa_results=None, **kw):
+        from tools.search import SearchIntelligenceStack
+        stack = SearchIntelligenceStack(firecrawl_api_key="fc-key", exa_api_key="exa-key", **kw)
+
+        async def fake_firecrawl(query, api_key, max_results=8):
+            return firecrawl_results or []
+
+        async def fake_exa(query, api_key, max_results=8):
+            return exa_results or []
+
+        import tools.search as search_mod
+        return stack, fake_firecrawl, fake_exa, search_mod
+
+    def test_exa_results_come_first(self, monkeypatch):
+        from tools.search import SearchResult
+        exa_r = [SearchResult(title="Exa hit", url="https://exa.example/", snippet="s", source="exa")]
+        fc_r = [SearchResult(title="FC hit", url="https://fc.example/", snippet="s", source="firecrawl")]
+        stack, fake_fc, fake_exa, mod = self._stack(firecrawl_results=fc_r, exa_results=exa_r)
+        monkeypatch.setattr(mod, "_search_firecrawl", fake_fc)
+        monkeypatch.setattr(mod, "_search_exa", fake_exa)
+
+        results = asyncio.run(stack.search("query"))
+        assert [r.source for r in results] == ["exa", "firecrawl"]
+
+    def test_dedupes_by_url_preferring_exa(self, monkeypatch):
+        from tools.search import SearchResult
+        same_url = "https://shared.example/"
+        exa_r = [SearchResult(title="Exa version", url=same_url, snippet="s", source="exa")]
+        fc_r = [SearchResult(title="FC version", url=same_url, snippet="s", source="firecrawl")]
+        stack, fake_fc, fake_exa, mod = self._stack(firecrawl_results=fc_r, exa_results=exa_r)
+        monkeypatch.setattr(mod, "_search_firecrawl", fake_fc)
+        monkeypatch.setattr(mod, "_search_exa", fake_exa)
+
+        results = asyncio.run(stack.search("query"))
+        assert len(results) == 1
+        assert results[0].source == "exa"
+
+    def test_extract_full_false_trims_full_text(self, monkeypatch):
+        from tools.search import SearchResult
+        exa_r = [SearchResult(title="Exa hit", url="https://exa.example/", snippet="s",
+                               full_text="X" * 1000, source="exa")]
+        stack, fake_fc, fake_exa, mod = self._stack(exa_results=exa_r)
+        monkeypatch.setattr(mod, "_search_firecrawl", fake_fc)
+        monkeypatch.setattr(mod, "_search_exa", fake_exa)
+
+        results = asyncio.run(stack.search("query", extract_full=False))
+        assert len(results[0].full_text) == 500
+
+    def test_both_sources_empty_returns_empty_not_an_exception(self, monkeypatch):
+        stack, fake_fc, fake_exa, mod = self._stack()
+        monkeypatch.setattr(mod, "_search_firecrawl", fake_fc)
+        monkeypatch.setattr(mod, "_search_exa", fake_exa)
+
+        assert asyncio.run(stack.search("query")) == []
 
 
 # ── tools/domain_retriever.py: topic extraction (pure logic, offline) ────────
@@ -2002,6 +2457,90 @@ class TestProjectScopingAndAnchor:
     def test_anchor_empty_when_no_user(self):
         from models.connectors.cerebras_conn import CerebrasConnector
         assert CerebrasConnector._pick_anchor_message([{"role": "assistant", "content": "x"}]) == ""
+
+
+class TestBuildMessagesFramesStaleHistory:
+    """Live-caught bug (2026-07-19): _build_messages spliced conversation
+    history in verbatim with no framing, giving the model no signal to
+    distinguish "old topic from days ago" from "the current live task" --
+    a fresh "generate an image" request got answered with a palindrome
+    program pulled from a stale history-compaction summary, and a later
+    request drifted into resuming an old half-built "openstack" project.
+    Confirmed live: same task, same history, unframed response deflected
+    ("I cannot generate images"), framed response correctly called
+    design_asset for the actual current task."""
+
+    def _loop(self):
+        from core.agent_loop import AgentLoop
+        return AgentLoop.__new__(AgentLoop)
+
+    def test_history_wrapped_with_background_only_framing(self):
+        loop = self._loop()
+        history = [
+            {"role": "system", "content": "[Earlier conversation summary]: mentions a palindrome program and an image."},
+            {"role": "user", "content": "build me a saas app called openstack"},
+            {"role": "assistant", "content": "Started creating openstack/styles.css"},
+        ]
+        msgs = loop._build_messages("generate an image of a boy playing football", None, "", history=history)
+        contents = [m["content"] for m in msgs]
+        # The stale history must be bracketed by explicit "background only"
+        # framing, not spliced in as if it were live conversation.
+        pre_idx  = next(i for i, c in enumerate(contents) if "PAST conversation history" in c)
+        post_idx = next(i for i, c in enumerate(contents) if "END of past history" in c)
+        hist_idx = next(i for i, c in enumerate(contents) if "palindrome" in c)
+        task_idx = next(i for i, c in enumerate(contents) if "boy playing football" in c)
+        assert pre_idx < hist_idx < post_idx < task_idx, (
+            "history must sit between the background-framing markers, and "
+            "the current task must come after the closing marker"
+        )
+
+    def test_no_history_produces_unchanged_two_message_output(self):
+        """No regression for the common case: no history at all."""
+        loop = self._loop()
+        msgs = loop._build_messages("do the thing", None, "", history=None)
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1] == {"role": "user", "content": "do the thing"}
+
+
+class TestLooksLikeImage:
+    """Live-caught bug (2026-07-19), two layers deep in the same fix:
+    design_asset's own "embed directly in HTML" instruction caused the
+    model to write a URL as literal text into a file it named "...png"
+    (not a real image, doesn't open) -- fixed by having design_asset
+    download a real local copy via curl. But the download-validity check
+    only looked at file size (>=1024 bytes), and a provider error response
+    (pollinations returning a JSON "API key budget too low" body on a 402)
+    cleared that bar while still being garbage, not an image -- confirmed
+    live, the exact same file-size-isn't-validity gap, one layer deeper."""
+
+    def test_rejects_json_error_body(self, tmp_path):
+        from tools.agent_tools import _looks_like_image
+        p = tmp_path / "fake.png"
+        p.write_bytes(b'{"error":"Internal Server Error","message":"budget too low"}' * 20)
+        assert not _looks_like_image(p)
+
+    def test_rejects_html_error_body(self, tmp_path):
+        from tools.agent_tools import _looks_like_image
+        p = tmp_path / "fake.png"
+        p.write_bytes(b"<html><body>502 Bad Gateway</body></html>" * 20)
+        assert not _looks_like_image(p)
+
+    def test_accepts_real_png_signature(self, tmp_path):
+        from tools.agent_tools import _looks_like_image
+        p = tmp_path / "real.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"binary payload" * 20)
+        assert _looks_like_image(p)
+
+    def test_accepts_real_jpeg_signature(self, tmp_path):
+        from tools.agent_tools import _looks_like_image
+        p = tmp_path / "real.jpg"
+        p.write_bytes(b"\xff\xd8\xff" + b"binary payload" * 20)
+        assert _looks_like_image(p)
+
+    def test_rejects_missing_file(self, tmp_path):
+        from tools.agent_tools import _looks_like_image
+        assert not _looks_like_image(tmp_path / "does_not_exist.png")
 
 
 # ── agent_loop document_preview gating (2026-07-12) ───────────────────────────
@@ -3106,6 +3645,313 @@ class TestAgentLoopHardReasoningTimeout:
         assert "VibeMind pre-reasoning timed out" in src
 
 
+class TestModelCallWatchdog:
+    """
+    Phase 0.2, UPGRADE_ROADMAP.md §5. Live-caught incident (2026-07-16): a
+    model call sat with zero logged activity for ~110 minutes mid-run. Every
+    connector already sets a 30s HTTP timeout and retries up to 3x with
+    backoff, so the incident most likely wasn't an in-process hang (more
+    likely the host OS suspended the whole process) -- but _watchdog is a
+    genuine backstop against ANY coroutine stall regardless of cause, and
+    every existing except-Exception fallback path already treats its
+    RuntimeError exactly like any other connector failure.
+    """
+
+    def test_fast_call_passes_through_unaffected(self):
+        import asyncio
+        import core.agent_loop as al
+
+        async def fast():
+            return "ok"
+
+        assert asyncio.run(al._watchdog(fast(), "test")) == "ok"
+
+    def test_slow_call_raises_runtime_error_not_timeout_or_cancelled(self):
+        """Must raise plain RuntimeError -- not asyncio.TimeoutError/
+        CancelledError -- so it flows through the SAME `except Exception`
+        fallback-chain handling as any other connector failure, rather than
+        needing special-case treatment (CancelledError in particular must
+        never surface here, since _should_retry treats it as
+        non-retryable/must-propagate elsewhere in this codebase)."""
+        import asyncio
+        import core.agent_loop as al
+
+        async def slow():
+            await asyncio.sleep(10)
+            return "too late"
+
+        original_deadline = al._MODEL_CALL_WATCHDOG_S
+        al._MODEL_CALL_WATCHDOG_S = 0.05
+        try:
+            with pytest.raises(RuntimeError, match="watchdog"):
+                asyncio.run(al._watchdog(slow(), "slow-model"))
+        finally:
+            al._MODEL_CALL_WATCHDOG_S = original_deadline
+
+    def test_all_generate_with_tools_call_sites_are_watchdog_wrapped(self):
+        """Source-inspection regression: every response = await
+        connector.generate_with_tools(...) call site in run() (primary,
+        fallback-chain, and broader-pool escalation, compact and non-compact
+        variants -- 6 total) must go through _watchdog, not a bare await.
+        A future edit adding a 7th call site without wrapping it would
+        silently reintroduce the exact unbounded-hang gap this closes."""
+        import inspect
+        import core.agent_loop as al
+        src = inspect.getsource(al.AgentLoop.run)
+        assert src.count("connector.generate_with_tools(") == 6
+        assert src.count("await _watchdog(connector.generate_with_tools(") == 6
+
+
+class TestAgentLoopHandoffResetsNoWriteCounter:
+    """
+    Live-caught bug (2026-07-16, during an unattended showcase-site build):
+    the loop-stuck handoff reset _loop_warnings/_repeat_count/_last_tool_sig
+    for the incoming model but NOT _no_write_iters. A fresh model's very
+    first, perfectly reasonable orientation read -- which the handoff
+    message itself instructs ("check the PROJECT LEDGER... for current
+    state") -- instantly re-tripped the stale >=6 no-write threshold left
+    over from the PREVIOUS model's failure, cascading through the rest of
+    the fallback chain in 1-2 iterations each with no real chance to fix
+    anything. Observed live: 3 handoffs in 2 iterations
+    (glm_47_flash_zai -> deepseek_v4_flash_nim -> a local 0.8B ollama model
+    -> gpt_oss_120b_debug), hard-stopped with tiers exhausted at iteration
+    21/22 despite budget remaining and 6 already-written components sitting
+    unwired in the workspace.
+    """
+
+    def test_handoff_block_resets_no_write_counter(self):
+        import re
+        import inspect
+        import core.agent_loop as al
+
+        src = inspect.getsource(al.AgentLoop.run)
+        idx = src.index("loop-stuck at iteration")
+        window = src[idx: idx + 1800]
+        assert re.search(r"_loop_warnings\s*=\s*0", window)
+        assert re.search(r"_repeat_count\s*=\s*0", window)
+        assert re.search(r"_no_write_iters\s*=\s*0", window), (
+            "loop-stuck handoff must reset _no_write_iters like its sibling "
+            "counters -- otherwise a fresh model inherits a stale no-write "
+            "count and gets escalated away again on its very first "
+            "orientation read"
+        )
+
+
+class TestFailedEditFileGetsImmediateRetryNudge:
+    """
+    Live-caught bug (2026-07-16), confirmed reproducible on 2 separate live
+    runs (same file, different fallback models both times): when edit_file
+    failed with an old_str mismatch, the failure became just another tool
+    result with no urgency attached. The model would create several other
+    new files successfully in the same turn, then simply abandon the failed
+    edit for the rest of the run (20+ iterations, never retried) rather than
+    reading the file fresh and retrying. The existing no-write nudge didn't
+    catch this -- the model WAS writing files, just never retrying this one
+    specific failed edit.
+    """
+
+    def test_failed_edit_file_triggers_immediate_read_and_retry_nudge(self):
+        import re
+        import inspect
+        import core.agent_loop as al
+
+        src = inspect.getsource(al.AgentLoop.run)
+        assert re.search(r'_failed_edits\.append', src), (
+            "run() must track which edit_file calls failed this iteration"
+        )
+        idx = src.index("_failed_edits.append")
+        # The nudge must be injected close to where failures are collected,
+        # not buried arbitrarily far away in the method.
+        window = src[idx: idx + 2500]
+        assert "if _failed_edits:" in window
+        assert "read_file" in window and "retry" in window, (
+            "the injected message must tell the model to read_file then "
+            "retry -- not just acknowledge the failure"
+        )
+
+
+class TestNoWriteNudgeMentionsEditFile:
+    """
+    Live-caught bug (2026-07-16, same showcase-site build as the handoff-
+    reset bug above, confirmed on a SECOND live run after that fix): even
+    with the handoff-reset bug fixed, the run still finished 22/22
+    iterations with edit_file called ZERO times. The no-write nudge fired
+    three times (iterations 4, 16, 22) across four different models
+    (llama33_70b_coder, glm_47_flash_zai, gpt_oss_120b_coder, a local
+    ollama escalation) and none of them ever edited App.jsx/styles.css --
+    they just kept re-reading. Root cause: the nudge text said "Use
+    create_file NOW" and never mentioned edit_file, even though the guard
+    itself already treats create_file and edit_file as equally valid
+    "progress" (see the `_wrote_this_iter` check just above it). A model
+    that had already create_file'd every new component it identified had
+    nothing left to act on from that instruction -- App.jsx/styles.css
+    already existed and needed edit_file, not create_file. Same failure
+    shape across 4 different models points to a prompt-wording bug, not a
+    per-model capability gap.
+    """
+
+    def test_nudge_text_mentions_edit_file_not_just_create_file(self):
+        import inspect
+        import core.agent_loop as al
+
+        src = inspect.getsource(al.AgentLoop.run)
+        idx = src.index("PROGRESS CHECK")
+        window = src[idx: idx + 400]
+        assert "edit_file" in window, (
+            "no-write nudge must mention edit_file, not just create_file -- "
+            "otherwise a model that already created every new file it "
+            "identified has no signal to go edit an EXISTING file instead"
+        )
+
+
+class TestReadLoopGuard:
+    """
+    core/read_loop_guard.py — guards against read-only dithering loops
+    (weak fallback models re-reading the same files for 4+ iterations
+    without ever attempting edit_file, observed live 2026-07-16 on
+    glm_47_flash_zai). Escalates through DECISIONS (nudge -> checkpoint ->
+    model handoff), never forces an edit -- see the module docstring.
+    """
+
+    @staticmethod
+    def _tc(id_: str, name: str, **args):
+        return {"id": id_, "name": name, "args": args}
+
+    def _guard(self, **overrides):
+        from core.read_loop_guard import ReadLoopGuard, GuardConfig
+        return ReadLoopGuard(GuardConfig(**overrides))
+
+    def test_reserve_after_compaction_returns_real_content_not_stub(self):
+        """Feature 3: when the original read was compacted out of context
+        (msg_index < cutoff), re-serve the REAL content, honestly framed --
+        never the false 'already in your context' stub."""
+        from core.read_loop_guard import Action
+        g = self._guard()
+        g.begin_iteration(1, [self._tc("1", "read_file", path="App.jsx")])
+        g.record_read_result({"path": "App.jsx"}, "REAL FILE BODY v1", 1, msg_index=3)
+        bv = g.begin_iteration(
+            2, [self._tc("2", "read_file", path="App.jsx")], compaction_cutoff=5)
+        sc = bv.short_circuits["2"]
+        assert "RE-SERVED FROM CACHE" in sc
+        assert "REAL FILE BODY v1" in sc          # the actual content, not a stub
+        assert "already in your context" not in sc
+
+    def test_reserve_does_not_count_as_dithering(self):
+        """A re-serve is state recovery, not read-loop dithering -- it must not
+        grow the read-only streak toward a checkpoint."""
+        g = self._guard(checkpoint_readonly_iters=3)
+        g.begin_iteration(1, [self._tc("1", "read_file", path="A.jsx")])
+        g.record_read_result({"path": "A.jsx"}, "body", 1, msg_index=2)
+        before = g._consecutive_readonly_iters
+        g.begin_iteration(2, [self._tc("2", "read_file", path="A.jsx")], compaction_cutoff=9)
+        assert g._consecutive_readonly_iters == before   # unchanged by a re-serve
+
+    def test_external_writer_invalidates_stub(self, tmp_path):
+        """Feature 3: an external process touching the file must invalidate the
+        cached stub so the model gets a fresh real read, not a stale stub."""
+        import os, time as _t
+        f = tmp_path / "ext.txt"
+        f.write_text("v1")
+        g = self._guard()
+        args = {"path": str(f)}
+        g.begin_iteration(1, [self._tc("1", "read_file", **args)])
+        g.record_read_result(args, "v1", 1)
+        # external write, bump mtime into the future to beat filesystem resolution
+        f.write_text("v2-external")
+        os.utime(f, (_t.time() + 10, _t.time() + 10))
+        assert g.cache.changed_externally(args) is True
+        bv = g.begin_iteration(2, [self._tc("2", "read_file", **args)])
+        assert "2" not in bv.short_circuits   # real read allowed, no stale stub
+
+    def test_repeat_read_short_circuits_and_nudges(self):
+        from core.read_loop_guard import Action
+        g = self._guard()
+        g.begin_iteration(1, [self._tc("1", "read_file", path="App.jsx")])
+        g.record_read_result({"path": "App.jsx"}, "content-v1", 1)
+        bv = g.begin_iteration(2, [self._tc("2", "read_file", path="App.jsx")])
+        assert "2" in bv.short_circuits and "UNCHANGED" in bv.short_circuits["2"]
+        assert bv.action is Action.NUDGE   # 2nd read hits the nudge threshold
+
+    def test_changed_file_resets_lineage(self):
+        g = self._guard()
+        g.record_read_result({"path": "App.jsx"}, "v1", 1)
+        g.record_read_result({"path": "App.jsx"}, "v2", 2)   # external change
+        assert g.cache.lookup({"path": "App.jsx"}).count == 1   # read-count reset
+
+    def test_distinct_file_exploration_never_checkpoints_early(self):
+        from core.read_loop_guard import Action
+        g = self._guard(checkpoint_readonly_iters=4)
+        for i, f in enumerate(["a.py", "b.py", "c.py"], start=1):
+            bv = g.begin_iteration(i, [self._tc(str(i), "read_file", path=f)])
+            assert bv.action is Action.PROCEED
+
+    def test_sustained_readonly_streak_triggers_checkpoint_then_escalate(self):
+        from core.read_loop_guard import Action
+        g = self._guard(checkpoint_readonly_iters=4, escalate_iters_after_checkpoint=2)
+        verdicts = [
+            g.begin_iteration(i, [self._tc(str(i), "read_file", path=f"f{i}.py")])
+            for i in range(1, 5)
+        ]
+        assert verdicts[-1].action is Action.CHECKPOINT
+        bv = g.begin_iteration(6, [self._tc("6", "read_file", path="f6.py")])
+        assert bv.action is Action.ESCALATE_MODEL
+
+    def test_mutation_resets_streak_and_tags_pressure(self):
+        g = self._guard(checkpoint_readonly_iters=4)
+        for i in range(1, 5):
+            g.begin_iteration(i, [self._tc(str(i), "read_file", path=f"f{i}.py")])   # checkpoint at i=4
+        g.begin_iteration(5, [self._tc("5", "edit_file", path="f1.py")])
+        assert g.on_mutation(5, {"path": "f1.py"}) == "pressure_made"
+        assert g._consecutive_readonly_iters == 0
+
+    def test_edit_far_after_checkpoint_is_normal(self):
+        g = self._guard(checkpoint_readonly_iters=4, pressure_window_iters=2,
+                         escalate_iters_after_checkpoint=99)   # disable escalate for this test
+        for i in range(1, 5):
+            g.begin_iteration(i, [self._tc(str(i), "read_file", path=f"f{i}.py")])
+        assert g.on_mutation(9, {"path": "f1.py"}) == "normal"
+
+    def test_batch_with_mutation_and_reads_does_not_count_as_readonly(self):
+        """
+        Regression test for a bug found before this module was ever wired
+        in: a naive per-call classifier that only looks at the FIRST tool
+        call in a batch would misclassify an iteration depending on call
+        order. VibeAI's real iterations batch multiple tool calls at once
+        (confirmed live: 6 create_file + 1 edit_file in one turn), so a
+        batch containing both reads and a mutation must never count toward
+        the read-only streak, regardless of which call comes first.
+        """
+        from core.read_loop_guard import Action
+        g = self._guard(checkpoint_readonly_iters=2)
+        g.begin_iteration(1, [self._tc("1", "read_file", path="a.py")])
+        bv = g.begin_iteration(2, [
+            self._tc("2a", "create_file", path="b.py"),
+            self._tc("2b", "read_file", path="c.py"),
+            self._tc("2c", "read_file", path="d.py"),
+        ])
+        assert bv.action is not Action.CHECKPOINT
+        assert g._consecutive_readonly_iters == 1   # only iteration 1 counted
+
+    def test_edit_invalidates_cache_for_same_path(self):
+        """A stale cache entry must never claim a file is 'unchanged' after
+        the guard's own edit_file call just changed it."""
+        g = self._guard()
+        g.record_read_result({"path": "App.jsx"}, "old content", 1)
+        g.on_mutation(2, {"path": "App.jsx"})
+        assert g.cache.lookup({"path": "App.jsx"}) is None
+
+    def test_shadow_mode_never_acts_but_still_tracks_state(self):
+        """Shadow mode must log what it would do without ever short-
+        circuiting a real read or injecting a message into the live run."""
+        from core.read_loop_guard import Action
+        g = self._guard(checkpoint_readonly_iters=2, shadow=True)
+        g.begin_iteration(1, [self._tc("1", "read_file", path="a.py")])
+        bv = g.begin_iteration(2, [self._tc("2", "read_file", path="b.py")])
+        assert bv.action is Action.PROCEED
+        assert bv.short_circuits == {}
+        assert g._consecutive_readonly_iters == 2   # internal state still progresses
+
+
 class TestSshExecTripwire:
     """#10 -- ssh_exec had none of bash()'s destructive-command tripwires;
     a "deploy to server" task could execute sudo rm -rf, shutdown, etc.
@@ -3559,7 +4405,7 @@ class TestBuildLessonPersistence:
 
         seen = {}
 
-        async def fake_store_error_fix(self, error, fix, team="code"):
+        async def fake_store_error_fix(self, error, fix, team="code", workspace=""):
             seen["error"] = error
             seen["fix"] = fix
             seen["team"] = team
@@ -3583,7 +4429,7 @@ class TestBuildLessonPersistence:
             self._ready = True
             return True
 
-        async def fake_store_error_fix(self, error, fix, team="code"):
+        async def fake_store_error_fix(self, error, fix, team="code", workspace=""):
             pass
 
         monkeypatch.setattr(memory_mod.memory, "_ready", False)
@@ -3597,7 +4443,7 @@ class TestBuildLessonPersistence:
         import tools.memory as memory_mod
         loop = self._loop(tmp_path)
 
-        async def broken_store(self, error, fix, team="code"):
+        async def broken_store(self, error, fix, team="code", workspace=""):
             raise RuntimeError("chromadb exploded")
 
         monkeypatch.setattr(memory_mod.memory, "_ready", True)
@@ -4256,3 +5102,1503 @@ class TestCeoOversightReport:
         bad = tmp_path / "corrupt.jsonl"
         bad.write_text("{not valid json at all", encoding="utf-8")
         assert ceo_mod._read_jsonl(bad) == []
+
+
+# ── CLI live-display pre-flight translation (cli.py::ThinkingPanel) ────────────
+# core/agent_loop.py's pre-flight phase (skills, workspace scan, repo map,
+# VibeMind planning up to 25s, cross-session lessons up to 10s) all logged
+# real INFO lines, but ThinkingPanel._translate() had no rule matching any of
+# them -- only the sibling _is_hard_reasoning branch's messages were wired.
+# The result: for a typical "build me a website" task (the _needs_planning
+# branch), the user watched a bare "Thinking… (Ns)" spinner tick for up to
+# ~25-35s with zero visible progress before the first real iteration --
+# reported live as an "ugly" dead gap between hitting Enter and any feedback.
+
+class TestThinkingPanelPreflightTranslation:
+    def _panel(self):
+        from cli import ThinkingPanel
+        return ThinkingPanel()
+
+    def test_workspace_scan_message_sets_stage_and_translates(self):
+        panel = self._panel()
+        out = panel._translate(
+            "[agent] pre-flight workspace scan injected (120 chars)", "INFO",
+        )
+        assert out is not None
+        assert panel.stage == "Scanning workspace"
+
+    def test_repo_map_message_translates(self):
+        panel = self._panel()
+        out = panel._translate("[agent] repo map injected (300 chars)", "INFO")
+        assert out is not None
+
+    def test_creative_build_planning_message_sets_stage_and_translates(self):
+        panel = self._panel()
+        out = panel._translate(
+            "[agent] creative/build task — VibeMind planning pass (25s cap)", "INFO",
+        )
+        assert out is not None
+        assert panel.stage == "Planning your build"
+
+    def test_implementation_spec_injected_translates(self):
+        panel = self._panel()
+        out = panel._translate("[agent] VibeMind implementation spec injected", "INFO")
+        assert out is not None
+
+    def test_planning_timeout_resets_stage_and_translates_as_friendly_warning(self):
+        panel = self._panel()
+        panel.stage = "Planning your build"
+        out = panel._translate(
+            "[agent] VibeMind planning timed out (25s) — proceeding without spec", "WARNING",
+        )
+        assert out is not None
+        assert panel.stage == "Thinking"
+
+    def test_past_lesson_context_injected_translates(self):
+        panel = self._panel()
+        out = panel._translate("[agent] past-lesson context injected", "INFO")
+        assert out is not None
+
+    def test_skills_injected_translates(self):
+        panel = self._panel()
+        out = panel._translate("[agent] skills injected (80 chars)", "INFO")
+        assert out is not None
+
+    def test_existing_site_grounding_translates(self):
+        panel = self._panel()
+        out = panel._translate(
+            "[agent] existing-site grounding injected from src/App.jsx", "INFO",
+        )
+        assert out is not None
+
+    def test_unmatched_info_message_still_returns_none(self):
+        """Sanity check: unrelated INFO noise must still be dropped silently,
+        not suddenly caught by an over-broad new pattern."""
+        panel = self._panel()
+        assert panel._translate("[some_other_module] unrelated debug info", "INFO") is None
+
+
+# ── CONFIDENCE_PROMPT_SUFFIX wiring (2026-07-16 gap fix) ───────────────────────
+# core/peer_consult.py's CONFIDENCE_PROMPT_SUFFIX was defined but nothing ever
+# appended it to a system prompt, so consult_if_unsure's tag-parsing path could
+# never actually fire (independently flagged by 5/9 reviewers in the
+# 2026-07-16 code review, deliberately left as a deferred decision at the
+# time). Wired onto the two call sites that have NO other independent quality
+# check already covering them: brain.py's plan/verify calls (no cascade/
+# best-of-N there) and code.py's image-to-code path (the cascade's cheap tier
+# has no vision capability, so this path skips the cascade entirely).
+
+class TestConfidenceSuffixWiring:
+    def test_with_confidence_invite_appends_formatted_tag(self):
+        from core.peer_consult import with_confidence_invite, CONFIDENCE_PROMPT_SUFFIX
+        out = with_confidence_invite("BASE SYSTEM PROMPT", "glm_47_cerebras")
+        assert out.startswith("BASE SYSTEM PROMPT")
+        assert "(model=glm_47_cerebras)" in out
+        assert "CONFIDENCE:" in out and "UNCERTAIN:" in out
+        # sanity: the raw template's placeholder must not leak through unfilled
+        assert "{model_id}" not in out
+
+    def test_code_team_image_path_invites_confidence_tag(self, monkeypatch):
+        import teams.base_team as base_team_mod
+        from teams.code import CodeTeam
+        from core.imcp import TaskType, Complexity
+
+        captured = {}
+
+        async def fake_generate(model_id, **kwargs):
+            captured["model_id"] = model_id
+            captured["system"] = kwargs.get("system", "")
+            return "Here is a description of the screenshot."
+
+        monkeypatch.setattr(base_team_mod, "generate_resilient", fake_generate)
+        out = asyncio.run(CodeTeam()._generate(
+            instruction="what does this screenshot show?",
+            image_b64="fake_base64_png_data",
+            task_type=TaskType.VIBE_CODING,
+            complexity=Complexity.SIMPLE,
+            success_criteria=[],
+        ))
+        assert captured["model_id"] == "gpt_oss_120b_coder"
+        assert "(model=gpt_oss_120b_coder)" in captured["system"]
+        assert out == "Here is a description of the screenshot."
+
+    def test_brain_team_plan_and_verify_calls_invite_confidence_tag(self, monkeypatch):
+        import teams.base_team as base_team_mod
+        from teams.brain import BrainTeam
+        from core.imcp import TaskJSON, Classification, TaskType, Complexity
+
+        calls = []
+
+        async def fake_generate(model_id, **kwargs):
+            calls.append((model_id, kwargs.get("system", "")))
+            return f"output from {model_id}"
+
+        monkeypatch.setattr(base_team_mod, "generate_resilient", fake_generate)
+        task_json = TaskJSON(
+            original_prompt="plan a login form",
+            refined_prompt="plan a login form",
+            classification=Classification(
+                primary_type=TaskType.VIBE_CODING, complexity=Complexity.MODERATE,
+            ),
+            success_criteria=["has email field"],
+        )
+        asyncio.run(BrainTeam()._execute(task_json, "plan a login form", 1, {}))
+
+        by_model = dict(calls)
+        assert "(model=gemini_flash)" in by_model["gemini_flash"]
+        assert "(model=qwen36_27b_verifier)" in by_model["qwen36_27b_verifier"]
+
+
+# ── Cross-session memory workspace scoping (2026-07-16 gap fix) ────────────────
+# tools/memory.py stores every workspace's build-fix lessons in ONE shared
+# ChromaDB collection. Without a workspace filter, a lesson learned fixing a
+# build error in one user's project could get injected into an unrelated
+# project's task purely because the error text embeds similarly -- flagged as
+# a deferred gap in the 2026-07-16 session (PROJECT_SUMMARY.md section 5).
+
+class TestMemoryWorkspaceScoping:
+    def test_build_where_combines_team_and_workspace(self):
+        from tools.memory import _build_where
+        assert _build_where("code", "C:/proj1") == {
+            "$and": [{"team": "code"}, {"workspace": "C:/proj1"}]
+        }
+
+    def test_build_where_team_only(self):
+        from tools.memory import _build_where
+        assert _build_where("code", "") == {"team": "code"}
+
+    def test_build_where_workspace_only(self):
+        from tools.memory import _build_where
+        assert _build_where(None, "C:/proj1") == {"workspace": "C:/proj1"}
+
+    def test_build_where_neither_returns_none(self):
+        from tools.memory import _build_where
+        assert _build_where(None, "") is None
+
+    def test_store_solution_and_error_fix_tag_workspace_in_metadata(self):
+        """The metadata dict passed to Chroma must carry the workspace key
+        so a later scoped retrieve_context() can filter on it."""
+        import asyncio as _asyncio
+        from tools.memory import VectorMemory
+
+        mem = VectorMemory()
+        mem._ready = True
+
+        captured = {}
+
+        class FakeCollection:
+            def add(self, ids, documents, metadatas, embeddings=None):
+                captured["metadata"] = metadatas[0]
+
+        mem._col = FakeCollection()
+
+        _asyncio.run(mem.store_error_fix(
+            error="TypeError: x", fix="cast to int", team="code", workspace="C:/proj1",
+        ))
+        assert captured["metadata"]["workspace"] == "C:/proj1"
+
+        _asyncio.run(mem.store_solution(
+            task_description="build a form", team="code", output="done",
+            quality_score=0.9, workspace="C:/proj2",
+        ))
+        assert captured["metadata"]["workspace"] == "C:/proj2"
+
+    def test_agent_loop_stores_build_lesson_scoped_to_its_own_workspace(self, tmp_path, monkeypatch):
+        import tools.memory as memory_mod
+        from core.agent_loop import AgentLoop
+
+        loop = AgentLoop(workspace=tmp_path)
+        seen = {}
+
+        async def fake_store_error_fix(self, error, fix, team="code", workspace=""):
+            seen["workspace"] = workspace
+
+        monkeypatch.setattr(memory_mod.memory, "_ready", True)
+        monkeypatch.setattr(memory_mod.VectorMemory, "store_error_fix", fake_store_error_fix)
+
+        asyncio.run(loop._store_build_lesson("some error", "some fix"))
+        assert seen["workspace"] == str(tmp_path.resolve())
+
+
+# ── Verifier same-model fallback blind spot (2026-07-16 gap fix) ───────────────
+# A cascade verifier call could, via generate_resilient's own cross-model
+# failover, resolve onto the EXACT model whose output it's supposed to be
+# independently scoring -- e.g. _TEXT_SAFETY_NET includes gpt_oss_120b_coder,
+# which is also teams/code.py's cascade primary_tier. An outage of the
+# default verifier (qwen36_27b_verifier) could silently fail over into that
+# model grading its own answer -- the identical self-grading bias
+# core/confidence_cascade.py's own docstring says an independent verifier
+# exists to avoid, just arriving through the fallback chain instead of
+# self-report. Flagged as a deferred gap in the 2026-07-16 session
+# (PROJECT_SUMMARY.md section 5), mirroring the Council Critic same-family
+# fix already shipped for manager/free_manager.py.
+
+class TestVerifierExcludeSameModelFallback:
+    def test_exclude_removes_candidate_and_its_same_endpoint_twin(self, monkeypatch):
+        """
+        gpt_oss_120b_coder (code team) and gpt_oss_120b_coord (brain team,
+        one of qwen36_27b_verifier's own same-team fallback candidates) are
+        BOTH openai/gpt-oss-120b on Groq -- same real backend, different
+        registry role. Excluding by model_id alone would still let the
+        fallback resolve onto gpt_oss_120b_coord and get the identical
+        biased answer the exclude was meant to prevent, so exclude must
+        also drop same-endpoint siblings.
+        """
+        import models.registry as registry_mod
+
+        called = []
+
+        class FakeConnector:
+            def __init__(self, mid):
+                self.mid = mid
+
+            async def generate(self, **kwargs):
+                called.append(self.mid)
+                if self.mid in ("gpt_oss_120b_coder", "gpt_oss_120b_coord"):
+                    return "SHOULD NEVER BE REACHED WHEN EXCLUDED"
+                if self.mid == "llama33_70b_memory":
+                    return "answer from a genuinely different model"
+                raise RuntimeError(f"{self.mid} is down")
+
+        monkeypatch.setattr(registry_mod.registry, "get", lambda mid: FakeConnector(mid))
+
+        out = asyncio.run(registry_mod.generate_resilient(
+            "qwen36_27b_verifier", exclude={"gpt_oss_120b_coder"}, prompt="score this",
+        ))
+        assert "gpt_oss_120b_coder" not in called
+        assert "gpt_oss_120b_coord" not in called
+        assert out == "answer from a genuinely different model"
+
+    def test_cascade_score_excludes_the_tier_model_being_judged(self, monkeypatch):
+        import core.confidence_cascade as cascade_mod
+
+        captured_excludes = []
+
+        async def fake_generate(model_id, **kwargs):
+            if model_id != "qwen36_27b_verifier":
+                return "candidate answer"
+            captured_excludes.append(kwargs.get("exclude"))
+            return '{"confidence": 0.9, "failed_points": [], "reasoning": "fine"}'
+
+        monkeypatch.setattr(cascade_mod, "generate_resilient", fake_generate)
+        asyncio.run(cascade_mod.run_cascade(
+            tiers=["gpt_oss_120b_coder"], instruction="do x", system="sys",
+        ))
+        assert captured_excludes == [{"gpt_oss_120b_coder"}]
+
+
+# ── Terse internal-reasoning style (core/compact_style.py) ─────────────────────
+# Adapted from the "caveman mode" idea: drop articles/filler/hedging from
+# PROSE that gets echoed back into context on later calls (verifier findings,
+# leader verdicts, comparison-judge strategy text, the coding agent's own
+# narration), never touch code or the final user-facing answer. Observed live
+# (2026-07-16): the coding agent's own final_response padded a single tool
+# call's worth of content into 5 narrated sentences -- also a direct
+# violation of _AGENT_SYSTEM's own "never explain what you are going to do
+# without immediately calling the tool" rule.
+
+class TestCompactStyle:
+    def test_with_compact_style_appends_suffix_and_preserves_original(self):
+        from core.compact_style import with_compact_style
+        out = with_compact_style("BASE SYSTEM PROMPT")
+        assert out.startswith("BASE SYSTEM PROMPT")
+        assert "terse" in out.lower()
+        assert "articles" in out.lower()
+
+    def test_suffix_explicitly_scopes_away_from_code_and_final_answers(self):
+        """The whole point is narrower than 'always be terse' -- it must not
+        read as license to compress code or a real user's answer."""
+        from core.compact_style import COMPACT_STYLE_SUFFIX
+        low = COMPACT_STYLE_SUFFIX.lower()
+        assert "does not apply to code" in low or "not to code" in low
+        assert "final answer" in low
+
+    def test_agent_system_carries_compact_style_suffix(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        from core.compact_style import COMPACT_STYLE_SUFFIX
+        assert COMPACT_STYLE_SUFFIX in _AGENT_SYSTEM
+
+    def test_agent_system_compact_gets_a_short_terse_reminder_not_full_suffix(self):
+        """_AGENT_SYSTEM_COMPACT is deliberately ~100 tokens (vs ~2800 for the
+        full prompt) for tight Groq TPM budgets -- appending the full ~90-
+        token suffix would defeat its own purpose. It gets a one-line
+        reminder instead."""
+        from core.agent_loop import _AGENT_SYSTEM_COMPACT, _AGENT_SYSTEM
+        from core.compact_style import COMPACT_STYLE_SUFFIX
+        assert COMPACT_STYLE_SUFFIX not in _AGENT_SYSTEM_COMPACT
+        assert "terse" in _AGENT_SYSTEM_COMPACT.lower()
+        assert len(_AGENT_SYSTEM_COMPACT) < len(_AGENT_SYSTEM) / 4
+
+    def test_comparison_judge_strategy_prompt_reinforces_terseness(self):
+        """comparison_judge.py has no system= prompt at all (instructions
+        live in the prompt text) -- the terseness reinforcement must be
+        inline there, not the generic suffix (which has nowhere to attach)."""
+        import inspect
+        import core.comparison_judge as cj
+        src = inspect.getsource(cj.propose_and_pick_fix_strategy)
+        assert "terse" in src.lower()
+        assert "fed into a later prompt" in src or "later prompt" in src
+
+    def test_strict_json_verdict_prompts_are_deliberately_unchanged(self):
+        """_VERIFIER_SYSTEM / _LEADER_SYSTEM / _SUPERVISOR_SYSTEM already
+        force strict JSON with a one-sentence reasoning cap -- appending the
+        generic prose-compression suffix there adds prompt tokens for near-
+        zero output savings and risks conflicting with their own "no prose"
+        instruction. This pins that as a deliberate scope decision, not an
+        oversight, so a future pass doesn't "complete the coverage" by
+        mechanically adding it everywhere."""
+        from core.confidence_cascade import _VERIFIER_SYSTEM
+        from teams.leadership import _LEADER_SYSTEM
+        from core.compact_style import COMPACT_STYLE_SUFFIX
+        assert COMPACT_STYLE_SUFFIX not in _VERIFIER_SYSTEM
+        assert COMPACT_STYLE_SUFFIX not in _LEADER_SYSTEM
+
+
+class TestIntentRouter:
+    """core/intent_router.py: a plain 'hello' must route to CHAT, not launch
+    the coding agent. Live-caught (2026-07-23): typing 'hello' put the system
+    into agent mode (Iteration 1/25) and it started calling design_asset on a
+    prior task. The deterministic core is what makes greetings instant + safe;
+    the model tiebreak only handles the ambiguous middle."""
+
+    def _c(self, msg):
+        from core.intent_router import classify_intent_deterministic
+        return classify_intent_deterministic(msg)
+
+    def test_greetings_are_chat(self):
+        for g in ["hello", "hi", "hey", "Hello!", "  hi  ", "thanks", "ok",
+                  "how are you", "who are you", "what can you do", "good morning"]:
+            assert self._c(g) == "chat", f"{g!r} should be chat"
+
+    def test_greeting_with_action_verb_is_agent(self):
+        # "hey build me a site" is a task wearing a greeting.
+        assert self._c("hey build me a landing page") == "agent"
+
+    def test_build_requests_are_agent(self):
+        for a in ["build a todo app", "create nimbus-landing.html", "fix the bug",
+                  "write a python function", "run the tests", "add a footer",
+                  "refactor main.py", "install flask"]:
+            assert self._c(a) == "agent", f"{a!r} should be agent"
+
+    def test_code_tokens_force_agent(self):
+        assert self._c("look at cli.py") == "agent"
+        assert self._c("the file at src/App.jsx") == "agent"
+
+    def test_plain_questions_are_chat(self):
+        for q in ["what is JSON", "why is the sky blue", "who made you",
+                  "explain recursion"]:
+            assert self._c(q) == "chat", f"{q!r} should be chat"
+
+    def test_how_questions_are_chat(self):
+        # Live-caught (2026-07-24): "how did Rohit Sharma perform in his
+        # recent cricket matches?" had no action verb/code token, so it fell
+        # through the deterministic layer entirely (None -- ambiguous) and
+        # the model tiebreak itself misjudged it as AGENT. "how" was simply
+        # missing from _QUESTION_LEAD.
+        for q in ["how did Rohit Sharma perform in his recent matches?",
+                  "how does gravity work", "how many moons does Jupiter have",
+                  "how's the weather today"]:
+            assert self._c(q) == "chat", f"{q!r} should be chat"
+
+    def test_how_build_requests_still_agent(self):
+        # The "how" widening must not swallow real build/fix requests --
+        # _ACTION_RE runs BEFORE the question-lead check, so these still win.
+        assert self._c("how do I build a website") == "agent"
+        assert self._c("how do I fix this bug in main.py") == "agent"
+        assert self._c("how to install flask") == "agent"
+
+    def test_imperative_info_requests_are_chat(self):
+        # Live-caught (2026-07-24), THIRD instance of this exact routing gap
+        # in one session: "provide me the last score of rohit sharma of his
+        # latest match" had no wh-word, no action verb, no code token -- fell
+        # to the model tiebreak, which misjudged it AGENT again, landing on
+        # the default workspace where a stale history summary let the agent
+        # re-create nimbus-landing.html. "provide me"/"give me"/"tell me"/
+        # "share"/"let me know"/"find out" are imperative phrasings for the
+        # exact same informational ask a wh-question makes.
+        for q in [
+            "provide me the last score of rohit sharma of his latest match",
+            "give me the latest news on the election",
+            "tell me the capital of france",
+            "share the definition of recursion",
+            "let me know the weather today",
+            "find out the price of bitcoin",
+        ]:
+            assert self._c(q) == "chat", f"{q!r} should be chat"
+
+    def test_info_request_with_action_verb_or_code_token_stays_agent(self):
+        # The widening must not swallow a real build ask that happens to use
+        # one of these lead phrases alongside an actual action verb/code token.
+        assert self._c("provide a login form for main.py") == "agent"
+        assert self._c("give me a fix for the bug in cli.py") == "agent"
+
+    def test_first_person_desire_requests_are_chat(self):
+        # Live-caught (2026-07-24), FOURTH instance of this exact routing gap:
+        # "i want the info of the scores of last match of world cup between
+        # argentina and france" had no "to know" suffix (the earlier narrow
+        # fix only covered "i want to know"/"i'd like to know"), fell through
+        # again, and the model tiebreak misjudged AGENT again -- which
+        # answered with a stale RAG-pipelines explanation pulled from history,
+        # unrelated to the actual question. Widened to the general "i want/
+        # i need/i'd like" lead rather than one exact phrase at a time.
+        for q in [
+            "i want the info of the scores of last match of world cup between argentina and france",
+            "i want to know the capital of france",
+            "i'd like to know the weather today",
+            "i need details about the RAG pipeline",
+        ]:
+            assert self._c(q) == "chat", f"{q!r} should be chat"
+
+    def test_first_person_desire_with_action_verb_or_code_token_stays_agent(self):
+        assert self._c("i want to build a website for my startup") == "agent"
+        assert self._c("i need to fix this bug in main.py") == "agent"
+
+    def test_empty_is_chat(self):
+        assert self._c("") == "chat" and self._c("   ") == "chat"
+
+    def test_ambiguous_returns_none_for_model_tiebreak(self):
+        # A substantive non-question, non-verb statement is genuinely ambiguous.
+        assert self._c("the landing page for my startup about dogs and cats") is None
+
+    def test_async_classify_falls_back_to_agent_on_ambiguous_failure(self):
+        # When the model tiebreak can't run, an ambiguous message must fail
+        # toward AGENT -- never strand a real task in chat.
+        from unittest.mock import patch
+        from core import intent_router
+        async def boom(*a, **k): raise RuntimeError("no model")
+        with patch("models.registry.generate_resilient", boom):
+            r = asyncio.run(intent_router.classify_intent(
+                "the landing page for my startup about dogs and cats"))
+        assert r == "agent"
+
+    def test_physics_word_problem_is_chat_not_agent(self):
+        # Live-caught (2026-07-24): a Bramah-press derivation routed to AGENT on
+        # the incidental verb "move" ("the car will move upwards") and answered
+        # "I'll create the Nimbus landing page". A reasoning verb + a physics
+        # quantity + no code token is a question to ANSWER, not a build task.
+        for q in [
+            "derive the algebraic expression for the acceleration by which the car will move upwards",
+            "block of mass m was made to fall from height h; derive the final velocity v",
+            "calculate the kinetic energy of a 2kg mass moving at 3 m/s",
+            "prove the pythagorean theorem",
+        ]:
+            assert self._c(q) == "chat", f"{q!r} should be chat"
+
+    def test_reasoning_verb_with_code_token_stays_agent(self):
+        # The math-problem escape must NOT swallow real coding tasks that happen
+        # to use a reasoning verb -- a file/code token keeps them in the agent.
+        assert self._c("derive a new class from BaseModel in models.py") == "agent"
+        assert self._c("solve this bug in main.py where the loop never exits") == "agent"
+        assert self._c("fix the acceleration calculation in physics.py") == "agent"
+
+
+class TestNeedsLiveSearch:
+    """core/intent_router.py::needs_live_search -- a CHAT-routed question
+    (no tool access at all in handle_chat) that needs post-training-cutoff
+    info must trigger a search before answering. Live-caught (2026-07-24):
+    "what is rohit sharma's last score" routed to chat and was answered from
+    stale memory -- the search stack itself worked fine when called directly,
+    the chat path just never called it. Deliberately biased toward
+    over-triggering: a false positive just costs one extra search call."""
+
+    def _n(self, msg):
+        from core.intent_router import needs_live_search
+        return needs_live_search(msg)
+
+    def test_sports_score_queries_trigger_search(self):
+        for q in [
+            "what is rohit sharma's last score",
+            "what was the score in the last match",
+            "who won the match today",
+            "India vs England live score",
+        ]:
+            assert self._n(q), f"{q!r} should trigger live search"
+
+    def test_price_weather_news_trigger_search(self):
+        for q in [
+            "what is the current bitcoin price",
+            "what's the weather today",
+            "latest news on the election",
+            "what is the exchange rate right now",
+        ]:
+            assert self._n(q), f"{q!r} should trigger live search"
+
+    def test_static_questions_do_not_trigger_search(self):
+        for q in [
+            "what are rag pipelines",
+            "explain recursion",
+            "hello",
+            "derive the algebraic expression for the acceleration",
+            "what is JSON",
+        ]:
+            assert not self._n(q), f"{q!r} should NOT trigger live search"
+
+    def test_empty_message_does_not_trigger_search(self):
+        assert not self._n("")
+        assert not self._n(None)
+
+    def test_who_won_tolerates_word_insertions(self):
+        # Live-caught (2026-07-27): the old pattern required "who won" as a
+        # rigid adjacent phrase, missing "who actually won it though".
+        for q in ["who won", "who actually won it though", "who really won the game",
+                  "who eventually won"]:
+            assert self._n(q), f"{q!r} should trigger live search"
+
+    def test_last_next_event_tolerates_word_insertions(self):
+        # Live-caught (2026-07-27), same day as the who-won fix, same bug
+        # class: "rohit sharma's last CRICKET match" broke the rigid
+        # "last (?:match|game|...)" adjacency on the inserted "cricket" --
+        # needs_live_search silently returned False, so the query never
+        # reached search at all (a different, previously-undetected failure
+        # mode than the DDG-blocking issue that had plagued this exact
+        # question all session).
+        for q in [
+            "can you get the data info for rohit sharma's last cricket match?",
+            "what was the score in the last football match",
+            "next tennis fixture for the club",
+        ]:
+            assert self._n(q), f"{q!r} should trigger live search"
+
+    def test_dated_event_mention_triggers_search(self):
+        # Live-caught (2026-07-27): "tell me about the 2026 wimbledon mens
+        # final" had no score/result/latest keyword at all, so it never
+        # reached a live-search check, and the model confidently claimed the
+        # (already-completed) event "hasn't happened yet" -- reasoning from
+        # its own training cutoff instead of checking. A year + an
+        # event-shaped noun should search regardless of assumed past/future.
+        for q in [
+            "tell me about the 2026 wimbledon mens final",
+            "what happened at the 2024 olympics",
+            "give me details on the 2026 world cup",
+        ]:
+            assert self._n(q), f"{q!r} should trigger live search"
+
+    def test_year_alone_or_event_alone_does_not_trigger(self):
+        # Both signals required -- a bare year (a birth year, a historical
+        # reference) or a bare event noun (a general question about finals)
+        # shouldn't alone force a search.
+        assert not self._n("what happened in 1969")
+        assert not self._n("tell me about the french revolution")
+        assert not self._n("explain how a tournament bracket works")
+
+
+class TestChatLiveSearchWiring:
+    """Integration-level: drive the actual handle_chat() coroutine so a future
+    refactor can't silently unwire the search augmentation. Follows the
+    project's established monkeypatch.setattr(module, "generate_resilient",
+    fake) convention."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        import cli
+        from core.workspace_session import WorkspaceSession
+        monkeypatch.setattr(cli, "_session", WorkspaceSession(tmp_path / "chatws"), raising=False)
+        # The last-successful-search cache is module-level state (by design --
+        # it must survive across handle_chat() calls within a real session).
+        # Reset it per test so one test's successful search can't leak into
+        # another test's "search failure" assertions.
+        monkeypatch.setattr(cli, "_LAST_SEARCH_QUERY", "", raising=False)
+        monkeypatch.setattr(cli, "_LAST_SEARCH_BLOCK", "", raising=False)
+        monkeypatch.setattr(cli, "_LAST_SEARCH_TS", 0.0, raising=False)
+        return cli
+
+    def test_chat_system_forbids_self_contradiction(self):
+        # Live-caught (2026-07-27): turn 1 correctly answered (search-
+        # grounded) that the 2026 Wimbledon final was already decided; turn
+        # 2's OWN search attempt got rate-limited (0 results), and without
+        # fresh grounding the model reverted to "that hasn't happened yet" --
+        # directly contradicting its own immediately-prior correct reply. A
+        # failed follow-up lookup is not evidence the earlier one was wrong.
+        import cli
+        p = cli._CHAT_SYSTEM.lower()
+        assert "do not contradict yourself" in p
+        assert "not evidence the earlier one was wrong" in p
+
+    def test_live_query_gets_search_results_injected_into_prompt(self, tmp_path, monkeypatch):
+        cli = self._setup(tmp_path, monkeypatch)
+        captured = {}
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            captured["prompt"] = prompt
+            return "Per the search results, the score was 138."
+
+        async def fake_search(query, extract_full=None):
+            from tools.search import SearchResult
+            return [SearchResult(title="Match report", url="http://x", snippet="Scored 138 at Lord's.")]
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("what is rohit sharma's last score"))
+        assert "LIVE SEARCH RESULTS" in captured["prompt"]
+        assert "Scored 138 at Lord's" in captured["prompt"]
+
+    def test_static_question_never_calls_search(self, tmp_path, monkeypatch):
+        cli = self._setup(tmp_path, monkeypatch)
+        search_called = {"count": 0}
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            return "RAG combines retrieval with generation."
+
+        async def fake_search(query, extract_full=None):
+            search_called["count"] += 1
+            return []
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("what are rag pipelines"))
+        assert search_called["count"] == 0
+
+    def test_search_failure_falls_back_to_plain_chat(self, tmp_path, monkeypatch):
+        # Fail-open: a broken/timed-out search must never break the chat turn.
+        cli = self._setup(tmp_path, monkeypatch)
+        captured = {}
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            captured["prompt"] = prompt
+            return "I don't have today's score, but here's what I know."
+
+        async def broken_search(query, extract_full=None):
+            raise RuntimeError("network unreachable")
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", broken_search)
+
+        asyncio.run(cli.handle_chat("what is rohit sharma's last score"))
+        assert "LIVE SEARCH RESULTS" not in captured["prompt"]
+        assert captured["prompt"]  # the turn still completed
+
+    def test_followup_query_folds_in_prior_user_turns(self, tmp_path, monkeypatch):
+        # Live-caught (2026-07-27): a 4-turn conversation established "2026
+        # World Cup final" as the topic, then asked bare follow-ups ("what
+        # was the final score", "give me both team's scores"). Searched
+        # alone, these lost their subject entirely and returned generic
+        # sports-scoreboard homepages instead of the actual match. The search
+        # QUERY (not the chat prompt) must carry the recent topic forward.
+        cli = self._setup(tmp_path, monkeypatch)
+        cli._session.append("user", "how was the 2026 world cup final between spain and argentina")
+        cli._session.append("assistant", "It was a thriller, Spain won 1-0.")
+        captured = {}
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            return "Spain won 1-0."
+
+        async def fake_search(query, extract_full=None):
+            captured["query"] = query
+            return []
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("what was the final score"))
+        assert "2026 world cup final" in captured["query"].lower()
+        assert "what was the final score" in captured["query"].lower()
+
+    def test_no_history_falls_back_to_bare_message_as_query(self, tmp_path, monkeypatch):
+        cli = self._setup(tmp_path, monkeypatch)
+        captured = {}
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            return "answer"
+
+        async def fake_search(query, extract_full=None):
+            captured["query"] = query
+            return []
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("what is the current bitcoin price"))
+        assert captured["query"] == "what is the current bitcoin price"
+
+    def test_same_topic_followup_reuses_cache_when_fresh_search_is_empty(self, tmp_path, monkeypatch):
+        # Live-caught (2026-07-27): a same-topic follow-up's search query
+        # deliberately folds in the prior turn's words, which makes it look
+        # like a near-duplicate of the query DDG just served -- and got
+        # blocked almost every time in practice. Without grounding, the model
+        # reverted to a stale assumption and CONTRADICTED its own correct
+        # answer from one turn earlier. Reusing the last successful result
+        # for a same-topic follow-up avoids depending on a second live call
+        # succeeding at all.
+        cli = self._setup(tmp_path, monkeypatch)
+        captured = []
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            captured.append(prompt)
+            return "answer"
+
+        call_n = {"n": 0}
+        async def fake_search(query, extract_full=None):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                from tools.search import SearchResult
+                return [SearchResult(title="Wimbledon final", url="http://x",
+                                      snippet="Sinner defeated Zverev in four sets.")]
+            return []   # the follow-up's own search comes back empty
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("tell me about the 2026 wimbledon mens final"))
+        asyncio.run(cli.handle_chat("who actually won it though"))
+
+        assert "Sinner defeated Zverev" in captured[0]
+        assert "Sinner defeated Zverev" in captured[1], (
+            "follow-up should reuse the cached grounding when its own search is empty")
+        assert "from earlier in this conversation" in captured[1]
+
+    def test_unrelated_followup_does_not_reuse_unrelated_cache(self, tmp_path, monkeypatch):
+        # The reuse must be topic-scoped -- an unrelated later question with
+        # its own empty search must NOT get a stale, irrelevant answer
+        # injected just because SOME earlier search succeeded this session.
+        cli = self._setup(tmp_path, monkeypatch)
+        captured = []
+
+        async def fake_generate(model, prompt, system, max_tokens, temperature):
+            captured.append(prompt)
+            return "answer"
+
+        call_n = {"n": 0}
+        async def fake_search(query, extract_full=None):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                from tools.search import SearchResult
+                return [SearchResult(title="Wimbledon final", url="http://x",
+                                      snippet="Sinner defeated Zverev in four sets.")]
+            return []
+
+        import models.registry as registry_mod
+        monkeypatch.setattr(registry_mod, "generate_resilient", fake_generate)
+        import tools.search as search_mod
+        monkeypatch.setattr(search_mod.search_stack, "search", fake_search)
+
+        asyncio.run(cli.handle_chat("tell me about the 2026 wimbledon mens final"))
+        asyncio.run(cli.handle_chat("what is the weather in delhi today"))
+
+        assert "Sinner defeated Zverev" not in captured[1]
+
+
+class TestStaleWorkspaceContamination:
+    """Live-caught (2026-07-23): a fresh 'make one nimbus-landing.html' run
+    created ZERO files, then adopted the leftover aurora-site/ as 'the
+    project' and ran `cd aurora-site && npm install && npm run build` on work
+    nobody asked about. Two holes: _find_project_dir used truthiness (so an
+    empty touched-list fell through to the leftover scan), and nothing in the
+    prompt told the model that pre-existing directories aren't its task."""
+
+    def _fake_loop(self):
+        from core.agent_loop import AgentLoop
+        class FakeExec:
+            async def read_file(self, path):
+                if path == "aurora-site/package.json":
+                    return '{"scripts":{"build":"vite build"}}'
+                return "ERROR: not found"
+            async def list_dir(self, d):
+                return "\U0001F4C1 aurora-site\n\U0001F4C1 my-app"
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.executor = FakeExec()
+        return loop
+
+    def test_empty_touched_list_does_not_adopt_leftover_project(self):
+        """THE bug: touched==[] means this run made nothing -> nothing to
+        verify. Truthiness treated [] like None and scanned for leftovers."""
+        loop = self._fake_loop()
+        assert asyncio.run(loop._find_project_dir([])) is None
+
+    def test_none_touched_still_scans_for_legacy_callers(self):
+        """Legacy callers that pass no info at all keep the last-resort scan."""
+        loop = self._fake_loop()
+        assert asyncio.run(loop._find_project_dir(None)) == "aurora-site"
+
+    def test_touched_own_project_still_resolves(self):
+        loop = self._fake_loop()
+        assert asyncio.run(loop._find_project_dir(["aurora-site/src/App.jsx"])) == "aurora-site"
+
+    def test_prompt_forbids_touching_preexisting_projects(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        p = _AGENT_SYSTEM
+        assert "pre-existing project you did not create" in p
+        assert "NOT your task" in p
+
+
+class TestPromptHasNoReplayableExampleName:
+    """Live-caught (2026-07-24): the anti-contamination rule quoted a concrete
+    buildable filename ('nimbus-landing.html') as a cautionary EXAMPLE. glm-4.7
+    on a fresh, empty workspace with an empty history read that example out of
+    its own system prompt and answered 'I'll create a single, self-contained
+    nimbus-landing.html file ...' to the unrelated task 'create a file hi.txt' --
+    0 files. A system prompt must never carry a quoted, imperative, buildable
+    artifact name a weak model can mistake for the task."""
+
+    def test_prompt_carries_no_concrete_buildable_example_name(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        low = _AGENT_SYSTEM.lower()
+        assert "nimbus" not in low
+        assert "aurora-site" not in low
+
+    def test_prompt_still_states_the_rule_abstractly(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        p = _AGENT_SYSTEM
+        # The lesson survives without the replayable instance.
+        assert "pre-existing project you did not create" in p
+        assert "YOUR TASK IS ONLY THE USER MESSAGE" in p
+
+
+class TestStalledBuildGuard:
+    """Defense-in-depth for the same incident: a create/write task that ends
+    with 0 files and a reply that only NARRATES intent ('I'll create ...') is a
+    stall. The old guard missed it -- planning-tasks-only AND gated on a <60-char
+    length the ~180-char promise sailed past."""
+
+    def test_wants_artifact_matches_create_write_build(self):
+        from core.agent_loop import _wants_artifact
+        assert _wants_artifact("create a file hi.txt with the text hello world")
+        assert _wants_artifact("write a python script that sorts a list")
+        assert _wants_artifact("build me a todo app")
+
+    def test_wants_artifact_ignores_pure_inspect_tasks(self):
+        from core.agent_loop import _wants_artifact
+        assert not _wants_artifact("what files are in the workspace?")
+        assert not _wants_artifact("explain how this function works")
+
+    def test_promise_only_detects_narrated_intent(self):
+        from core.agent_loop import _promised_not_acted
+        assert _promised_not_acted(
+            "I'll create a single, self-contained nimbus-landing.html file with a "
+            "modern dark theme, using CSS gradients instead of external images.")
+        assert _promised_not_acted("Let me build the file for you.")
+        assert _promised_not_acted("Okay, I'm going to write the script now.")
+
+    def test_promise_only_ignores_real_results(self):
+        from core.agent_loop import _promised_not_acted
+        assert not _promised_not_acted("File hi.txt created with content hello world.")
+        assert not _promised_not_acted("Done. The script sorts the list ascending.")
+        assert not _promised_not_acted("")
+
+
+class TestSelfContainedMeansNoLocalAssets:
+    """Follow-up to the explicit-constraint override: the first fixed run still
+    called design_asset under a 'ONE self-contained file' constraint and wrote
+    background:url('generated_assets/...jpg'), which is a second file and
+    breaks self-containment."""
+
+    def test_prompt_bars_design_asset_under_one_file_constraint(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        p = _AGENT_SYSTEM
+        assert "do NOT call design_asset at all unless the user" in p
+        assert "generated_assets/" in p, "must name the concrete leak path"
+
+    def test_prompt_offers_a_self_contained_visual_alternative(self):
+        """Barring images without an alternative just yields an ugly page."""
+        from core.agent_loop import _AGENT_SYSTEM
+        p = _AGENT_SYSTEM.lower()
+        assert "gradient" in p and "instead" in p
+
+    def test_prompt_allows_data_uri_or_remote_when_images_demanded(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        assert "data: URI" in _AGENT_SYSTEM
+        assert "never a local relative path" in _AGENT_SYSTEM
+
+
+class TestExplicitConstraintsOutrankCategoryDefaults:
+    """Live-caught bug (2026-07-23): asking for a landing page as ONE
+    self-contained file with 'no npm, no build tools, no separate files'
+    produced `npm create vite@latest my-app` + a 5-file React project + 3
+    unrequested images, and NEVER created the requested file. The phrase
+    'landing page' matched rule 5, whose project-scale defaults silently
+    overrode every explicit user constraint. Rule 6 had already fixed the same
+    failure shape for bare-image requests; this pins the explicit-constraint
+    case so the override can't be dropped in a future prompt edit."""
+
+    def _prompt(self):
+        from core.agent_loop import _AGENT_SYSTEM
+        return _AGENT_SYSTEM
+
+    def test_override_clause_present_in_rule_5(self):
+        p = self._prompt()
+        assert "EXPLICIT USER CONSTRAINTS OUTRANK" in p
+        assert "the user wins" in p.lower()
+
+    def test_override_names_the_constraint_triggers(self):
+        """The override is useless if the model can't tell when it applies."""
+        p = self._prompt().lower()
+        for trigger in ("single file", "self-contained", "no npm", "no build tools"):
+            assert trigger in p, f"override must name the trigger phrase: {trigger!r}"
+
+    def test_override_forbids_scaffolding_under_constraints(self):
+        p = self._prompt().lower()
+        assert "do not run npm" in p
+        assert "do not scaffold" in p
+
+    def test_absolutes_are_qualified_not_left_unconditional(self):
+        """The two absolutes that caused the override to lose must now point
+        at the escape hatch, or the model still sees an unconditional NEVER."""
+        p = self._prompt()
+        i = p.find("NEVER build a UI page without calling design_asset first")
+        assert i != -1, "the absolute should still exist as the default"
+        assert "UNLESS" in p[i:i + 200], "the absolute must carry its exception inline"
+        j = p.find("AT MINIMUM: 1 hero image")
+        assert j != -1
+        assert "default only" in p[j:j + 160]
+
+
+class TestOmniRouteConnector:
+    """models/connectors/omniroute_conn.py -- local OmniRoute gateway.
+
+    Two live-caught behaviours are pinned here (2026-07-28), because both
+    presented as an unexplained multi-minute hang rather than an error:
+
+    1. OmniRoute's "auto/*" meta-routes NEVER answer non-streaming. Verified
+       live: stream:false -> HTTP 000 / 0 bytes / hangs; identical request
+       streamed -> immediate. Direct provider models (groq/...) DO answer
+       non-streaming, so the connector must stream unconditionally rather
+       than branch on a model-name pattern.
+    2. "auto/*" routing is non-deterministic and sometimes lands on a
+       *reasoning* model, which emits delta.reasoning before any
+       delta.content. Measured: max_tokens=16 -> content '' ; max_tokens=400
+       -> 'OK'. An empty return is not harmless because models/base.py raises
+       on empty output, so tenacity retried a ~40s call three times.
+    """
+
+    def _defn(self):
+        from config.models_config import MODEL_REGISTRY
+        return MODEL_REGISTRY["omniroute_auto_coding"]
+
+    def test_registered_as_manual_select_only(self):
+        # Must NOT be auto-eligible: it depends on a local Node server the
+        # user starts by hand, so escalation/peer-consult pools must never
+        # reach for it automatically. Same treatment as qwen3_coder_openrouter.
+        from models.registry import _LLM_PROVIDERS
+        assert "omniroute" not in _LLM_PROVIDERS
+
+    def test_registry_builds_the_right_connector(self):
+        from models.registry import _build_connector
+        from models.connectors.omniroute_conn import OmniRouteConnector
+        assert isinstance(_build_connector(self._defn()), OmniRouteConnector)
+
+    def test_points_at_local_gateway_not_a_remote_host(self):
+        from config.settings import settings
+        assert "localhost" in settings.omniroute_base_url
+        assert settings.omniroute_base_url.rstrip("/").endswith("/v1")
+
+    def _conn(self, monkeypatch, chunks):
+        """Build a connector whose SDK client replays `chunks` as a stream."""
+        from models.connectors.omniroute_conn import OmniRouteConnector
+        import config.settings as settings_mod
+        monkeypatch.setattr(settings_mod.settings, "omniroute_api_key", "sk-test", raising=False)
+        conn = OmniRouteConnector(self._defn())
+
+        captured = {}
+
+        class FakeStream:
+            def __aiter__(self):
+                async def gen():
+                    for c in chunks:
+                        yield c
+                return gen()
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return FakeStream()
+
+        conn._client.chat.completions.create = fake_create
+        return conn, captured
+
+    @staticmethod
+    def _chunk(content=None, *, no_choices=False):
+        """Minimal stand-in for an OpenAI streaming chunk."""
+        class Delta:
+            def __init__(self, c):
+                self.content = c
+                self.tool_calls = None
+        class Choice:
+            def __init__(self, c):
+                self.delta = Delta(c)
+                self.finish_reason = None
+        class Chunk:
+            def __init__(self, c, empty):
+                self.choices = [] if empty else [Choice(c)]
+        return Chunk(content, no_choices)
+
+    def test_streams_and_concatenates_content(self, monkeypatch):
+        chunks = [self._chunk("O"), self._chunk("K"), self._chunk(None)]
+        conn, captured = self._conn(monkeypatch, chunks)
+        out = asyncio.run(conn._call("hi", "", [], 16, 0.0))
+        assert out == "OK"
+        assert captured["stream"] is True, "must stream: auto/* never answers non-streaming"
+
+    def test_final_usage_only_chunk_does_not_crash(self, monkeypatch):
+        # The real stream ends with a chunk whose `choices` is [] carrying
+        # only usage. Indexing choices[0] there would raise.
+        chunks = [self._chunk("OK"), self._chunk(None, no_choices=True)]
+        conn, _ = self._conn(monkeypatch, chunks)
+        assert asyncio.run(conn._call("hi", "", [], 16, 0.0)) == "OK"
+
+    def test_max_tokens_floored_so_reasoning_models_can_emit_content(self, monkeypatch):
+        conn, captured = self._conn(monkeypatch, [self._chunk("OK")])
+        asyncio.run(conn._call("hi", "", [], 16, 0.0))
+        assert captured["max_tokens"] >= 2048, (
+            "a small budget is consumed entirely by reasoning tokens, "
+            "returning empty content and triggering base.py's retry storm"
+        )
+
+    def test_caller_budget_above_the_floor_is_respected(self, monkeypatch):
+        conn, captured = self._conn(monkeypatch, [self._chunk("OK")])
+        asyncio.run(conn._call("hi", "", [], 9000, 0.0))
+        assert captured["max_tokens"] == 9000
+
+    def test_missing_key_raises_instead_of_calling_out(self, monkeypatch):
+        from models.connectors.omniroute_conn import OmniRouteConnector
+        import config.settings as settings_mod
+        monkeypatch.setattr(settings_mod.settings, "omniroute_api_key", "", raising=False)
+        conn = OmniRouteConnector(self._defn())
+        with pytest.raises(RuntimeError, match="OMNIROUTE_API_KEY"):
+            asyncio.run(conn._call("hi", "", [], 16, 0.0))
+
+
+class TestExtraBodyAndFinishReason:
+    """Feature 1 (jcode v0.54.4 port): per-model extra_body injection +
+    finish_reason capture/classification. The headline case -- NIM DeepSeek
+    needs chat_template_kwargs to enable thinking -- can't be live-verified
+    without an NVIDIA key, but the mechanism is fully testable offline."""
+
+    def test_deep_merge_nested_and_scalar_override(self):
+        from models.base import BaseModelConnector
+        base = {"a": 1, "nested": {"x": 1, "y": 2}}
+        BaseModelConnector._deep_merge(base, {"a": 9, "nested": {"y": 20, "z": 3}})
+        assert base == {"a": 9, "nested": {"x": 1, "y": 20, "z": 3}}
+
+    def _connector(self, extra_body=None, timeout=None):
+        from config.models_config import ModelDef
+        from models.base import BaseModelConnector
+
+        class _Stub(BaseModelConnector):
+            async def _call(self, *a, **k):  # abstract stub
+                return ""
+        md = ModelDef(model_id="t", provider="nvidia", api_model="m", team="code",
+                      role="r", context_window=1000, extra_body=extra_body,
+                      request_timeout_s=timeout)
+        return _Stub(md)
+
+    def test_merged_extra_body_config_wins(self):
+        c = self._connector(extra_body={"chat_template_kwargs": {"thinking": True}})
+        merged = c._merged_extra_body({"reasoning_format": "hidden"})
+        assert merged["reasoning_format"] == "hidden"
+        assert merged["chat_template_kwargs"] == {"thinking": True}
+
+    def test_merged_extra_body_none_when_empty(self):
+        c = self._connector(extra_body=None)
+        assert c._merged_extra_body() is None
+
+    def test_malformed_extra_body_ignored_not_raised(self):
+        c = self._connector(extra_body="not-a-dict")
+        # must not raise -- a bad config line never takes the seat down
+        assert c._merged_extra_body() is None
+
+    def test_request_timeout_passthrough(self):
+        assert self._connector(timeout=120.0)._request_timeout() == 120.0
+        assert self._connector()._request_timeout() is None
+
+    def test_finish_reason_class(self):
+        from models.base import finish_reason_class
+        assert finish_reason_class("length", False) == "budget_artifact"
+        assert finish_reason_class("stop", False) == "empty_or_malformed"
+        assert finish_reason_class(None, False) == "incomplete"
+        assert finish_reason_class("length", True) == "ok"   # valid output wins
+
+    def test_note_completion_captures_and_never_raises(self):
+        c = self._connector()
+        class _Resp:
+            class _Ch:
+                finish_reason = "length"
+            choices = [_Ch()]
+            usage = {"reasoning_tokens": 42}
+        c._note_completion(_Resp())
+        assert c.last_finish_reason == "length"
+        assert c.last_usage == {"reasoning_tokens": 42}
+        c._note_completion(object())   # garbage response -> no crash, resets
+        assert c.last_finish_reason is None
+
+    def test_nim_deepseek_has_thinking_extra_body(self):
+        """The headline config fix is actually wired onto the NIM model."""
+        from config.models_config import MODEL_REGISTRY
+        eb = MODEL_REGISTRY["deepseek_v4_flash_nim"].extra_body
+        assert eb and eb["chat_template_kwargs"]["thinking"] is True
+
+
+class TestAmbientRunner:
+    """Feature 6 (jcode port): overnight runner that burns expiring free quota
+    under a reserve floor, single-instance, step-resumable, local-only."""
+
+    def _job(self, name, n_steps, provider="groq", cost=1):
+        from core.ambient import AmbientJob
+        class _J(AmbientJob):
+            def __init__(s):
+                s.name = name; s.provider = provider; s.est_cost = cost; s._left = n_steps; s.done = 0
+            def has_work(s): return s._left > 0
+            async def step(s):
+                s._left -= 1; s.done += 1
+                return f"step {s.done}"
+        return _J()
+
+    def test_quota_gate_reserve_floor(self):
+        from core.ambient import QuotaGate
+        # limit 100, reserve 20% -> may spend down to 80 used
+        g = QuotaGate(limits={"groq": 100}, reserve_fraction=0.20,
+                      usage_fn=lambda: {"groq": 75})
+        assert g.safe_to_spend("groq", 5) is True    # 75+5=80 == limit-floor, ok
+        assert g.safe_to_spend("groq", 6) is False   # 75+6=81 > 80, blocked
+        assert g.safe_to_spend("unknown", 999) is True   # no gate for unknown provider
+
+    def test_runner_runs_jobs_and_reports(self, tmp_path):
+        from core.ambient import AmbientRunner, QuotaGate
+        jobs = [self._job("consolidate", 2), self._job("canary", 1)]
+        quota = QuotaGate(limits={"groq": 1000})
+        # fake clock: advances 1 unit per call so the window is deterministic
+        ticks = iter(range(0, 1000))
+        runner = AmbientRunner(jobs, quota,
+                               lockfile=tmp_path / "a.lock",
+                               report_path=tmp_path / "rep.md",
+                               clock=lambda: next(ticks))
+        res = asyncio.run(runner.run_window(window_secs=50))
+        assert res.steps_run == 3            # 2 + 1 total work units
+        assert res.stopped_reason == "no_work"
+        assert (tmp_path / "rep.md").exists()
+
+    def test_quota_exhaustion_stops_run(self, tmp_path):
+        from core.ambient import AmbientRunner, QuotaGate
+        jobs = [self._job("big", 10, provider="groq", cost=100)]
+        quota = QuotaGate(limits={"groq": 100}, reserve_fraction=0.5)  # floor 50 -> can't spend 100
+        ticks = iter(range(0, 1000))
+        runner = AmbientRunner(jobs, quota, lockfile=tmp_path / "a.lock",
+                               report_path=tmp_path / "r.md", clock=lambda: next(ticks))
+        res = asyncio.run(runner.run_window(window_secs=50))
+        assert res.stopped_reason == "quota_exhausted"
+        assert res.steps_run == 0
+
+    def test_single_instance_lock_refuses_second(self, tmp_path):
+        import os
+        from core.ambient import AmbientRunner, QuotaGate
+        lock = tmp_path / "a.lock"
+        lock.write_text(str(os.getpid()))   # our own live pid holds the lock
+        runner = AmbientRunner([self._job("x", 1)], QuotaGate(limits={}),
+                               lockfile=lock, report_path=tmp_path / "r.md")
+        res = asyncio.run(runner.run_window(window_secs=10))
+        assert res.steps_run == 0 and "refused" in res.report_lines[0]
+
+    def test_review_queue_never_auto_runs(self, tmp_path):
+        from core.ambient import ReviewQueue
+        q = ReviewQueue(tmp_path / "review.jsonl")
+        q.enqueue("git push", "would push branch X")
+        q.flush()
+        content = (tmp_path / "review.jsonl").read_text()
+        assert "git push" in content   # recorded for morning approval, not executed
+
+
+class TestMemoryEdges:
+    """Feature 5 (jcode port): typed supersedes/contradicts/derived_from edges
+    over ChromaDB metadata. Pure logic -- no live ChromaDB needed."""
+
+    def test_encode_decode_roundtrip(self):
+        from core.memory_edges import encode_edges, decode_edges
+        meta = encode_edges(supersedes=["a", "b"], contradicts=["c"], derived_from=["d"])
+        dec = decode_edges(meta)
+        assert dec["supersedes"] == ["a", "b"]
+        assert dec["contradicts"] == ["c"]
+        assert dec["derived_from"] == ["d"]
+        assert dec["superseded_by"] is None
+
+    def test_chromadb_metadata_is_scalar_only(self):
+        """The real constraint: every metadata value must be a scalar, never a
+        list (ChromaDB rejects lists)."""
+        from core.memory_edges import encode_edges
+        meta = encode_edges(supersedes=["a"], contradicts=["b"])
+        assert all(isinstance(v, (str, int, float, bool)) for v in meta.values())
+
+    def test_filter_superseded_suppresses_not_deletes(self):
+        from core.memory_edges import filter_superseded, encode_edges
+        hits = [
+            {"id": "old", "meta": encode_edges(superseded_by="new")},
+            {"id": "new", "meta": encode_edges()},
+        ]
+        live = filter_superseded(hits)
+        assert [h["id"] for h in live] == ["new"]   # old suppressed, still exists in input
+
+    def test_contradiction_flags_both_sides(self):
+        from core.memory_edges import attach_contradiction_flags, conflict_marker, encode_edges
+        hits = [
+            {"id": "A", "meta": encode_edges(contradicts=["B"])},
+            {"id": "B", "meta": encode_edges()},
+        ]
+        flagged = attach_contradiction_flags(hits)
+        assert "B" in flagged[0]["conflict_with"]
+        assert "A" in flagged[1]["conflict_with"]    # marked on BOTH
+        assert "CONFLICT" in conflict_marker(flagged)
+
+    def test_derived_from_1hop_cascade(self):
+        from core.memory_edges import cascade_derived_from, encode_edges
+        parent = {"id": "P", "meta": encode_edges()}
+        child = {"id": "C", "meta": encode_edges(derived_from=["P"])}
+        store = {"P": parent}
+        out = cascade_derived_from([child], fetch_by_id=lambda i: store.get(i))
+        assert {h["id"] for h in out} == {"C", "P"}
+
+    def test_cascade_skips_superseded_parent(self):
+        from core.memory_edges import cascade_derived_from, encode_edges
+        parent = {"id": "P", "meta": encode_edges(superseded_by="P2")}
+        child = {"id": "C", "meta": encode_edges(derived_from=["P"])}
+        out = cascade_derived_from([child], fetch_by_id=lambda i: {"P": parent}.get(i))
+        assert {h["id"] for h in out} == {"C"}    # superseded parent not pulled in
+
+
+class TestCodeOutline:
+    """Feature 7 (jcode agentgrep port): dependency-free structural outline so
+    a file's shape costs ~50 tokens instead of a full read. Also the basis for
+    edit-by-@fn:name."""
+
+    def test_python_functions_classes_and_methods(self):
+        from tools.code_outline import outline_source
+        src = (
+            "def top_fn(a):\n"
+            "    return a\n"
+            "\n"
+            "class Widget:\n"
+            "    def render(self):\n"
+            "        return 1\n"
+            "    def init(self):\n"
+            "        pass\n"
+        )
+        anchors = outline_source(src, ".py")
+        names = {a.name: a.kind for a in anchors}
+        assert names["top_fn"] == "function"
+        assert names["Widget"] == "class"
+        assert names["render"] == "method" and names["init"] == "method"
+
+    def test_python_span_end_by_dedent(self):
+        from tools.code_outline import outline_source
+        src = "def f(x):\n    a = 1\n    b = 2\n\ndef g(y):\n    return y\n"
+        anchors = outline_source(src, ".py")
+        f = next(a for a in anchors if a.name == "f")
+        assert f.start_line == 1 and f.end_line == 3   # body lines 2-3, stops at blank/dedent
+
+    def test_js_function_arrow_and_class(self):
+        from tools.code_outline import outline_source
+        src = (
+            "export function render(props) {\n"
+            "  return props;\n"
+            "}\n"
+            "const init = () => {\n"
+            "  setup();\n"
+            "};\n"
+            "class App {\n"
+            "}\n"
+        )
+        anchors = outline_source(src, ".jsx")
+        names = {a.name for a in anchors}
+        assert {"render", "init", "App"} <= names
+
+    def test_format_outline_marks_seen(self):
+        from tools.code_outline import outline_source, format_outline
+        anchors = outline_source("def foo():\n    pass\ndef bar():\n    pass\n", ".py")
+        out = format_outline(anchors, seen={"foo"})
+        assert "fn foo" in out and "(shown)" in out
+        assert "fn bar" in out and out.count("(shown)") == 1
+
+    def test_anchor_for_line_smallest_enclosing(self):
+        from tools.code_outline import outline_source, anchor_for_line
+        src = "class C:\n    def m(self):\n        x = 1\n        return x\n"
+        anchors = outline_source(src, ".py")
+        a = anchor_for_line(anchors, 3)   # inside method m, which is inside class C
+        assert a.name == "m"              # smallest enclosing wins
+
+    def test_unsupported_extension_empty(self):
+        from tools.code_outline import outline_source
+        assert outline_source("some text", ".txt") == []
+
+
+class TestContextManagerCompaction:
+    """Feature 2 (jcode port): tiered compaction with a pinned region that
+    can never evict the task spec / system prompt -- the two historical
+    agent-loop bugs (evicted task spec, dropped tool defs) become impossible."""
+
+    def _msgs(self, n_middle=40):
+        # system(pinned) + long middle + recent tail + final user task(pinned)
+        msgs = [{"role": "system", "content": "SYSTEM PROMPT " + "x" * 200}]
+        for i in range(n_middle):
+            msgs.append({"role": "assistant", "content": f"middle turn {i} " + "y" * 400})
+        msgs.append({"role": "user", "content": "THE ACTUAL TASK SPEC to keep"})
+        return msgs
+
+    def test_under_soft_threshold_no_change(self):
+        from core.context_manager import ContextManager
+        cm = ContextManager(budget_tokens=10_000_000)   # huge budget -> fits
+        msgs = self._msgs(3)
+        out, state = cm.ensure_fits(msgs)
+        assert out == msgs
+        assert cm.last_event.trigger == "none"
+
+    def test_hard_compaction_preserves_pinned_and_tail(self):
+        from core.context_manager import ContextManager
+        cm = ContextManager(budget_tokens=20_000)        # small -> forces hard
+        msgs = self._msgs(60)
+        out, state = cm.ensure_fits(msgs)
+        joined = " ".join(str(m.get("content")) for m in out)
+        assert "SYSTEM PROMPT" in joined, "system prompt (pinned) must survive"
+        assert "THE ACTUAL TASK SPEC to keep" in joined, "task spec (pinned) must survive"
+        assert cm.last_event.trigger == "hard"
+        assert len(out) < len(msgs), "middle turns should be compacted"
+        assert state.covers_up_to_turn > 0
+
+    def test_hard_compaction_reduces_tokens(self):
+        from core.context_manager import ContextManager, estimate_tokens
+        cm = ContextManager(budget_tokens=20_000)
+        msgs = self._msgs(60)
+        out, _ = cm.ensure_fits(msgs)
+        assert estimate_tokens(out) < estimate_tokens(msgs)
+
+    def test_oversized_tool_result_clamped(self):
+        from core.context_manager import ContextManager, EMERGENCY_TOOL_RESULT_MAX_CHARS
+        cm = ContextManager(budget_tokens=20_000)
+        msgs = [{"role": "system", "content": "sys"}]
+        msgs += [{"role": "assistant", "content": "z" * 500} for _ in range(30)]
+        msgs.append({"role": "tool", "content": "T" * 50_000})   # huge, in recent tail
+        msgs.append({"role": "user", "content": "task"})
+        out, _ = cm.ensure_fits(msgs)
+        tool_msgs = [m for m in out if m.get("role") == "tool"]
+        assert tool_msgs and len(str(tool_msgs[0]["content"])) <= EMERGENCY_TOOL_RESULT_MAX_CHARS + 20
+        assert "[...truncated]" in str(tool_msgs[0]["content"])
+
+    def test_413_strips_images_first(self):
+        from core.context_manager import ContextManager
+        msgs = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 10000}},
+            {"type": "text", "text": "keep me"},
+        ]}]
+        out = ContextManager.shrink_for_413(msgs)
+        parts = out[0]["content"]
+        assert any(p.get("text") == "keep me" for p in parts), "text must survive"
+        assert not any(p.get("type", "").startswith("image") for p in parts), "images stripped"
+
+    def test_image_flat_token_cost(self):
+        from core.context_manager import estimate_tokens, IMAGE_TOKEN_COST
+        big = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "A" * 500000}}]}]
+        # 500k base64 chars must NOT be charged as ~166k tokens -- flat cost only
+        assert estimate_tokens(big, system_overhead=False) < IMAGE_TOKEN_COST + 100
+
+    def test_summarizer_failure_never_raises(self):
+        from core.context_manager import ContextManager
+        def boom(_msgs): raise RuntimeError("summarizer down")
+        cm = ContextManager(budget_tokens=20_000, summarizer=boom)
+        out, _ = cm.ensure_fits(self._msgs(60))   # must not raise
+        assert len(out) >= 1
+
+
+class TestCompletionReportPolicy:
+    """Feature 4 (jcode port): completion-report gates that surface
+    premature-victory / over-claiming -- the class of failure behind the
+    six-instance harness-blame saga."""
+
+    def test_empty_unchecked_no_retry_is_degraded(self):
+        from core.gw_blackboard import enforce_report_policy
+        report, mandatory = enforce_report_policy(
+            {"outcome": "partial", "what_i_did_not_check": []})
+        assert report.report_quality == "degraded"
+        assert mandatory is True
+
+    def test_retry_fills_unchecked_recovers_to_ok(self):
+        from core.gw_blackboard import enforce_report_policy
+        def retry(_prompt):
+            return {"what_i_did_not_check": ["did not run the browser test"]}
+        report, mandatory = enforce_report_policy(
+            {"outcome": "partial", "what_i_did_not_check": []}, retry_fn=retry)
+        assert report.what_i_did_not_check == ["did not run the browser test"]
+        assert report.report_quality == "ok"
+        assert mandatory is False
+
+    def test_done_without_validation_is_degraded(self):
+        from core.gw_blackboard import enforce_report_policy
+        report, mandatory = enforce_report_policy(
+            {"outcome": "done", "what_i_did_not_check": ["edge cases"],
+             "validation_performed": []})
+        assert report.report_quality == "degraded"
+        assert mandatory is True
+
+    def test_done_with_validation_and_unchecked_is_ok(self):
+        from core.gw_blackboard import enforce_report_policy
+        report, mandatory = enforce_report_policy(
+            {"outcome": "done", "what_i_did_not_check": ["load test"],
+             "validation_performed": ["ran unit tests", "built the project"]})
+        assert report.report_quality == "ok"
+        assert mandatory is False
+
+    def test_unchecked_todos_render_for_next_seat(self):
+        from core.gw_blackboard import CompletionReport, unchecked_todos_for_next_seat
+        r = CompletionReport(outcome="partial", what_i_did_not_check=["auth flow", "mobile layout"])
+        out = unchecked_todos_for_next_seat(r)
+        assert "auth flow" in out and "mobile layout" in out and "[ ]" in out
+
+    def test_unchecked_todos_empty_when_none(self):
+        from core.gw_blackboard import CompletionReport, unchecked_todos_for_next_seat
+        assert unchecked_todos_for_next_seat(
+            CompletionReport(outcome="done", what_i_did_not_check=[], validation_performed=["x"])) == ""
+
+
+class TestGWBlackboardSafeConfidence:
+    """core/gw_blackboard.py: every field in propose()/critique_and_resolve()
+    degrades gracefully on a malformed model response EXCEPT confidence used
+    to -- a bare float(data.get("confidence", ...)) crashed the whole tick
+    on a non-numeric value (e.g. "high" instead of 0.8), confirmed live
+    2026-07-19 against a mocked proposer response. Models in this
+    environment have shown a live tendency to deviate from exact JSON
+    schemas on some field almost every session; one malformed confidence
+    value must skip/default, not take down the run."""
+
+    def test_safe_confidence_defaults_on_non_numeric_string(self):
+        from core.gw_blackboard import _safe_confidence
+        assert _safe_confidence("high", 0.5) == 0.5
+
+    def test_safe_confidence_defaults_on_none(self):
+        from core.gw_blackboard import _safe_confidence
+        assert _safe_confidence(None, 0.6) == 0.6
+
+    def test_safe_confidence_clamps_out_of_range(self):
+        from core.gw_blackboard import _safe_confidence
+        assert _safe_confidence(5.0, 0.5) == 1.0
+        assert _safe_confidence(-2.0, 0.5) == 0.0
+
+    def test_safe_confidence_accepts_numeric_string(self):
+        from core.gw_blackboard import _safe_confidence
+        assert _safe_confidence("0.8", 0.5) == 0.8
+
+    def test_propose_does_not_crash_on_non_numeric_confidence(self):
+        """The actual live-reproduced crash: a proposer returning
+        confidence: "high" used to raise ValueError inside propose(),
+        taking down the whole run instead of defaulting that one field."""
+        from unittest.mock import patch
+        from core.gw_blackboard import propose, GWBlackboard
+
+        async def fake_call_json(model_id, system, prompt, max_tokens=500):
+            return {"claim": "some claim", "rationale": "some rationale", "confidence": "high"}
+
+        async def run():
+            with patch("core.gw_blackboard._call_json", fake_call_json):
+                bb = GWBlackboard(task_spec="test")
+                await propose(bb, proposers=["fake_model"])
+                return bb
+
+        bb = asyncio.run(run())
+        assert len(bb.hypotheses) == 1
+        assert bb.hypotheses[0].confidence == 0.5

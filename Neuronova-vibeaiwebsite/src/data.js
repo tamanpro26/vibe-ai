@@ -25,7 +25,7 @@ export const COUNCIL_STAGES = [
   {
     n: '03',
     name: 'Critique',
-    desc: 'A different model attacks the draft — gaps, errors, and weak reasoning get flagged.',
+    desc: 'A different model attacks the draft. Gaps, errors, and weak reasoning get flagged.',
   },
   {
     n: '04',
@@ -48,7 +48,7 @@ export const TEAMS = [
   {
     name: 'Code',
     color: 'var(--c-code)',
-    desc: 'Autonomous coding agent — writes real files, runs shell, verifies itself.',
+    desc: 'Autonomous coding agent. Writes real files, runs shell, verifies itself.',
   },
   {
     name: 'Brain',
@@ -63,7 +63,7 @@ export const TEAMS = [
   {
     name: 'Design',
     color: 'var(--c-design)',
-    desc: 'Generation and design tasks — layouts, assets, image output.',
+    desc: 'Generation and design tasks: layouts, assets, image output.',
   },
   {
     name: 'Router',
@@ -73,14 +73,14 @@ export const TEAMS = [
 ]
 
 export const OPS_LINES = [
-  { tag: 'ROUTER', color: 'var(--c-router)', text: 'intent classified: code — dispatch team.code' },
+  { tag: 'ROUTER', color: 'var(--c-router)', text: 'intent classified: code, dispatch team.code' },
   { tag: 'AGENT', color: 'var(--c-code)', text: 'writing src/parser.py · running pytest -q' },
-  { tag: 'VERIFY', color: 'var(--mint)', text: 'battery pass — 0 broken imports, 0 stub blocks' },
-  { tag: 'CB', color: 'var(--amber)', text: 'groq returned 429 — circuit OPEN for 60s' },
+  { tag: 'VERIFY', color: 'var(--mint)', text: 'battery pass. 0 broken imports, 0 stub blocks' },
+  { tag: 'CB', color: 'var(--amber)', text: 'groq returned 429. circuit OPEN for 60s' },
   { tag: 'CB', color: 'var(--mint)', text: 'failover → openrouter · 0 requests dropped' },
-  { tag: 'COUNCIL', color: 'var(--cyan)', text: 'stage 3/5 critique — attacking the draft' },
+  { tag: 'COUNCIL', color: 'var(--cyan)', text: 'stage 3/5 critique, attacking the draft' },
   { tag: 'LEADER', color: 'var(--c-vision)', text: 'team.brain output approved on review' },
-  { tag: 'CRITIC', color: 'var(--rose)', text: 'reflexion: placeholder stub found — patching' },
-  { tag: 'VERIFY', color: 'var(--mint)', text: 're-run pass — task reported done' },
+  { tag: 'CRITIC', color: 'var(--rose)', text: 'reflexion: placeholder stub found, patching' },
+  { tag: 'VERIFY', color: 'var(--mint)', text: 're-run pass. task reported done' },
   { tag: 'CEO', color: 'var(--c-brain)', text: 'oversight report generated from ops logs' },
 ]

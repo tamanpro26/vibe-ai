@@ -22,9 +22,42 @@
   --c-design: #ff3f8f;
   --c-router: #4d9dff;
 
+  /* Chakra Petch, deliberately. Its squared terminals ARE the HUD identity,
+     and it stays off the Inter/Geist/Space-Grotesk axis that most AI product
+     sites have converged on -- picking a face because it is "proven in this
+     category" is the mechanism that produces that convergence. */
   --font-display: 'Chakra Petch', sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
   --font-body: 'IBM Plex Sans', sans-serif;
+
+  /* ── Optical tracking scale ────────────────────────────────────────────
+   * Typefaces are spaced for body copy (~16px). Scale the same face to
+   * display sizes and those built-in gaps scale with it, so large text
+   * reads loose and unset. Professional typesetting compensates with
+   * NEGATIVE tracking as size increases -- the bigger the type, the
+   * tighter it wants to be. These are in em so they track the font size.
+   */
+  --track-hero: -0.035em;   /* 64-160px  */
+  --track-display: -0.02em; /* 30-46px   */
+  --track-heading: -0.01em; /* 20-30px   */
+  --track-body: 0;          /* 15-18px, leave as designed */
+  --track-label: 0.16em;    /* small mono caps NEED positive tracking */
+
+  /* ── Motion system ─────────────────────────────────────────────────────
+   * Durations and curves were previously ad hoc (0.2/0.3/0.4/0.5/0.7s,
+   * mostly default `ease`). Consistency is most of what separates
+   * considered motion from incidental motion, so everything routes
+   * through these.
+   */
+  --dur-fast: 0.18s;    /* colour/opacity swaps, hover tint          */
+  --dur-base: 0.28s;    /* the default: borders, shadows, transforms */
+  --dur-slow: 0.6s;     /* entrances, larger travel                  */
+
+  /* Decisive start, long settle. Reads as physical deceleration rather
+     than the symmetric in-out that makes UI feel sluggish at both ends.
+     One curve, used everywhere: consistency is most of what separates
+     considered motion from incidental motion. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 * {
@@ -33,8 +66,15 @@
   box-sizing: border-box;
 }
 
-html {
-  scroll-behavior: smooth;
+/* No `scroll-behavior: smooth` here. Lenis (see src/useLenis.js) drives
+   inertial scrolling on the landing route and the two fight each other:
+   the native smooth-jump and Lenis's rAF loop both try to own scrollTop,
+   which stutters anchor navigation. Lenis is skipped under reduced-motion,
+   and the rule below restores native smooth behavior for that case. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
 body {
@@ -78,17 +118,25 @@ h3 {
   line-height: 1.15;
 }
 
-/* scroll reveal */
+/* scroll reveal
+ * Opacity resolves faster than travel (0.42s vs 0.72s). Matching both
+ * durations makes an element still visibly sliding while already fully
+ * opaque, which reads as lag; landing the fade early lets the motion
+ * settle underneath text that is already readable. */
 [data-reveal] {
   opacity: 0;
-  transform: translateY(26px);
+  transform: translateY(22px);
   transition:
-    opacity 0.7s ease,
-    transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+    opacity 0.42s var(--ease-out),
+    transform 0.72s var(--ease-out);
+  will-change: opacity, transform;
 }
 [data-reveal].is-in {
   opacity: 1;
   transform: none;
+  /* Released once settled: a permanent will-change keeps every revealed
+     element on its own compositor layer for the life of the page. */
+  will-change: auto;
 }
 
 @media (prefers-reduced-motion: reduce) {

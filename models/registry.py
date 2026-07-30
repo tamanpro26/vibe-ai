@@ -25,6 +25,10 @@ _PROVIDER_CONCURRENCY: dict[str, int] = {
     "openrouter": 4,
     "nvidia":     1,
     "zai":        3,
+    # A local gateway, not a rate-limited remote API -- concurrency is
+    # bounded by the OmniRoute process itself, not by us. Kept modest
+    # anyway since it fans out to real upstream providers underneath.
+    "omniroute":  3,
 }
 _PROVIDER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 _PROVIDER_CALL_COUNTS: dict[str, int] = {}
@@ -57,6 +61,7 @@ from models.connectors.huggingface import HuggingFaceConnector
 from models.connectors.nvidia_conn import NvidiaConnector
 from models.connectors.zai_conn import ZaiConnector
 from models.connectors.mistral_conn import MistralConnector
+from models.connectors.omniroute_conn import OmniRouteConnector
 
 
 def _build_connector(model_def: ModelDef) -> BaseModelConnector:
@@ -86,6 +91,8 @@ def _build_connector(model_def: ModelDef) -> BaseModelConnector:
             return ZaiConnector(model_def)
         case "mistral":
             return MistralConnector(model_def)
+        case "omniroute":
+            return OmniRouteConnector(model_def)
         case _:
             raise ValueError(f"Unknown provider: {model_def.provider}")
 
@@ -148,7 +155,9 @@ _TEXT_SAFETY_NET   = ["qwen36_27b_verifier", "llama33_70b_memory", "gpt_oss_120b
 _VISION_SAFETY_NET = ["nemotron_vl", "gemini_flash"]
 
 
-async def generate_resilient(model_id: str, **kwargs) -> str:
+async def generate_resilient(
+    model_id: str, exclude: set[str] | None = None, **kwargs,
+) -> str:
     """
     generate() with automatic cross-model failover.
 
@@ -156,6 +165,20 @@ async def generate_resilient(model_id: str, **kwargs) -> str:
     Vision calls only fall back to vision-capable models. Duplicate
     (provider, api_model) endpoints are tried once — if an endpoint is
     down for one model_id it's down for all of them.
+
+    `exclude` removes specific model_ids from the candidate list entirely
+    (not just skipped-and-revisited) — for an INDEPENDENT verifier/reviewer
+    call, this must include the model_id whose output is being judged, so
+    an outage of the verifier's primary can never silently fail over onto
+    grading its own work (e.g. _TEXT_SAFETY_NET's gpt_oss_120b_coder is
+    also a code-cascade tier model — without this, a verifier outage could
+    resolve straight into that same model reviewing itself). Also excludes
+    every OTHER model_id sharing the same (provider, api_model) endpoint —
+    several registry entries are the same real model wearing a different
+    role (e.g. gpt_oss_120b_coord/_coder/_debug are all openai/gpt-oss-120b
+    on Groq under different team labels), so excluding by model_id alone
+    would let the fallback reach an identically-biased "different" model.
+    See core/confidence_cascade.py's `_score()` for the call site.
     """
     primary = MODEL_REGISTRY[model_id]
     if primary.provider not in _LLM_PROVIDERS or "audio" in primary.capabilities:
@@ -173,6 +196,20 @@ async def generate_resilient(model_id: str, **kwargs) -> str:
     for mid in (_VISION_SAFETY_NET if needs_vision else _TEXT_SAFETY_NET):
         if mid not in candidates:
             candidates.append(mid)
+    if exclude:
+        excluded_endpoints = {
+            (MODEL_REGISTRY[mid].provider, MODEL_REGISTRY[mid].api_model)
+            for mid in exclude if mid in MODEL_REGISTRY
+        }
+        candidates = [
+            mid for mid in candidates
+            if mid not in exclude
+            and (MODEL_REGISTRY[mid].provider, MODEL_REGISTRY[mid].api_model) not in excluded_endpoints
+        ]
+        if not candidates:
+            raise RuntimeError(
+                f"No candidates left for {model_id} after excluding {exclude}"
+            )
 
     tried_endpoints: set[tuple[str, str]] = set()
     last_exc: Exception | None = None

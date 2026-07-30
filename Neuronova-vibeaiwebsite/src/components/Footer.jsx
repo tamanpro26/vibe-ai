@@ -22,7 +22,7 @@ export default function Footer() {
           </p>
         </div>
         <div className="footer-base">
-          <span>VIBEAI — MULTI-PROVIDER MULTI-AGENT ORCHESTRATION CORE</span>
+          <span>VIBEAI / MULTI-PROVIDER MULTI-AGENT ORCHESTRATION CORE</span>
           <span>© {new Date().getFullYear()} Taman Roy Chowdhury · All rights reserved</span>
         </div>
       </div>

@@ -58,6 +58,21 @@ class MemoryEntry:
         }
 
 
+def _build_where(team: str | None, workspace: str = "") -> dict | None:
+    """Build a Chroma `where` filter from team/workspace, combining both
+    with `$and` when both are set (Chroma rejects multiple top-level keys)."""
+    conditions = []
+    if team:
+        conditions.append({"team": team})
+    if workspace:
+        conditions.append({"workspace": workspace})
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
 # ── Vector Memory ─────────────────────────────────────────────────────────────
 
 class VectorMemory:
@@ -145,6 +160,7 @@ class VectorMemory:
         quality_score:    float,
         task_id:          str = "",
         task_type:        str = "",
+        workspace:        str = "",
     ) -> None:
         """Store an approved model output in the memory store."""
         if not self._ready or not self._col:
@@ -160,6 +176,7 @@ class VectorMemory:
                 "task_type":     task_type,
                 "quality_score": quality_score,
                 "task_desc":     task_description[:200],
+                "workspace":     workspace,
             },
         )
 
@@ -178,9 +195,10 @@ class VectorMemory:
 
     async def store_error_fix(
         self,
-        error:  str,
-        fix:    str,
-        team:   str = "code",
+        error:      str,
+        fix:        str,
+        team:       str = "code",
+        workspace:  str = "",
     ) -> None:
         """Store an error pattern + its fix for future retrieval."""
         if not self._ready or not self._col:
@@ -192,7 +210,7 @@ class VectorMemory:
             task_id    = "",
             team       = team,
             content    = f"ERROR:\n{error[:500]}\n\nFIX:\n{fix[:500]}",
-            metadata   = {"team": team},
+            metadata   = {"team": team, "workspace": workspace},
         )
         try:
             doc = entry.to_chroma_doc()
@@ -214,17 +232,28 @@ class VectorMemory:
         team:      str | None = None,
         top_k:     int        = 3,
         min_score: float      = 0.4,    # cosine similarity threshold
+        workspace: str        = "",
     ) -> str:
         """
         Retrieve top-K relevant past solutions as a context injection string.
         Call this BEFORE dispatching any task to teams.
+
+        `workspace` scopes retrieval to lessons stored from the SAME project
+        directory (see core/agent_loop.py, which passes its own workspace
+        path). Without this, a build-fix lesson learned in one user's
+        project could get injected into an unrelated project's task just
+        because the error text happened to embed similarly -- the store is
+        a single shared ChromaDB collection across every workspace this
+        process ever touches. Omit `workspace` to search across all of
+        them (used by the manager's task/solution memory, which isn't tied
+        to one project directory).
         """
         if not self._ready or not self._col or self._col.count() == 0:
             return ""
 
         try:
             embedding = await self._embed(query)
-            where = {"team": team} if team else None
+            where = _build_where(team, workspace)
 
             results = self._col.query(
                 query_embeddings=[embedding] if embedding else None,

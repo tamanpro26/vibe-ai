@@ -4,13 +4,13 @@ import { PROVIDERS } from '../data.js'
 
 // Scripted loop: (active index, set of tripped indices, status line)
 const SCRIPT = [
-  { active: 0, tripped: [], msg: 'routing via google gemini — all circuits closed' },
-  { active: 0, tripped: [], msg: 'routing via google gemini — all circuits closed' },
-  { active: 1, tripped: [0], msg: '429 from google — circuit OPEN · failover to groq in 0ms' },
-  { active: 1, tripped: [0], msg: 'routing via groq — google cooling down' },
-  { active: 2, tripped: [0, 1], msg: 'groq quota hit — circuit OPEN · failover to cerebras' },
-  { active: 2, tripped: [1], msg: 'google circuit CLOSED again — cerebras still serving' },
-  { active: 0, tripped: [], msg: 'all circuits closed — back on primary. 0 requests dropped' },
+  { active: 0, tripped: [], msg: 'routing via google gemini. all circuits closed' },
+  { active: 0, tripped: [], msg: 'routing via google gemini. all circuits closed' },
+  { active: 1, tripped: [0], msg: '429 from google. circuit OPEN, failover to groq in 0ms' },
+  { active: 1, tripped: [0], msg: 'routing via groq. google cooling down' },
+  { active: 2, tripped: [0, 1], msg: 'groq quota hit. circuit OPEN, failover to cerebras' },
+  { active: 2, tripped: [1], msg: 'google circuit CLOSED again. cerebras still serving' },
+  { active: 0, tripped: [], msg: 'all circuits closed, back on primary. 0 requests dropped' },
 ]
 
 export default function Failover() {
@@ -28,7 +28,7 @@ export default function Failover() {
       <div className="container">
         <SectionHeader index="02" label="RESILIENCE" title="No single point of failure.">
           A circuit breaker tracks rate limits and outages per provider. When one trips, the
-          request reroutes to the next available model — automatically, mid-task.
+          request reroutes to the next available model automatically, mid-task.
         </SectionHeader>
         <div className="failover-board" data-reveal>
           <div className="failover-grid" role="img" aria-label="Animated diagram: requests failing over between providers">

@@ -34,6 +34,8 @@ Safety (honest scope):
 from __future__ import annotations
 
 import asyncio
+import difflib
+import hashlib
 import json
 import os
 import re
@@ -579,6 +581,104 @@ TOOL_SCHEMAS_MINIMAL: list[dict] = [
 ]
 
 
+# ── edit_file auto-repair (Phase 0.1, upgrade roadmap §1) ──────────────────────
+# Weak fallback models reproduce old_str from memory instead of the file's
+# real current content -- confirmed reproducible on 2 separate live runs,
+# same file, different models. Byte-exact matching demands precision those
+# models don't have. Instead of immediately bouncing the error back to the
+# model (which is what triggers the guess -> fail -> abandon spiral fix #3
+# already guards against), try to repair the match deterministically first;
+# only surface the error if repair also fails.
+
+def _whitespace_flexible_pattern(old_str: str) -> re.Pattern:
+    """Build a regex matching old_str with any run of whitespace treated as
+    flexible (\\s+) and everything else literal. Recovers the single most
+    common near-miss: correct content, wrong indentation/line breaks."""
+    parts = re.split(r"(\s+)", old_str)
+    out = [r"\s+" if part.strip() == "" and part != "" else re.escape(part) for part in parts]
+    return re.compile("".join(out), re.DOTALL)
+
+
+def _fuzzy_line_window_match(content: str, old_str: str, min_ratio: float = 0.9) -> tuple[int, int] | None:
+    """Slide a line-sized window over content looking for the best-matching
+    block by similarity ratio. Line-based (not character-based) because code
+    edits are logical blocks, not arbitrary byte ranges -- this is both
+    cheaper and more meaningful than a raw character-level fuzzy search.
+    Returns (start, end) character offsets into `content` for the best match
+    at or above min_ratio, or None if nothing clears the bar."""
+    content_lines = content.splitlines(keepends=True)
+    old_line_count = max(1, old_str.count("\n") + 1)
+    if not content_lines or len(content_lines) < old_line_count:
+        return None
+
+    best_ratio = 0.0
+    best_span: tuple[int, int] | None = None
+    offset = 0
+    line_offsets = []
+    for line in content_lines:
+        line_offsets.append(offset)
+        offset += len(line)
+
+    # Try window sizes old_line_count-1..old_line_count+1 to tolerate the
+    # model dropping or adding one line (a common near-miss on its own).
+    for size in (old_line_count, old_line_count + 1, max(1, old_line_count - 1)):
+        for i in range(0, len(content_lines) - size + 1):
+            window = "".join(content_lines[i:i + size])
+            ratio = difflib.SequenceMatcher(None, old_str, window).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                start = line_offsets[i]
+                end = start + len(window)
+                best_span = (start, end)
+
+    if best_ratio >= min_ratio:
+        return best_span
+    return None
+
+
+_IMAGE_MAGIC: tuple[bytes, ...] = (
+    b"\x89PNG\r\n\x1a\n",   # PNG
+    b"\xff\xd8\xff",        # JPEG
+    b"GIF87a", b"GIF89a",   # GIF
+    b"RIFF",                # WebP (RIFF....WEBP -- checked loosely below)
+)
+
+
+def _looks_like_image(path) -> bool:
+    """Real magic-byte check, not a size/extension guess. Confirmed live
+    (2026-07-19): a failed image-gen provider call can return a JSON error
+    body (e.g. "API key budget too low") that's well over 1KB -- comfortably
+    clearing any size-only threshold while being garbage, not an image."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    if head.startswith((b"{", b"[", b"<")):
+        return False  # JSON/HTML error body, the exact failure mode seen live
+    return any(head.startswith(sig) for sig in _IMAGE_MAGIC)
+
+
+def _repair_old_str(content: str, old_str: str) -> tuple[str, str] | None:
+    """Try to recover the real substring in `content` that old_str was
+    meant to match. Returns (matched_substring, method) or None if no
+    repair method clears its bar. Order: cheap/precise first.
+
+    A repair method that finds MORE THAN ONE candidate location is treated
+    the same as finding none: picking the first silently (the original
+    behavior) risked editing the wrong one of two near-duplicate blocks
+    (e.g. repeated component boilerplate) with no error surfaced at all --
+    worse than the old behavior of just failing loudly on the exact-match
+    miss. Ambiguous must fail loudly too, not guess."""
+    matches = list(_whitespace_flexible_pattern(old_str).finditer(content))
+    if len(matches) == 1:
+        return matches[0].group(0), "whitespace-normalized"
+    span = _fuzzy_line_window_match(content, old_str)
+    if span:
+        return content[span[0]:span[1]], "fuzzy-line-match"
+    return None
+
+
 # ── Tool executor ─────────────────────────────────────────────────────────────
 
 class ToolExecutor:
@@ -723,12 +823,32 @@ class ToolExecutor:
             except Exception:
                 pass
             return f"✓ Replaced entire contents of {path} (old_str was empty — use create_file for this next time)"
+        repaired_via = None
         if old_str not in content:
-            # Show context to help the model fix the mismatch
-            return (
-                f"ERROR: old_str not found in {path}.\n"
-                f"File starts with:\n{content[:300]}"
-            )
+            # Auto-repair before bouncing the error back to the model (see
+            # _repair_old_str above): reproduced-from-memory old_str is the
+            # single most common edit_file failure on weak fallback models,
+            # confirmed reproducible on 2 separate live runs. Surfacing the
+            # raw error immediately is what triggers the guess -> fail ->
+            # abandon spiral fix #3 (the failed-edit nudge) already guards
+            # against -- better to just not fail in the first place when the
+            # real match is deterministically recoverable.
+            repaired = _repair_old_str(content, old_str)
+            if repaired is None:
+                # Fresh, wider, line-numbered view (not just a 300-char
+                # prefix) — if this DOES reach the model, it gets something
+                # actionable instead of a generic error.
+                numbered = "\n".join(
+                    f"{i+1:>4}  {line}" for i, line in enumerate(content.splitlines()[:60])
+                )
+                more = "" if content.count("\n") < 60 else f"\n... ({content.count(chr(10)) + 1} lines total)"
+                return (
+                    f"ERROR: old_str not found in {path} (tried exact, "
+                    f"whitespace-normalized, and fuzzy line match).\n"
+                    f"Current file content:\n{numbered}{more}"
+                )
+            old_str, repaired_via = repaired
+            logger.info(f"[agent/tool] edit_file({path}) auto-repaired old_str match via {repaired_via}")
         updated = content.replace(old_str, new_str, 1)
         p.write_text(updated, encoding="utf-8")
         try:
@@ -737,7 +857,8 @@ class ToolExecutor:
                    old_preview=preview(old_str), new_preview=preview(new_str))
         except Exception:
             pass
-        return f"✓ Edited {path}"
+        suffix = f" (auto-repaired match via {repaired_via})" if repaired_via else ""
+        return f"✓ Edited {path}{suffix}"
 
     async def delete_file(self, path: str) -> str:
         p = self._safe_path(path)
@@ -1068,12 +1189,76 @@ class ToolExecutor:
         if not urls:
             return raw  # raw output still contains useful info even without parsed URLs
 
-        lines = [
-            f"✓ {len(urls)} design asset(s) generated — embed directly in HTML:",
-        ]
+        # Download a real local copy of each asset. Confirmed live
+        # (2026-07-19): for a bare "generate me a png file" request (no
+        # website project, so agent_loop.py's build-gated
+        # _localize_remote_images never runs -- that path requires a
+        # verifiable project dir), the model had nothing but a URL and this
+        # tool's own "embed directly in HTML" instruction below -- it
+        # followed that instruction literally, writing an `<img src="...">`
+        # HTML tag as the CONTENT of a file it named "...png", which is not
+        # a real image and doesn't open. Downloading a real local copy here
+        # means a working file exists on disk regardless of whether this
+        # ends up embedded in HTML or the user just wanted a plain image
+        # file. Same curl-not-aiohttp technique as _localize_remote_images
+        # (pollinations' CDN serves aiohttp an empty 200 -- TLS-fingerprint
+        # bot filtering, verified directly).
+        local_paths: list[str] = []
+        try:
+            curl = shutil.which("curl")
+            if curl:
+                assets_dir = self.workspace / "generated_assets"
+                assets_dir.mkdir(parents=True, exist_ok=True)
+                ext = ".png" if asset_type in ("png", "icon", "banner") else ".jpg"
+                slug = re.sub(r"[^a-z0-9]+", "_", description[:40].lower()).strip("_") or "asset"
+                for url in urls:
+                    name = f"{slug}-{hashlib.sha1(url.encode()).hexdigest()[:8]}{ext}"
+                    target = assets_dir / name
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            curl, "-sL", "--max-time", "90", "-o", str(target), url,
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        await asyncio.wait_for(proc.communicate(), timeout=100)
+                        # File size alone isn't enough -- confirmed live
+                        # (2026-07-19): a provider error response (e.g.
+                        # pollinations returning a JSON "API key budget too
+                        # low" body on a 402) can exceed 1024 bytes while
+                        # still being garbage, not an image. Check the real
+                        # magic bytes.
+                        ok = (
+                            proc.returncode == 0 and target.exists()
+                            and target.stat().st_size >= 512
+                            and _looks_like_image(target)
+                        )
+                        if ok:
+                            local_paths.append(str(target.relative_to(self.workspace)))
+                        else:
+                            target.unlink(missing_ok=True)
+                    except Exception:
+                        target.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning(f"[agent/design] local asset download skipped: {str(exc)[:60]}")
+
+        lines = [f"✓ {len(urls)} design asset(s) generated."]
+        if local_paths:
+            lines.append(
+                "\nREAL local image file(s) already saved to disk -- if the user "
+                "asked for an image FILE (not a webpage), these paths ARE the "
+                "answer. Do NOT call create_file to make another file with this "
+                "content or a URL in it -- that produces a fake, unopenable "
+                "\"image\":"
+            )
+            for p in local_paths:
+                lines.append(f"  {p}")
+        lines.append(
+            "\nRemote URL(s) -- use ONLY for embedding in HTML/CSS you are "
+            "building (<img src=\"...\">, background-image: url(...)). Never "
+            "write a URL as the literal content of a file:"
+        )
         for i, url in enumerate(urls, 1):
             lines.append(f"  [{i}] {url}")
-        lines.append(f'\nExample usage:')
+        lines.append(f'\nExample HTML usage:')
         lines.append(f'  <img src="{urls[0]}" alt="{description[:40]}" style="width:100%">')
         lines.append(f'  background-image: url("{urls[0]}")')
         return "\n".join(lines)

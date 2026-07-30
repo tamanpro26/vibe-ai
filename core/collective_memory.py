@@ -18,6 +18,7 @@ memory singleton if already loaded, to avoid loading the model twice.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
@@ -61,11 +62,23 @@ class CollectiveMemory:
         Initialise the ChromaDB collection.
         Borrows the embedding model from the pipeline memory singleton if it
         is already loaded (avoids loading all-MiniLM-L6-v2 twice).
+
+        Offloaded to a thread: chromadb's PersistentClient and (especially)
+        SentenceTransformer's model load are synchronous CPU/disk work with
+        no internal await -- calling them inline here freezes the whole
+        single-process event loop for the entire load, not just this call.
+        Confirmed live (2026-07-19): this exact gap (unthreaded, unlike the
+        sibling tools/memory.py which already fixed this) blocked the CLI's
+        own input prompt from appearing for ~8s after startup, because
+        manager.startup()'s background memory-init task runs this init()
+        while sharing the same event loop the REPL's input() executor needs
+        to be scheduled on. Same fix as tools/memory.py's init().
         """
         try:
             import chromadb
 
             # Try to borrow the already-loaded embedder from pipeline memory
+            # -- cheap attribute access, fine to leave on the event loop.
             try:
                 from tools.memory import memory as _pipeline_mem
                 if getattr(_pipeline_mem, "_ready", False) and _pipeline_mem._emb is not None:
@@ -74,17 +87,24 @@ class CollectiveMemory:
             except Exception:
                 pass
 
-            if self._emb is None:
-                from sentence_transformers import SentenceTransformer
-                self._emb = SentenceTransformer("all-MiniLM-L6-v2")
-                logger.info("[collective_memory] loaded embedder independently")
+            borrowed_emb = self._emb
 
-            Path(PERSIST_DIR).mkdir(parents=True, exist_ok=True)
-            client     = chromadb.PersistentClient(path=PERSIST_DIR)
-            self._col  = client.get_or_create_collection(
-                name=COLLECTION,
-                metadata={"hnsw:space": "cosine"},
-            )
+            def _blocking_init():
+                emb = borrowed_emb
+                if emb is None:
+                    from sentence_transformers import SentenceTransformer
+                    emb = SentenceTransformer("all-MiniLM-L6-v2")
+                Path(PERSIST_DIR).mkdir(parents=True, exist_ok=True)
+                client = chromadb.PersistentClient(path=PERSIST_DIR)
+                col = client.get_or_create_collection(
+                    name=COLLECTION,
+                    metadata={"hnsw:space": "cosine"},
+                )
+                return col, emb
+
+            self._col, self._emb = await asyncio.to_thread(_blocking_init)
+            if borrowed_emb is None:
+                logger.info("[collective_memory] loaded embedder independently")
             self._ready = True
             logger.info(
                 f"[collective_memory] ready | docs={self._col.count()}"

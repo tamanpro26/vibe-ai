@@ -25,7 +25,12 @@ class ZaiConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
-        self._client = AsyncOpenAI(api_key=settings.zai_api_key or "not-configured", base_url=self.BASE_URL)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
+        self._client = AsyncOpenAI(
+            api_key=settings.zai_api_key or "not-configured", base_url=self.BASE_URL,
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     # GLM-4.7(-Flash) "thinks compulsorily" on Z.AI's hosted API (per Z.AI's
     # own docs) and, per multiple live 2026 bug reports, the documented
@@ -60,9 +65,16 @@ class ZaiConnector(BaseModelConnector):
     async def _call_with_tools(self, messages, tools, max_tokens, temperature, **kwargs) -> dict:
         if not settings.zai_api_key:
             raise RuntimeError("ZAI_API_KEY not set")
+        # Same reasoning-token floor as _call above -- found in code review
+        # (2026-07-13): this path never got it, so a caller with a smaller
+        # max_tokens (e.g. vibemind/brain.py's run_desktop_agent, which uses
+        # 1024) still hits the exact silent-empty-response bug the floor in
+        # _call was written to fix, just on the tool-calling path instead.
         resp = await self._client.chat.completions.create(
             model=self.api_model, messages=messages, tools=tools,
-            tool_choice="auto", max_tokens=min(max_tokens, 16_384), temperature=temperature,
+            tool_choice="auto",
+            max_tokens=min(max(max_tokens, self._MIN_TOKENS_FOR_THINKING), 16_384),
+            temperature=temperature,
         )
         msg = resp.choices[0].message
         if msg.tool_calls:

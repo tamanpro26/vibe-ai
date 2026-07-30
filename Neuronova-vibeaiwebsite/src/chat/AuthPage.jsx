@@ -1,36 +1,40 @@
 import { useState } from 'react'
-import { useAuth } from './auth.jsx'
+import { SignIn, SignUp, ClerkLoading, ClerkLoaded } from '@clerk/clerk-react'
 
-export default function AuthPage() {
-  const { login, signup } = useAuth()
-  const [mode, setMode] = useState('login')
-  const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+/*
+ * Clerk's prebuilt <SignIn>/<SignUp> own the whole flow now (validation,
+ * verification email, error states, session creation) -- replacing a
+ * hand-rolled form that only ever hashed a password into localStorage.
+ * `appearance` restyles Clerk's own DOM to the HUD identity rather than
+ * wrapping it in a lookalike shell, so the real widget (and its built-in
+ * accessibility/edge-case handling) is what's on screen.
+ */
+const clerkAppearance = {
+  variables: {
+    colorPrimary: '#2be8ff',
+    colorBackground: 'transparent',
+    colorInputBackground: 'rgba(43, 232, 255, 0.05)',
+    colorInputText: '#d9f6fb',
+    colorText: '#d9f6fb',
+    colorTextSecondary: '#7a94a0',
+    colorDanger: '#ff5f6d',
+    fontFamily: 'var(--font-body)',
+    borderRadius: '6px',
+  },
+  elements: {
+    rootBox: 'auth-clerk-root',
+    card: 'auth-clerk-card',
+    header: 'auth-clerk-hide',
+    footer: 'auth-clerk-hide',
+    dividerRow: 'auth-clerk-divider',
+    formFieldInput: 'auth-clerk-input',
+    formButtonPrimary: 'auth-clerk-submit',
+    socialButtonsBlockButton: 'auth-clerk-social',
+  },
+}
 
-  const submit = async (e) => {
-    e.preventDefault()
-    setError('')
-    if (!email.trim() || !password) {
-      setError('Email and password are required.')
-      return
-    }
-    if (mode === 'signup' && password.length < 8) {
-      setError('Password must be at least 8 characters.')
-      return
-    }
-    setBusy(true)
-    try {
-      if (mode === 'signup') await signup(name || email.split('@')[0], email, password)
-      else await login(email, password)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setBusy(false)
-    }
-  }
+export default function AuthPage({ initialMode = 'login' }) {
+  const [mode, setMode] = useState(initialMode)
 
   return (
     <div className="auth-page">
@@ -67,50 +71,29 @@ export default function AuthPage() {
             Sign up
           </button>
         </div>
-        <form className="auth-form" onSubmit={submit}>
-          {mode === 'signup' && (
-            <label>
-              Name
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Taman"
-                autoComplete="name"
-              />
-            </label>
+        {/*
+         * useAuth()'s isLoaded (the ChatShell gate in App.jsx) only means
+         * Clerk-the-library has resolved the session -- it does NOT mean
+         * <SignIn>/<SignUp> have finished mounting and applying the
+         * `appearance` restyle above. Without this gate, Clerk's own
+         * default, unstyled, plain-white form flashes for a beat before
+         * snapping into the cyan HUD version -- visually a totally
+         * different-looking "login page" appearing in front of the real
+         * one. ClerkLoading/ClerkLoaded track that finer-grained readiness.
+         */}
+        <ClerkLoading>
+          <div className="auth-clerk-loading" aria-hidden="true">
+            <span className="auth-clerk-spinner" />
+          </div>
+        </ClerkLoading>
+        <ClerkLoaded>
+          {mode === 'login' ? (
+            <SignIn routing="virtual" appearance={clerkAppearance} />
+          ) : (
+            <SignUp routing="virtual" appearance={clerkAppearance} />
           )}
-          <label>
-            Email
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              autoComplete="email"
-              required
-            />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={mode === 'signup' ? 'min. 8 characters' : '••••••••'}
-              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-              required
-            />
-          </label>
-          {error && <p className="auth-error">{error}</p>}
-          <button className="auth-submit" type="submit" disabled={busy}>
-            {busy ? 'Working…' : mode === 'signup' ? 'Create account' : 'Log in'}
-          </button>
-        </form>
-        <p className="auth-note">
-          Demo auth — accounts live only in this browser (salted &amp; hashed, never sent
-          anywhere). Swaps for the real backend later.
-        </p>
+        </ClerkLoaded>
+        <p className="auth-note">Secured by Clerk. Your credentials never touch VibeAI's servers.</p>
       </div>
     </div>
   )

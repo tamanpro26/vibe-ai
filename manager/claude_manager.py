@@ -139,6 +139,18 @@ class ClaudeManager:
         )
 
     async def _init_memory_background(self) -> None:
+        # Confirmed live (2026-07-19): even backgrounded via create_task,
+        # memory.init()'s SentenceTransformer/chromadb load is heavy enough
+        # real CPU/disk work (~30-60s on a cold cache, per this project's
+        # own docs) that it raced the CLI's interactive input-thread for
+        # actual OS-level CPU time at the exact moment the terminal tried
+        # to render its first prompt -- observed as the prompt appearing to
+        # hang for up to 30s, even though internal timestamps proved the
+        # asyncio scheduling itself was instant. A short delay here doesn't
+        # change the event-loop logic, it just lets the terminal finish
+        # rendering and start blocking on a read (which needs ~no CPU)
+        # before the heavy load competes for cycles.
+        await asyncio.sleep(1.5)
         try:
             from tools.memory import memory
             self._memory_ready = await memory.init()

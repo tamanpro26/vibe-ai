@@ -18,7 +18,12 @@ class GoogleConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
-        self._client = AsyncOpenAI(api_key=settings.gemini_api_key or "not-configured", base_url=self.BASE_URL)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
+        self._client = AsyncOpenAI(
+            api_key=settings.gemini_api_key or "not-configured", base_url=self.BASE_URL,
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     def _build_messages(self, prompt, system, images):
         msgs = []

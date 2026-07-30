@@ -45,10 +45,28 @@ class Settings(BaseSettings):
     # integration (see tools/voice_input.py docstring), not an active path.
     wispr_api_key: str = Field(default="", description="Wispr Flow — api-docs.wisprflow.ai (optional, sales-gated)")
 
-    # ── Web search (optional) ─────────────────────────────
-    # Search works keyless via DuckDuckGo's HTML endpoint; a Brave key adds
-    # a second independent source (free tier: 2,000 queries/month).
-    brave_api_key: str = Field(default="", description="Brave Search — brave.com/search/api (optional; keyless DDG works without it)")
+    # ── Web search ─────────────────────────────────────────
+    # Replaced the DuckDuckGo-HTML-scraping stack (fragile: soft-blocked
+    # entire query TOPICS under normal use, no official contract) with two
+    # real APIs, both live-verified (2026-07-27): Firecrawl (primary --
+    # JS-rendered, clean markdown, real /search endpoint, free 1,000
+    # pages/month, no card) and Exa (neural/semantic search, used for
+    # relevance ranking instead of an LLM call). brave_api_key kept only
+    # because Brave now requires a card even on its free tier -- confirmed
+    # live the same day -- so it was never wired in; not used by search.py.
+    firecrawl_api_key: str = Field(default="", description="Firecrawl — firecrawl.dev/app/api-keys (primary search+scrape source)")
+    exa_api_key: str = Field(default="", description="Exa — dashboard.exa.ai/api-keys (semantic search / relevance ranking)")
+    brave_api_key: str = Field(default="", description="Brave Search — brave.com/search/api (unused: requires a card even for free tier)")
+
+    # ── OmniRoute (optional, local gateway) ────────────────
+    # A self-hosted AI gateway (github.com/diegosouzapw/OmniRoute) run
+    # locally via `npm run dev` in a separate checkout. Not started
+    # automatically by VibeAI, and not guaranteed to be running -- the
+    # existing circuit-breaker/fallback machinery routes around it like any
+    # other unavailable connector. Get the key from the local dashboard's
+    # Endpoints page (http://localhost:20128 by default).
+    omniroute_api_key:  str = Field(default="", description="OmniRoute local gateway key — dashboard Endpoints page")
+    omniroute_base_url: str = "http://localhost:20128/v1"
 
     # ── Image generation (free) ───────────────────────────
     hf_token: str = Field(default="", description="HuggingFace — huggingface.co/settings/tokens")

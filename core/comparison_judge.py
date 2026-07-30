@@ -50,7 +50,9 @@ async def propose_and_pick_fix_strategy(findings: list[str], context: str) -> st
         f"Relevant context:\n{context[:1500]}\n\n"
         "In 3-5 sentences, propose a SPECIFIC strategy to actually fix all "
         "of these (name the files/approach, not generic advice like 'review "
-        "the code'). Do not write full code — just the concrete plan."
+        "the code'). Do not write full code — just the concrete plan. Be "
+        "terse: no filler, no restating the findings back, name exact "
+        "files/approach directly — this text gets fed into a later prompt."
     )
 
     try:

@@ -17,6 +17,7 @@ into "the model must satisfy a checklist".
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -62,23 +63,38 @@ def _iter_files(
     that page's own image references then triggered a ~3-minute
     image-localization detour -- for a task that should take seconds.
     allowed_root_files closes this: a root-level file must be in the
-    current run's own touched set, not merely "sitting in root"."""
+    current run's own touched set, not merely "sitting in root".
+
+    Walks via os.walk with in-place dirnames pruning rather than
+    sorted(root.rglob("*")) -- found in code review (2026-07-13): rglob fully
+    materializes the ENTIRE tree, including node_modules/dist/build
+    (elsewhere in this codebase described as "thousands of generated
+    files"), before this same _IGNORE_DIRS filter discards them; walking in
+    and immediately backing out is the expensive part, not the filter
+    itself. os.walk's dirnames[:] mutation stops it from ever descending
+    into a pruned directory -- for allowed_dirs, an entire disallowed
+    top-level project is skipped the same way, rather than walked file by
+    file and discarded one at a time."""
     n = 0
-    for p in sorted(root.rglob("*")):
-        if any(part in _IGNORE_DIRS for part in p.parts):
-            continue
-        if allowed_dirs is not None:
-            rel_parts = p.relative_to(root).parts
-            if len(rel_parts) > 1:
-                if rel_parts[0] not in allowed_dirs:
-                    continue
-            elif allowed_root_files is not None and p.name not in allowed_root_files:
+    root = Path(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dp = Path(dirpath)
+        is_root_level = dp == root
+        dirnames[:] = sorted(d for d in dirnames if d not in _IGNORE_DIRS)
+        if is_root_level and allowed_dirs is not None:
+            dirnames[:] = [d for d in dirnames if d in allowed_dirs]
+        for name in sorted(filenames):
+            if (
+                is_root_level and allowed_dirs is not None
+                and allowed_root_files is not None and name not in allowed_root_files
+            ):
                 continue
-        if p.is_file() and p.suffix.lower() in exts:
-            yield p
-            n += 1
-            if n >= _MAX_FILES:
-                return
+            p = dp / name
+            if p.suffix.lower() in exts:
+                yield p
+                n += 1
+                if n >= _MAX_FILES:
+                    return
 
 
 def _read(p: Path) -> str:
@@ -281,7 +297,58 @@ def check_html_local_refs(root: Path, allowed_dirs: set[str] | None = None, allo
     return findings
 
 
-# ── Check 7: Python code quality (deterministic, greppable senior-review items) ─
+# ── Check 7: routed pages with suspiciously thin content ──────────────────────
+# Phase 1.7, UPGRADE_ROADMAP.md §6 ("ask the artifact, not the model"). The
+# exact defect class observed live (2026-07-16, run v7): a react-router
+# route pointed at a REAL, EXISTING component file that rendered nothing but
+# a bare "<h1>Welcome to VibeAI</h1>" placeholder. Every existing check
+# passes -- the file exists (check_relative_imports is happy), there's no
+# TODO/lorem-ipsum/"Skill 1" marker (check_placeholders is happy) -- because
+# a thin page isn't a missing-file problem or a stub-MARKER problem, it's a
+# "technically there, practically empty" problem neither check was built to
+# catch. Deterministic character-count heuristic, not an LLM judgment call.
+
+_ROUTE_ELEMENT_RE = re.compile(r"""<Route\s+[^>]*element\s*=\s*\{\s*<\s*([A-Za-z_]\w*)""")
+_IMPORT_SOURCE_RE = re.compile(r"""import\s+([A-Za-z_]\w*)\s+from\s+['"](\.{1,2}/[^'"]+)['"]""")
+_MIN_PAGE_CHARS = 400
+
+
+def check_thin_pages(root: Path, allowed_dirs: set[str] | None = None, allowed_root_files: set[str] | None = None) -> list[str]:
+    """Flag routed page components whose source file is real but
+    suspiciously short. Only judges components that are BOTH routed (real
+    navigational destination, not an arbitrary helper file) AND resolvable
+    (missing entirely is check_relative_imports's job, not this one)."""
+    findings: list[str] = []
+    for f in _iter_files(root, (".jsx", ".tsx"), allowed_dirs, allowed_root_files):
+        text = _read(f)
+        routed = set(_ROUTE_ELEMENT_RE.findall(text))
+        if not routed:
+            continue
+        imports = dict(_IMPORT_SOURCE_RE.findall(text))
+        for name in routed:
+            spec = imports.get(name)
+            if not spec:
+                continue  # not an imported component (e.g. defined inline) -- not this check's job
+            base = f.parent / spec
+            resolved = next(
+                (p for suf in _RESOLVE_SUFFIXES if (p := Path(str(base) + suf)).exists()),
+                None,
+            )
+            if resolved is None:
+                continue  # missing entirely -> check_relative_imports already flags this
+            content_len = len(_read(resolved).strip())
+            if content_len < _MIN_PAGE_CHARS:
+                findings.append(
+                    f"[thin-page] {resolved.relative_to(root)}: routed page is only "
+                    f"{content_len} chars — looks like a placeholder, not real content "
+                    f"(expected at least {_MIN_PAGE_CHARS})"
+                )
+                if len(findings) >= _MAX_FINDINGS_PER_CHECK:
+                    return findings
+    return findings
+
+
+# ── Check 8: Python code quality (deterministic, greppable senior-review items) ─
 
 _PY_QUALITY_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"datetime\.utcnow\s*\("),
@@ -325,6 +392,7 @@ async def run_all(
     findings += check_css_classes(root, allowed_dirs, allowed_root_files)
     findings += check_placeholders(root, allowed_dirs, allowed_root_files)
     findings += check_local_images(root, allowed_dirs, allowed_root_files)
+    findings += check_thin_pages(root, allowed_dirs, allowed_root_files)
     findings += check_python_quality(root, allowed_dirs, allowed_root_files)
     findings += await check_remote_images(root, allowed_dirs, allowed_root_files)
     if findings:

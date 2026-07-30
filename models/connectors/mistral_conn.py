@@ -23,7 +23,12 @@ class MistralConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
-        self._client = AsyncOpenAI(api_key=settings.mistral_api_key or "not-configured", base_url=self.BASE_URL)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
+        self._client = AsyncOpenAI(
+            api_key=settings.mistral_api_key or "not-configured", base_url=self.BASE_URL,
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     async def _call(self, prompt, system, images, max_tokens, temperature, **kwargs) -> str:
         if not settings.mistral_api_key:

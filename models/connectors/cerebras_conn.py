@@ -19,7 +19,12 @@ class CerebrasConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
-        self._client = AsyncOpenAI(api_key=settings.cerebras_api_key or "not-configured", base_url=self.BASE_URL)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
+        self._client = AsyncOpenAI(
+            api_key=settings.cerebras_api_key or "not-configured", base_url=self.BASE_URL,
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     async def _call(self, prompt, system, images, max_tokens, temperature, **kwargs) -> str:
         if not settings.cerebras_api_key:
@@ -128,7 +133,7 @@ class CerebrasConnector(BaseModelConnector):
     def _turn_cost(self, turn: list[dict]) -> int:
         return sum(self._est(str(m.get("content", "")) + str(m.get("tool_calls", ""))) for m in turn)
 
-    def _truncate(self, messages: list[dict]) -> list[dict]:
+    def _truncate(self, messages: list[dict], tools: list[dict] | None = None) -> list[dict]:
         """Sliding window over whole TURNS (not raw messages): keep system +
         newest turns within the budget.
 
@@ -157,6 +162,14 @@ class CerebrasConnector(BaseModelConnector):
         system = [m for m in messages if m.get("role") == "system"]
         convo  = [m for m in messages if m.get("role") != "system"]
         remaining = self._budget()
+        # The tools schema rides along on every real API call but was
+        # invisible to this budget -- with 10+ tools (~3400 tokens measured
+        # live) that's over half of the default 6000-token budget silently
+        # unaccounted for, so "truncate to fit" was truncating to fit a
+        # request ~3400 tokens smaller than the one actually sent. Mirrors
+        # groq_conn.py's _truncate_messages, which already subtracts this.
+        if tools:
+            remaining -= self._est(json.dumps(tools))
         for m in system:
             remaining -= self._est(str(m.get("content", "")))
 
@@ -195,7 +208,7 @@ class CerebrasConnector(BaseModelConnector):
         """Cerebras supports OpenAI-compatible function calling."""
         if not settings.cerebras_api_key:
             raise RuntimeError("CEREBRAS_API_KEY not set")
-        truncated = self._truncate(messages)
+        truncated = self._truncate(messages, tools)
         try:
             resp = await self._client.chat.completions.create(
                 model=self.api_model, messages=truncated, tools=tools,
@@ -213,7 +226,7 @@ class CerebrasConnector(BaseModelConnector):
                         f"[cerebras/{self.api_model}] live context limit discovered: "
                         f"{m.group(1)} tokens — re-truncating and retrying"
                     )
-                truncated = self._truncate(messages)
+                truncated = self._truncate(messages, tools)
                 resp = await self._client.chat.completions.create(
                     model=self.api_model, messages=truncated, tools=tools,
                     tool_choice="auto", max_tokens=min(max_tokens, 4_096), temperature=temperature,

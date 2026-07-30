@@ -2,6 +2,7 @@
 api/server.py  (v2 — video upload + full team wiring)
 FastAPI server with:
   POST /api/prompt        — text prompt
+  POST /api/sensor        — edge-triggered hardware alerts (school heat monitor)
   POST /api/video         — video file upload → .frames pipeline
   POST /api/screenshot    — screenshot → vision team
   GET  /api/health
@@ -10,6 +11,7 @@ FastAPI server with:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import shutil
 import tempfile
@@ -19,12 +21,12 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import (
-    FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File,
-    Form, Depends, Header,
+    FastAPI, WebSocket, WebSocketDisconnect, WebSocketException, HTTPException,
+    UploadFile, File, Form, Depends, Header, Query, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config.settings import settings
 from core.bus import bus
@@ -49,13 +51,45 @@ def _is_localhost_bind() -> bool:
 async def require_token(authorization: str | None = Header(default=None)) -> None:
     token = settings.vibe_api_token
     if token:
-        if authorization != f"Bearer {token}":
+        # Constant-time compare -- a plain `!=` leaks timing information about
+        # how many leading characters of the guess matched the real token.
+        if not (authorization and hmac.compare_digest(authorization, f"Bearer {token}")):
             raise HTTPException(status_code=401, detail="Missing or invalid bearer token")
         return
     if not _is_localhost_bind():
         raise HTTPException(
             status_code=403,
             detail="Mutating routes are disabled: server is bound to a non-localhost "
+                   "address without VIBE_API_TOKEN set. Set VIBE_API_TOKEN in .env.",
+        )
+
+
+# WebSocket connections can't set an Authorization header the way REST calls
+# can -- the browser WebSocket API doesn't allow custom headers on the
+# upgrade request. Found in code review (2026-07-13): both WS routes below
+# had NO auth check at all -- neither require_token's Header-based nor
+# anything else -- while every REST route uses Depends(require_token). Since
+# these routes drive the exact same manager/agent pipelines as their gated
+# REST twins (including arbitrary file writes and shell execution via
+# AgentLoop), an unauthenticated WS connection is as dangerous as an
+# unauthenticated POST /api/agent. Token travels as a query parameter
+# instead (?token=...), which a WS client CAN set, checked with the same
+# constant-time comparison. WebSocketException (not HTTPException) is the
+# correct way to reject during a WS handshake -- FastAPI translates it into
+# a proper WS close with the given code instead of an HTTP-only response
+# that has no defined meaning on an upgrade request.
+async def require_ws_token(token: str | None = Query(default=None)) -> None:
+    expected = settings.vibe_api_token
+    if expected:
+        if not (token and hmac.compare_digest(token, expected)):
+            raise WebSocketException(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Missing or invalid token"
+            )
+        return
+    if not _is_localhost_bind():
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Mutating routes are disabled: server is bound to a non-localhost "
                    "address without VIBE_API_TOKEN set. Set VIBE_API_TOKEN in .env.",
         )
 
@@ -138,6 +172,40 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
     return PromptResponse(session_id=sid, response=response)
 
 
+# ── REST: school heat-monitor sensor alerts ───────────────────────────────────
+# Receives the two edge-triggered messages from hardware/controller.py (an
+# ESP32 running MicroPython): "HIGH TEMPERATURE DETECTED" when the sensor
+# crosses above the threshold, "Temperature normalized" when it crosses back
+# below. The device sends each message exactly once per crossing, not on
+# every 1s poll, so this endpoint fires once per real event -- not once per
+# second.
+
+class SensorRequest(BaseModel):
+    message: str
+    temperature: float | None = None
+    device_id: str | None = None
+
+
+class SensorResponse(BaseModel):
+    received: str
+    response: str
+
+
+@app.post("/api/sensor", response_model=SensorResponse, dependencies=[Depends(require_token)])
+async def handle_sensor(req: SensorRequest) -> SensorResponse:
+    if not req.message.strip():
+        raise HTTPException(400, "message cannot be empty")
+    context = req.message.strip()
+    if req.temperature is not None:
+        context += f" (reading: {req.temperature:.1f}°C"
+        if req.device_id:
+            context += f", device: {req.device_id}"
+        context += ")"
+    logger.info(f"[sensor] {context}")
+    response = await manager.handle_user_request(context)
+    return SensorResponse(received=context, response=response)
+
+
 # ── REST: standalone image generation ─────────────────────────────────────────
 # Distinct from the design_asset tool the coding agent uses internally for
 # website assets (teams/design.py's DesignTeam only fires for
@@ -168,7 +236,15 @@ async def handle_image(req: ImageRequest) -> ImageResponse:
 
 # ── REST: video upload → .frames pipeline ─────────────────────────────────────
 
-@app.post("/api/video", dependencies=[Depends(require_token)])
+class VideoResponse(BaseModel):
+    status:        str
+    upload_id:     str
+    video_size_mb: float
+    frames_path:   str
+    response:      str
+
+
+@app.post("/api/video", response_model=VideoResponse, dependencies=[Depends(require_token)])
 async def handle_video(
     file: UploadFile = File(...),
     prompt: str = Form(default="Analyse this video"),
@@ -218,7 +294,12 @@ async def handle_video(
 
 # ── REST: screenshot → vision team ───────────────────────────────────────────
 
-@app.post("/api/screenshot", dependencies=[Depends(require_token)])
+class ScreenshotResponse(BaseModel):
+    status:   str
+    response: str
+
+
+@app.post("/api/screenshot", response_model=ScreenshotResponse, dependencies=[Depends(require_token)])
 async def handle_screenshot(
     file: UploadFile = File(...),
     prompt: str = Form(default="Analyse this screenshot"),
@@ -273,7 +354,7 @@ async def change_history(limit: int = 50) -> dict:
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
-@app.websocket("/ws/{client_id}")
+@app.websocket("/ws/{client_id}", dependencies=[Depends(require_ws_token)])
 async def websocket_endpoint(ws: WebSocket, client_id: str) -> None:
     await ws_mgr.connect(client_id, ws)
     try:
@@ -320,7 +401,13 @@ async def manager_status() -> dict:
     return fallback_chain.status_report()
 
 
-@app.post("/api/manager/recover", dependencies=[Depends(require_token)])
+class RecoverResponse(BaseModel):
+    recovered:    bool
+    active:       str
+    using_backup: bool
+
+
+@app.post("/api/manager/recover", response_model=RecoverResponse, dependencies=[Depends(require_token)])
 async def manager_recover() -> dict:
     """
     Attempt to bring Claude Sonnet 4.6 (primary) back online.
@@ -381,9 +468,28 @@ class AgentRequest(BaseModel):
     model_id:   str = "gemini_flash"      # Gemini 2.5 Flash — best free model for tool calling
     task_type:  str = "coding"       # coding | reasoning | creative
     workspace:  str | None = None    # custom workspace path (default: ./workspace)
+    # Found in code review (2026-07-13): cli.py always passes context (the
+    # /context command's "existing site grounding" text) and history (prior
+    # conversation turns) to loop.run() — this route silently dropped both,
+    # so API/VS-Code-driven agent runs got a materially worse result than
+    # identical CLI-driven runs of the same backend (context is what stops
+    # the agent from inventing an unrelated theme for an existing project).
+    context:    str = ""
+    history:    list[dict] = Field(default_factory=list)
 
 
-@app.post("/api/agent", dependencies=[Depends(require_token)])
+class AgentResponse(BaseModel):
+    status:         str
+    final_response: str
+    files_created:  list[str]
+    files_edited:   list[str]
+    commands_run:   list[str]
+    iterations:     int
+    total_ms:       float
+    workspace:      str
+
+
+@app.post("/api/agent", response_model=AgentResponse, dependencies=[Depends(require_token)])
 async def run_agent(req: AgentRequest) -> dict:
     """
     Run an autonomous agent that creates files and runs commands by itself.
@@ -407,10 +513,15 @@ async def run_agent(req: AgentRequest) -> dict:
         task=req.task,
         model_id=req.model_id,
         task_type=req.task_type,
+        context=req.context,
+        history=req.history,
     )
 
     return {
-        "status":          "complete",
+        # "ok" to match every other status-bearing route (/api/video,
+        # /api/screenshot) -- found in code review (2026-07-13) that this
+        # was the one route using "complete" instead.
+        "status":          "ok",
         "final_response":  result.final_response,
         "files_created":   result.files_created,
         "files_edited":    result.files_edited,
@@ -421,7 +532,7 @@ async def run_agent(req: AgentRequest) -> dict:
     }
 
 
-@app.websocket("/ws/agent/{client_id}")
+@app.websocket("/ws/agent/{client_id}", dependencies=[Depends(require_ws_token)])
 async def agent_websocket(ws: WebSocket, client_id: str) -> None:
     """WebSocket endpoint for real-time agent progress streaming."""
     await ws_mgr.connect(client_id, ws)
@@ -439,14 +550,30 @@ async def agent_websocket(ws: WebSocket, client_id: str) -> None:
 async def _run_agent_ws(cid: str, data: dict) -> None:
     from core.agent_loop import AgentLoop
     from pathlib import Path
+    from pydantic import ValidationError
 
-    task     = data.get("task", "")
-    model_id = data.get("model_id", "gemini_flash")
-
-    await ws_mgr.send(cid, {"type": "agent_start", "task": task})
+    # Validate against the same AgentRequest model the REST route enforces --
+    # found in code review (2026-07-13): this path built task/model_id off
+    # bare dict .get() calls with silent defaults (task="" instead of a
+    # validation error), and dropped context/history entirely, unlike its
+    # REST twin. Both gaps are closed by routing through the same model.
     try:
-        loop   = AgentLoop(workspace=Path("./workspace"))
-        result = await loop.run(task=task, model_id=model_id)
+        req = AgentRequest(**data)
+    except ValidationError as exc:
+        await ws_mgr.send(cid, {"type": "agent_error", "message": f"invalid agent_task payload: {exc}"})
+        return
+
+    await ws_mgr.send(cid, {"type": "agent_start", "task": req.task})
+    try:
+        ws_path = Path(req.workspace) if req.workspace else Path("./workspace")
+        loop   = AgentLoop(workspace=ws_path)
+        result = await loop.run(
+            task=req.task,
+            model_id=req.model_id,
+            task_type=req.task_type,
+            context=req.context,
+            history=req.history,
+        )
         await ws_mgr.send(cid, {
             "type":          "agent_done",
             "response":      result.final_response,

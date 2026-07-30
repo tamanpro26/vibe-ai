@@ -56,10 +56,18 @@ class CascadeResult:
 
 async def _score(
     verifier_model: str, instruction: str, rubric: list[str], candidate: str,
+    exclude_model: str | None = None,
 ) -> tuple[float, str]:
     rubric_block = "\n".join(f"- {r}" for r in rubric)
     raw = await generate_resilient(
         verifier_model,
+        # Exclude the model whose output is being judged from the verifier's
+        # own fallback chain -- otherwise a verifier_model outage can fail
+        # over onto the exact model it's supposed to independently check
+        # (_TEXT_SAFETY_NET includes gpt_oss_120b_coder, which is also a
+        # cascade tier here) -- the same self-grading bias this whole
+        # module exists to avoid, just arriving via a different door.
+        exclude={exclude_model} if exclude_model else None,
         prompt=(
             f"TASK:\n{instruction}\n\n"
             f"RUBRIC:\n{rubric_block}\n\n"
@@ -111,7 +119,9 @@ async def run_cascade(
         last_output, last_model = output, model_id
 
         try:
-            confidence, reasoning = await _score(verifier_model, instruction, rubric, output)
+            confidence, reasoning = await _score(
+                verifier_model, instruction, rubric, output, exclude_model=model_id,
+            )
         except Exception as exc:
             # A verifier outage is an infrastructure failure, not a quality
             # signal -- it must not discard an already-successful generation.

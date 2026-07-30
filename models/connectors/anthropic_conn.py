@@ -36,7 +36,15 @@ class AnthropicConnector(BaseModelConnector):
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
         key_field = model_def.api_key_field or "anthropic_api_key"
-        self._client = anthropic.AsyncAnthropic(api_key=getattr(settings, key_field))
+        # Found in code review (2026-07-13): no connector in this codebase set
+        # an explicit timeout, relying on SDK defaults (~600s) -- config/settings.py
+        # already defines default_timeout_ms for exactly this purpose but it was
+        # never wired to a single client. One stalled provider could block the
+        # whole fallback chain for up to ~10 minutes before trying the next one.
+        self._client = anthropic.AsyncAnthropic(
+            api_key=getattr(settings, key_field),
+            timeout=settings.default_timeout_ms / 1000,
+        )
 
     async def _call(
         self,

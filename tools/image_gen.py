@@ -32,7 +32,18 @@ from pathlib import Path
 
 from loguru import logger
 
-IMAGES_DIR = Path.home() / ".vibeai" / "images"
+from tools.agent_tools import DEFAULT_WORKSPACE
+
+# Found in code review (2026-07-13): this used to live at ~/.vibeai/images,
+# following the same convention as routing_memory.json -- but that's outside
+# DEFAULT_WORKSPACE, the sandboxed root every agent file tool operates
+# within (ToolExecutor._safe_path resolves against it). An image generated
+# here was invisible to a later same-session agent task ("use that image I
+# just generated"), since the agent has no path into the user's home
+# directory. Living inside the workspace, in its own clearly-separated
+# subdirectory, gives the agent real visibility without mixing generated
+# images into arbitrary project files at the workspace root.
+IMAGES_DIR = DEFAULT_WORKSPACE / "generated_images"
 
 _QUALITY_SUFFIX = "high quality, professional, sharp, detailed, well-composed"
 

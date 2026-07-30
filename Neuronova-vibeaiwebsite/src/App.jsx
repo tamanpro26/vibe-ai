@@ -11,6 +11,7 @@ import Footer from './components/Footer.jsx'
 import { AuthProvider, useAuth } from './chat/auth.jsx'
 import AuthPage from './chat/AuthPage.jsx'
 import ChatApp from './chat/ChatApp.jsx'
+import useLenis from './useLenis.js'
 import './App.css'
 import './chat/chat.css'
 
@@ -43,8 +44,30 @@ function useReveal() {
   }, [])
 }
 
+// Cursor-follow glow on `.spotlight-card` elements (team/CEO/stat cards):
+// one delegated listener rather than one per card, since new cards can
+// mount/unmount as sections reveal and a per-card effect would need to
+// re-bind on every render. The glow itself is CSS (opacity on :hover) --
+// this only ever writes the pointer's position, so it's inert whenever
+// the pointer isn't over a card.
+function useSpotlight() {
+  useEffect(() => {
+    function handleMove(e) {
+      const card = e.target.closest?.('.spotlight-card')
+      if (!card) return
+      const rect = card.getBoundingClientRect()
+      card.style.setProperty('--spot-x', `${((e.clientX - rect.left) / rect.width) * 100}%`)
+      card.style.setProperty('--spot-y', `${((e.clientY - rect.top) / rect.height) * 100}%`)
+    }
+    window.addEventListener('mousemove', handleMove, { passive: true })
+    return () => window.removeEventListener('mousemove', handleMove)
+  }, [])
+}
+
 function Landing() {
   useReveal()
+  useLenis()
+  useSpotlight()
 
   return (
     <div className="app">
@@ -64,14 +87,25 @@ function Landing() {
   )
 }
 
-function ChatShell() {
-  const { user } = useAuth()
-  return user ? <ChatApp /> : <AuthPage />
+function ChatShell({ initialAuthMode }) {
+  const { user, isLoaded } = useAuth()
+  // Clerk resolves an existing session asynchronously; without this guard a
+  // signed-in user would flash the login page for a frame on every reload.
+  if (!isLoaded) return <div className="auth-loading" aria-hidden="true" />
+  // Once Clerk reports a signed-in user, this swaps to ChatApp on its own
+  // re-render -- the "redirect to chat" the nav buttons promise is just this
+  // same-component swap, not a separate navigation step.
+  return user ? <ChatApp /> : <AuthPage initialMode={initialAuthMode} />
 }
 
 export default function App() {
   const hash = useHashRoute()
   const isChat = hash.startsWith('#/chat')
+  const initialAuthMode = hash.startsWith('#/chat/signup') ? 'signup' : 'login'
 
-  return <AuthProvider>{isChat ? <ChatShell /> : <Landing />}</AuthProvider>
+  return (
+    <AuthProvider>
+      {isChat ? <ChatShell initialAuthMode={initialAuthMode} /> : <Landing />}
+    </AuthProvider>
+  )
 }

@@ -20,6 +20,7 @@ Free tier: generous credits included. FLUX generation costs ~$0.001 per image.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import os
@@ -71,7 +72,13 @@ class HuggingFaceConnector(BaseModelConnector):
             from huggingface_hub import InferenceClient
             client = InferenceClient(api_key=self._hf_token)
 
-            image = client.text_to_image(
+            # Found in code review (2026-07-13): huggingface_hub's InferenceClient
+            # is synchronous -- calling text_to_image directly here blocked the
+            # entire asyncio event loop for the call's duration, freezing every
+            # other concurrent coroutine in the process, not just this connector's
+            # own fallback path. asyncio.to_thread runs it on a worker thread instead.
+            image = await asyncio.to_thread(
+                client.text_to_image,
                 prompt=prompt,
                 model=self.api_model,
                 width=kwargs.get("width", 1024),
@@ -104,6 +111,7 @@ class HuggingFaceConnector(BaseModelConnector):
         client = AsyncOpenAI(
             base_url=self.HF_BASE_URL,
             api_key=self._hf_token,
+            timeout=settings.default_timeout_ms / 1000,
         )
 
         messages = []

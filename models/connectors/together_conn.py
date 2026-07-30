@@ -23,9 +23,12 @@ class TogetherConnector(BaseModelConnector):
 
     def __init__(self, model_def: ModelDef) -> None:
         super().__init__(model_def)
+        # timeout: found in code review (2026-07-13) that no connector set one,
+        # relying on SDK defaults (~600s) and blocking the fallback chain on a hang.
         self._client = AsyncOpenAI(
             api_key=settings.together_api_key,
             base_url=settings.together_base_url,
+            timeout=settings.default_timeout_ms / 1000,
         )
 
     async def _call(

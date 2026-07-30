@@ -30,6 +30,7 @@ production (see config/models_config.py and DECISIONS.md).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -203,12 +204,24 @@ async def _execute_desktop_tool(name: str, args: dict) -> str:
         elif name == "open_url":
             r = auto.open_url(args["url"])
         elif name == "wait_for_window":
-            title = auto.wait_for_window(args["title_substr"], timeout=float(args.get("timeout", 10)))
+            # Found in code review (2026-07-13): wait_for_window's internal
+            # poll loop uses blocking time.sleep, called directly from this
+            # async function with no executor offload -- it froze the whole
+            # backend (this runs on the shared FastAPI event loop, see
+            # vibemind/server.py) for its full polling duration, not just this
+            # request. Its timeout was also passed through from model tool-call
+            # args completely unclamped, so a single call could block for an
+            # arbitrary duration. asyncio.to_thread moves the blocking poll
+            # loop off the event loop; the timeout gets a real ceiling.
+            wait_timeout = min(float(args.get("timeout", 10)), 30.0)
+            title = await asyncio.to_thread(auto.wait_for_window, args["title_substr"], timeout=wait_timeout)
             r = auto.ActionResult(bool(title), title or f"no window matching '{args['title_substr']}' appeared in time")
         elif name == "focus_window":
             r = auto.focus_window(args["title_substr"])
         elif name == "type_text":
-            r = auto.type_text(args["text"])
+            # type_text's clipboard-restore path has its own internal sleep
+            # (see automation.py) -- same event-loop-blocking risk as above.
+            r = await asyncio.to_thread(auto.type_text, args["text"])
         elif name == "press_enter":
             r = auto.press_enter()
         elif name == "press_hotkey":

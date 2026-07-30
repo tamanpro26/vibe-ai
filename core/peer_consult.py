@@ -70,6 +70,21 @@ _TAG_RE = re.compile(
 _UNCERTAIN_RE = re.compile(r"UNCERTAIN:\s*(.+)", re.IGNORECASE)
 
 
+def with_confidence_invite(system: str, model_id: str) -> str:
+    """Append CONFIDENCE_PROMPT_SUFFIX (filled in with the acting model_id)
+    to a team's system prompt, so this opt-in mechanism actually has a
+    call site inviting the tag -- previously CONFIDENCE_PROMPT_SUFFIX was
+    defined but nothing appended it anywhere, so consult_if_unsure's
+    tag-parsing path could never fire (flagged by 5/9 reviewers in the
+    2026-07-16 code review). Only wire this onto a generation call that
+    produces a team's FINAL prose/code answer and has no other
+    independent quality check already covering it (cascade/best-of-N/
+    parallel-debug paths already have their own -- see core/
+    confidence_cascade.py's docstring on why self-report there would be
+    redundant with an independent verifier)."""
+    return system + CONFIDENCE_PROMPT_SUFFIX.format(model_id=model_id)
+
+
 def _parse(output: str) -> tuple[str, float | None, str, str]:
     """Extract and strip the CONFIDENCE/UNCERTAIN tag, if present.
 

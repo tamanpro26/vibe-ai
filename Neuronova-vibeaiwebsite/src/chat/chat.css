@@ -297,6 +297,40 @@
   outline: none;
 }
 
+/* Segmented control, not a <select> like team-select: only 3 fixed options
+   that the reader should be able to scan and switch between in one glance
+   and one click, not open a dropdown for. */
+.mode-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-panel);
+}
+
+.mode-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  background: none;
+  border: none;
+  border-radius: 3px;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: color 0.18s ease, background 0.18s ease;
+}
+
+.mode-btn:hover {
+  color: var(--text);
+}
+
+.mode-btn.is-active {
+  color: var(--cyan);
+  background: rgba(43, 232, 255, 0.1);
+}
+
 .engine-badge {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -306,6 +340,12 @@
   border-radius: 3px;
   padding: 5px 9px;
   white-space: nowrap;
+}
+
+.engine-badge.is-live {
+  color: var(--mint);
+  border: 1px solid rgba(125, 255, 176, 0.45);
+  box-shadow: 0 0 12px -4px var(--mint);
 }
 
 .chat-scroll {
@@ -539,6 +579,41 @@
 
 .msg-actions button:hover {
   color: var(--cyan);
+}
+
+/* Cut-off reply banner: amber, distinct from the quiet copy/regenerate row
+   below it -- this is a state of the answer itself (incomplete), not an
+   optional action on a complete one, so it reads as a warning, not a link. */
+.msg-truncated {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  border-radius: 5px;
+  background: rgba(255, 176, 32, 0.06);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.msg-truncated button {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid rgba(255, 176, 32, 0.45);
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.msg-truncated button:hover {
+  background: rgba(255, 176, 32, 0.12);
 }
 
 /* zip card */
@@ -888,65 +963,84 @@
   background: rgba(43, 232, 255, 0.08);
 }
 
-.auth-form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+/* Clerk renders its own DOM tree inside these class hooks (assigned via the
+   `appearance.elements` map in AuthPage.jsx). Colors/spacing come from
+   `appearance.variables` there; layout and the HUD-specific touches (input
+   focus glow, hidden Clerk chrome we've replaced with our own tabs/note)
+   live here. */
+
+.auth-clerk-root,
+.auth-clerk-card {
+  width: 100%;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
-.auth-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  color: var(--text-faint);
+/* Clerk's own header/footer/social-divider are hidden: header duplicates
+   our .auth-brand, the footer's sign-in/sign-up switch link is replaced by
+   our .auth-tabs, and no social providers are configured in this Clerk
+   instance. */
+.auth-clerk-hide,
+.auth-clerk-divider {
+  display: none;
 }
 
-.auth-form input {
+.auth-clerk-input {
   font-family: var(--font-body);
   font-size: 14px;
-  color: var(--text);
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 10px 12px;
-  outline: none;
   transition: border-color 0.2s;
 }
 
-.auth-form input:focus {
-  border-color: rgba(43, 232, 255, 0.5);
+.auth-clerk-input:focus {
+  border-color: rgba(43, 232, 255, 0.5) !important;
+  box-shadow: 0 0 0 3px rgba(43, 232, 255, 0.1) !important;
 }
 
-.auth-error {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--rose);
-}
-
-.auth-submit {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14.5px;
+.auth-clerk-submit {
+  font-family: var(--font-display) !important;
+  font-weight: 600 !important;
   letter-spacing: 1px;
-  color: #02141a;
-  background: var(--cyan);
-  border: none;
-  border-radius: 5px;
-  padding: 12px;
-  cursor: pointer;
   transition: box-shadow 0.2s;
 }
 
-.auth-submit:hover:not(:disabled) {
+.auth-clerk-submit:hover:not(:disabled) {
   box-shadow: 0 0 22px rgba(43, 232, 255, 0.4);
 }
 
-.auth-submit:disabled {
-  opacity: 0.6;
+.auth-loading {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Reserves roughly the widget's own footprint so the panel doesn't jump in
+   height once <SignIn>/<SignUp> actually mount. */
+.auth-clerk-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+
+.auth-clerk-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(43, 232, 255, 0.2);
+  border-top-color: var(--cyan);
+  animation: auth-spin 0.8s linear infinite;
+}
+
+@keyframes auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-clerk-spinner {
+    animation: none;
+  }
 }
 
 .auth-note {
@@ -1039,4 +1133,571 @@
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+/* ── render bay ─────────────────────────────────────────
+ * Image generation on the free keyless model takes ~17s, so this is built
+ * around the WAIT rather than around the arrival. The bay opens immediately
+ * at the true target aspect ratio (via --bay-ratio) so nothing reflows when
+ * the image lands, then develops the picture like a plate instead of
+ * fading it in.
+ *
+ * Per-image variation comes from custom properties set inline by
+ * Message.jsx, derived from a deterministic hash of the prompt:
+ *   --sweep-ms / --reveal-ms  timing
+ *   --grain                   lattice density
+ *   .axis-*                   scan direction
+ *   .bracket-*                corner treatment
+ * Same prompt develops identically; different prompts visibly differ.
+ */
+
+.render-bay {
+  margin: 14px 0 4px;
+  max-width: 560px;
+}
+
+.bay-frame {
+  position: relative;
+  aspect-ratio: var(--bay-ratio, 16 / 9);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    radial-gradient(ellipse at 50% 40%, rgba(43, 232, 255, 0.06), transparent 70%),
+    var(--bg-panel);
+}
+
+/* Scan bar: the "instrument is working" signal. Travels on the axis chosen
+   by the prompt hash, so a portrait render sweeps differently to a landscape
+   one and repeated prompts do not all animate the same way. */
+.bay-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(43, 232, 255, 0.03) 42%,
+    rgba(43, 232, 255, 0.5) 50%,
+    rgba(43, 232, 255, 0.03) 58%,
+    transparent 100%
+  );
+  animation: bay-sweep var(--sweep-ms, 1800ms) cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.axis-lr .bay-scan,
+.axis-rl .bay-scan {
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(43, 232, 255, 0.03) 42%,
+    rgba(43, 232, 255, 0.5) 50%,
+    rgba(43, 232, 255, 0.03) 58%,
+    transparent 100%
+  );
+}
+
+@keyframes bay-sweep {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+.axis-bt .bay-scan { animation-name: bay-sweep-rev; }
+@keyframes bay-sweep-rev {
+  0%   { transform: translateY(100%); }
+  100% { transform: translateY(-100%); }
+}
+
+.axis-lr .bay-scan { animation-name: bay-sweep-lr; }
+@keyframes bay-sweep-lr {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.axis-rl .bay-scan { animation-name: bay-sweep-rl; }
+@keyframes bay-sweep-rl {
+  0%   { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+
+/* Lattice: hairline measurement grid, present only while rendering. This is
+   an instrument surface being measured, not page decoration -- it disappears
+   the moment real pixels exist. */
+.bay-lattice {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image:
+    linear-gradient(var(--line-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size: calc(var(--grain, 3) * 14px) calc(var(--grain, 3) * 14px);
+  animation: bay-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes bay-breathe {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 0.18; }
+}
+
+/* The reveal. clip-path wipe on the prompt's axis, so the picture is
+   "developed" progressively rather than cross-faded. */
+.bay-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.is-resolving .bay-img {
+  animation: bay-resolve var(--reveal-ms, 1100ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes bay-resolve {
+  from { clip-path: inset(0 0 100% 0); filter: brightness(1.6) saturate(0.4); }
+  to   { clip-path: inset(0 0 0 0);    filter: none; }
+}
+
+.axis-bt.is-resolving .bay-img { animation-name: bay-resolve-bt; }
+@keyframes bay-resolve-bt {
+  from { clip-path: inset(100% 0 0 0); filter: brightness(1.6) saturate(0.4); }
+  to   { clip-path: inset(0 0 0 0);    filter: none; }
+}
+
+.axis-lr.is-resolving .bay-img { animation-name: bay-resolve-lr; }
+@keyframes bay-resolve-lr {
+  from { clip-path: inset(0 100% 0 0); filter: brightness(1.6) saturate(0.4); }
+  to   { clip-path: inset(0 0 0 0);    filter: none; }
+}
+
+.axis-rl.is-resolving .bay-img { animation-name: bay-resolve-rl; }
+@keyframes bay-resolve-rl {
+  from { clip-path: inset(0 0 0 100%); filter: brightness(1.6) saturate(0.4); }
+  to   { clip-path: inset(0 0 0 0);    filter: none; }
+}
+
+/* Leading edge that rides the wipe -- the developing head of the scanner. */
+.bay-edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  box-shadow: 0 0 18px -2px var(--cyan);
+  animation: bay-edge-run var(--reveal-ms, 1100ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes bay-edge-run {
+  from { top: 0; opacity: 1; }
+  to   { top: 100%; opacity: 0; }
+}
+
+.axis-lr .bay-edge,
+.axis-rl .bay-edge {
+  left: auto;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  height: auto;
+  background: linear-gradient(180deg, transparent, var(--cyan), transparent);
+  animation-name: bay-edge-run-x;
+}
+
+@keyframes bay-edge-run-x {
+  from { left: 0; opacity: 1; }
+  to   { left: 100%; opacity: 0; }
+}
+
+/* Corner brackets: three variants selected by the prompt hash, so the frame
+   itself is not identical between renders. */
+.bay-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-color: var(--cyan-dim);
+  border-style: solid;
+  border-width: 0;
+  opacity: 0.9;
+}
+.bay-corner.tl { top: 6px;    left: 6px;    border-top-width: 1px; border-left-width: 1px; }
+.bay-corner.tr { top: 6px;    right: 6px;   border-top-width: 1px; border-right-width: 1px; }
+.bay-corner.bl { bottom: 6px; left: 6px;    border-bottom-width: 1px; border-left-width: 1px; }
+.bay-corner.br { bottom: 6px; right: 6px;   border-bottom-width: 1px; border-right-width: 1px; }
+
+.bracket-1 .bay-corner { width: 22px; height: 22px; }
+.bracket-2 .bay-corner { width: 8px;  height: 8px; border-color: var(--cyan); }
+
+.is-scanning .bay-corner { animation: bay-corner-pulse 1.9s ease-in-out infinite; }
+@keyframes bay-corner-pulse {
+  0%, 100% { opacity: 0.9; }
+  50%      { opacity: 0.3; }
+}
+
+/* Telemetry strip. Mono, because these are measurements. */
+.bay-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.bay-tag {
+  color: var(--cyan);
+  letter-spacing: 2px;
+  flex-shrink: 0;
+}
+
+.is-scanning .bay-tag { animation: bay-corner-pulse 1.4s ease-in-out infinite; }
+
+.bay-subject {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bay-spec {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.bay-clock { color: var(--cyan-dim); }
+
+.bay-failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.bay-failed-tag { color: var(--rose); letter-spacing: 2px; }
+.bay-failed a { color: var(--cyan); }
+
+/* Motion here is decorative signalling, so it goes away entirely when asked.
+   The bay still shows structure, telemetry and the finished image. */
+@media (prefers-reduced-motion: reduce) {
+  .bay-scan,
+  .bay-lattice,
+  .bay-edge {
+    animation: none;
+  }
+  .bay-scan { opacity: 0.25; }
+  .is-scanning .bay-corner,
+  .is-scanning .bay-tag { animation: none; }
+  .is-resolving .bay-img { animation: none; }
+}
+
+@media (max-width: 860px) {
+  .render-bay { max-width: 100%; }
+  .bay-subject { display: none; }
+}
+
+/* ── source cards ───────────────────────────────────────
+ * Retrieved research sources rendered as citations: image, title, extract,
+ * domain, all wrapped in one link so any claim can be traced back. Cards are
+ * used here (rather than the flat rows used elsewhere) because each source is
+ * a genuinely separate object with its own provenance.
+ */
+
+.src-block {
+  margin: 16px 0 4px;
+}
+
+.src-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+}
+
+.src-tag { color: var(--cyan); }
+.src-count { color: var(--text-faint); letter-spacing: 1px; }
+
+.src-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.src-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  text-decoration: none;
+  transition: border-color 0.2s, box-shadow 0.2s, translate 0.2s;
+  /* Staggered arrival: sources resolve in sequence, echoing the order they
+     were retrieved rather than snapping in as one block. */
+  animation: src-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+@keyframes src-in {
+  from { opacity: 0; translate: 0 8px; }
+  to   { opacity: 1; translate: 0 0; }
+}
+
+.src-card:hover {
+  border-color: var(--cyan-dim);
+  box-shadow: 0 0 20px -10px var(--cyan);
+  translate: 0 -2px;
+}
+
+.src-card:focus-visible {
+  outline: 1px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.src-thumb {
+  display: block;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+}
+
+.src-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Wikimedia serves many logos as dark-on-transparent, which vanishes on a
+     near-black panel. A slight lift keeps them legible without washing out
+     photographs. */
+  filter: brightness(1.06);
+  transition: scale 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.src-card:hover .src-thumb img { scale: 1.04; }
+
+.src-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 11px 11px;
+}
+
+.src-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.src-extract {
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  /* Clamp to keep the grid even; the full text is one click away. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.is-textonly .src-extract { -webkit-line-clamp: 5; }
+
+.src-site {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .src-card { animation: none; }
+  .src-card:hover { translate: none; }
+  .src-card:hover .src-thumb img { scale: 1; }
+}
+
+@media (max-width: 860px) {
+  .src-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 520px) {
+  .src-grid { grid-template-columns: 1fr; }
+}
+
+/* ── thinking indicator ─────────────────────────────────
+ * Replaces a static log line. The orb never stops moving, so a slow turn
+ * still reads as alive; the label advances through real request stages so
+ * elapsed time carries meaning instead of just passing.
+ */
+
+.think {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.think-orb {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.think-core {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 12px -2px var(--cyan);
+  animation: think-pulse 1.5s ease-in-out infinite;
+}
+
+.think-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--cyan);
+  opacity: 0;
+  animation: think-emit 2.2s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+}
+
+.think-ring-2 { animation-delay: 1.1s; }
+
+@keyframes think-pulse {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%      { transform: scale(0.7); opacity: 0.55; }
+}
+
+@keyframes think-emit {
+  0%   { transform: scale(0.35); opacity: 0.9; }
+  100% { transform: scale(1.5);  opacity: 0; }
+}
+
+.think-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  /* Keyed on the stage text, so React remounts the node and replays this on
+     every stage change: the label visibly hands over rather than swapping. */
+  animation: think-swap 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes think-swap {
+  from { opacity: 0; transform: translateY(4px); filter: blur(2px); }
+  to   { opacity: 1; transform: none;            filter: none; }
+}
+
+.think-clock {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* ── project preview ────────────────────────────────────
+ * Live render of generated code plus per-file source. The frame is
+ * sandboxed to allow-scripts only, deliberately without allow-same-origin.
+ */
+
+.pv {
+  margin: 14px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.pv-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg2);
+}
+
+.pv-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--cyan);
+  flex-shrink: 0;
+}
+
+.pv-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pv-tabs::-webkit-scrollbar { display: none; }
+
+.pv-tab {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.pv-tab:hover { color: var(--text); background: rgba(43, 232, 255, 0.06); }
+
+.pv-tab.is-on {
+  color: var(--cyan);
+  border-color: rgba(43, 232, 255, 0.35);
+  background: rgba(43, 232, 255, 0.08);
+}
+
+.pv-stage {
+  height: 300px;
+  background: var(--bg);
+}
+
+.pv-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  /* Generated pages usually assume a light canvas; keep the frame's own
+     background rather than letting the dark shell bleed through. */
+  background: #fff;
+}
+
+.pv-code {
+  margin: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  white-space: pre;
+  tab-size: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .think-core, .think-ring { animation: none; }
+  .think-ring { opacity: 0.35; }
+  .think-label { animation: none; }
+}
+
+@media (max-width: 620px) {
+  .pv-stage { height: 220px; }
+  .pv-title { display: none; }
 }

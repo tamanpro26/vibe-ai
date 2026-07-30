@@ -17,6 +17,7 @@ from typing import Any
 from loguru import logger
 
 from core.imcp import TaskJSON, Complexity
+from core.peer_consult import with_confidence_invite
 from teams.base_team import BaseTeam
 
 
@@ -74,7 +75,7 @@ class BrainTeam(BaseTeam):
                 "\n".join(f"- {c}" for c in task_json.success_criteria) +
                 "\n\nProvide a detailed execution plan."
             ),
-            system=_BRAIN_SYSTEM,
+            system=with_confidence_invite(_BRAIN_SYSTEM, primary_model),
             max_tokens=3000,
             temperature=0.4,
         )
@@ -89,7 +90,7 @@ class BrainTeam(BaseTeam):
                     "\n".join(f"- {c}" for c in task_json.success_criteria) +
                     "\n\nConfirm the plan meets all criteria, or add missing steps."
                 ),
-                system=_BRAIN_SYSTEM,
+                system=with_confidence_invite(_BRAIN_SYSTEM, self._VERIFIER_MODEL),
                 max_tokens=1500,
                 temperature=0.2,
             )
@@ -126,7 +127,7 @@ class BrainTeam(BaseTeam):
                     f"Success criteria:\n{criteria}\n\n"
                     f"Provide a detailed execution plan."
                 ),
-                system=_BRAIN_SYSTEM,
+                system=with_confidence_invite(_BRAIN_SYSTEM, self._PLANNER_MODEL),
                 max_tokens=3000,
                 temperature=0.4,
             )
@@ -173,7 +174,7 @@ class BrainTeam(BaseTeam):
             )
             return await self._get_model(self._PLANNER_MODEL).generate(
                 prompt=problem,
-                system=_BRAIN_SYSTEM,
+                system=with_confidence_invite(_BRAIN_SYSTEM, self._PLANNER_MODEL),
                 max_tokens=2500,
                 temperature=0.4,
             )

@@ -15,9 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 from loguru import logger
+from core.compact_style import with_compact_style
 from tools.agent_tools import (
     ToolExecutor, TOOL_SCHEMAS, TOOL_SCHEMAS_CORE, TOOL_SCHEMAS_MINIMAL,
     _SSH_SCHEMAS, _GITHUB_SCHEMA, DEFAULT_WORKSPACE, select_tools_for_budget,
+    ToolResult,
 )
 
 
@@ -89,6 +91,34 @@ def _next_fallback_tier(current_model_id: str) -> str | None:
         return _FALLBACK_CHAIN[0] if _FALLBACK_CHAIN else None
     idx = _FALLBACK_CHAIN.index(current_model_id)
     return _FALLBACK_CHAIN[idx + 1] if idx + 1 < len(_FALLBACK_CHAIN) else None
+
+
+# ── Per-call watchdog (Phase 0.2, UPGRADE_ROADMAP.md §5) ────────────────────────
+# Live-caught incident (2026-07-16): a single model call sat with zero logged
+# activity for ~110 minutes mid-run. Every connector already sets a 30s HTTP
+# timeout (config/settings.py::default_timeout_ms, added 2026-07-13) and
+# generate_with_tools retries up to 3x with backoff -- worst-case legitimate
+# duration for one call is bounded well under 3 minutes. That means the
+# incident almost certainly wasn't an in-process hang this can catch (most
+# likely the host OS suspended the whole process — no asyncio-level watchdog
+# can fire if the process itself isn't scheduled). This wrapper is a genuine
+# backstop anyway: it bounds ANY coroutine stall, from any cause, at the
+# task-cancellation level rather than trusting every call site to have its
+# own timeout right. A tripped watchdog raises a plain RuntimeError, so every
+# existing except-Exception fallback/escalation path below treats it exactly
+# like any other connector failure and moves to the next tier — no new
+# control flow, just a hard ceiling on the existing one.
+_MODEL_CALL_WATCHDOG_S = 180.0
+
+
+async def _watchdog(coro, label: str):
+    try:
+        return await asyncio.wait_for(coro, timeout=_MODEL_CALL_WATCHDOG_S)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"{label} exceeded the {_MODEL_CALL_WATCHDOG_S:.0f}s call watchdog — "
+            f"treating as a failure so the fallback chain can proceed"
+        )
 
 
 # Compact-format decision is PROVIDER-DRIVEN (see _use_compact_for below), not
@@ -281,6 +311,29 @@ _SCAN_RE = [re.compile(p, re.IGNORECASE) for p in [
 
 def _needs_workspace_scan(task: str) -> bool:
     return sum(1 for p in _SCAN_RE if p.search(task)) >= 2
+
+# ── Stalled-build detector ────────────────────────────────────────────────────
+# A task that asked for an ARTIFACT (create/write/build a file) but ended with
+# zero files touched and a reply that merely NARRATES intent ("I'll create...",
+# "Let me build...") is a stall, not a completed answer. Caught live
+# (2026-07-24): a plain "create a file hi.txt with the text hello world" got
+# "I'll create a single, self-contained ...html file ..." — 0 files, and the
+# old guard missed it twice: it was planning-tasks-only AND gated on a <60-char
+# length that this ~180-char promise sailed past. Both signals below are needed.
+_WANTS_ARTIFACT_RE = re.compile(
+    r"\b(create|write|build|make|generate|implement|scaffold|code|produce)\b", re.IGNORECASE)
+_PROMISE_ONLY_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?[,.!\s]+)?(?:sure[,.!\s]+)?"
+    r"(?:i'?ll\b|i will\b|i'?m going to\b|i am going to\b|let me\b|let's\b|"
+    r"i plan to\b|i'?m about to\b|here'?s (?:what|how) i|first[,\s])",
+    re.IGNORECASE)
+
+def _wants_artifact(task: str) -> bool:
+    return bool(_WANTS_ARTIFACT_RE.search(task or ""))
+
+def _promised_not_acted(text: str) -> bool:
+    """The reply only promises future action instead of being the result."""
+    return bool(_PROMISE_ONLY_RE.match((text or "").strip()))
 
 def _build_system_hint(pkg_json: str) -> str:
     """Return build-system-specific rules to inject into agent context."""
@@ -635,7 +688,11 @@ class AgentLoop:
             from tools.memory import memory
             await self._ensure_memory_ready(memory)
             retrieved = await asyncio.wait_for(
-                memory.retrieve_context(task, team="code", top_k=2), timeout=10.0,
+                memory.retrieve_context(
+                    task, team="code", top_k=2,
+                    workspace=str(self.executor.workspace.resolve()),
+                ),
+                timeout=10.0,
             )
             if retrieved:
                 lessons_ctx = f"\n\n{retrieved}"
@@ -668,6 +725,18 @@ class AgentLoop:
         _no_write_iters   = 0             # consecutive tool-using iterations with zero file writes
         _empty_streak     = 0             # consecutive empty/stub responses (handoff at 3)
         _tool_fail_streak = 0             # consecutive tool_use_failed recoveries (handoff at 2)
+        # Read-loop dithering guard (core/read_loop_guard.py) — live-enforced
+        # (shadow=True validated first on 2026-07-16: zero false positives
+        # across 10 legitimate multi-model iterations, correctly detected the
+        # exact glm_47_flash_zai read-only dithering pattern that had broken
+        # every prior run). Escalates through DECISIONS, never forces an
+        # edit: cache short-circuit -> nudge -> decision checkpoint -> model
+        # handoff -> named stall. Deliberately isolated: never reads or
+        # writes _no_write_iters/_repeat_count/friends above, and vice versa
+        # -- see the module docstring for the precedence rule between them.
+        from core.read_loop_guard import ReadLoopGuard, GuardConfig, Action as _RLGAction
+        _read_loop_guard = ReadLoopGuard(GuardConfig(shadow=False))
+        _pressure_made_paths: list[str] = []   # edits landing under nudge/checkpoint pressure
         _build_verified   = False         # True once 'npm run build' passes without errors
         _build_fail_cycles = 0            # consecutive build-gate failures (comparison-judge at 2+)
         _last_build_err   = ""            # text of the most recent build failure, for the lesson store below
@@ -737,21 +806,21 @@ class AgentLoop:
                     # whatever relevant tools fit the model's real TPM) — instead
                     # of the old fixed 6-tool minimal that stripped design/vision/
                     # git/github entirely. See select_tools_for_budget().
-                    response = await connector.generate_with_tools(
+                    response = await _watchdog(connector.generate_with_tools(
                         messages=_build_fallback_messages(messages),
                         tools=select_tools_for_budget(task, _compact_tool_budget(connector)),
                         max_tokens=min(params["max_tokens"], 8192),
                         temperature=params["temperature"],
                         task_type=task_type,
-                    )
+                    ), f"{connector.model_id} (primary, compact)")
                 else:
-                    response = await connector.generate_with_tools(
+                    response = await _watchdog(connector.generate_with_tools(
                         messages=messages,
                         tools=_task_tools(task),
                         max_tokens=params["max_tokens"],
                         temperature=params["temperature"],
                         task_type=task_type,
-                    )
+                    ), f"{connector.model_id} (primary)")
             except Exception as exc:
                 # Fallback chain: primary → tier 1 → tier 2 → tier 3 → tier 4 (see
                 # _FALLBACK_CHAIN). Each tier is tried inside its own guard so a
@@ -780,21 +849,21 @@ class AgentLoop:
                         # blows its per-minute token budget (observed live as a 413).
                         _fallback_active = _use_compact_for(connector)
                         if _fallback_active:
-                            response = await connector.generate_with_tools(
+                            response = await _watchdog(connector.generate_with_tools(
                                 messages=_build_fallback_messages(messages),
                                 tools=select_tools_for_budget(task, _compact_tool_budget(connector)),
                                 max_tokens=min(params["max_tokens"], 8192),
                                 temperature=params["temperature"],
                                 task_type=task_type,
-                            )
+                            ), f"{connector.model_id} (fallback, compact)")
                         else:
-                            response = await connector.generate_with_tools(
+                            response = await _watchdog(connector.generate_with_tools(
                                 messages=messages,
                                 tools=_task_tools(task),
                                 max_tokens=min(params["max_tokens"], 8192),
                                 temperature=params["temperature"],
                                 task_type=task_type,
-                            )
+                            ), f"{connector.model_id} (fallback)")
                         break  # this tier succeeded
                     except Exception as exc2:
                         last_exc = exc2
@@ -827,21 +896,21 @@ class AgentLoop:
                             params    = get_params(connector.api_model, task_type)
                             _fallback_active = _use_compact_for(connector)
                             if _fallback_active:
-                                response = await connector.generate_with_tools(
+                                response = await _watchdog(connector.generate_with_tools(
                                     messages=_build_fallback_messages(messages),
                                     tools=select_tools_for_budget(task, _compact_tool_budget(connector)),
                                     max_tokens=min(params["max_tokens"], 8192),
                                     temperature=params["temperature"],
                                     task_type=task_type,
-                                )
+                                ), f"{connector.model_id} (escalation, compact)")
                             else:
-                                response = await connector.generate_with_tools(
+                                response = await _watchdog(connector.generate_with_tools(
                                     messages=messages,
                                     tools=_task_tools(task),
                                     max_tokens=min(params["max_tokens"], 8192),
                                     temperature=params["temperature"],
                                     task_type=task_type,
-                                )
+                                ), f"{connector.model_id} (escalation)")
                             logger.info(f"[agent] escalation to {esc_id} succeeded")
                             break
                         except Exception as exc3:
@@ -918,8 +987,10 @@ class AgentLoop:
                 # under cascading-fallback stress, where a weak tail-end model gave up
                 # without writing anything. Force a direct retry instead of spending a
                 # critic call (itself fallible) to confirm what's already obvious.
-                if (_needs_planning(task) and not result.files_created and not result.files_edited
-                        and len(result.final_response.strip()) < 60
+                if ((_needs_planning(task) or _wants_artifact(task))
+                        and not result.files_created and not result.files_edited
+                        and (len(result.final_response.strip()) < 60
+                             or _promised_not_acted(result.final_response))
                         and i < self.MAX_ITERATIONS - 1):
                     _empty_streak += 1
                     # A model that returns empties repeatedly will not recover by
@@ -1283,7 +1354,8 @@ class AgentLoop:
                 messages_pending_nudge = (
                     "PROGRESS CHECK: you have gone 4 iterations without writing a single "
                     "file. Whatever you are gathering (assets, listings, file contents), "
-                    "you have enough. Use create_file NOW to write actual project files."
+                    "you have enough. If the file already exists, use edit_file on it "
+                    "NOW -- do not just create_file for brand-new files and stop there."
                 )
             elif _no_write_iters >= 6:
                 # Same escalation as the identical-call loop: a stuck model is a
@@ -1294,8 +1366,41 @@ class AgentLoop:
             else:
                 messages_pending_nudge = None
 
+            _read_loop_verdict = _read_loop_guard.begin_iteration(i + 1, tool_calls)
+            if _read_loop_verdict.action is not _RLGAction.PROCEED:
+                # Precedence rule (see read_loop_guard module docstring): this
+                # guard's verdict wins for the turn -- never inject two
+                # contradictory corrective messages in one iteration.
+                messages_pending_nudge = None
+                _loop_correction = False
+
             _scaffold_dir_before = _scaffold_dir
-            tool_results = await self.executor.execute_parallel(tool_calls)
+            if _read_loop_verdict.short_circuits:
+                _rlg_real_calls = [
+                    tc for tc in tool_calls if tc["id"] not in _read_loop_verdict.short_circuits
+                ]
+                _rlg_stub_results = [
+                    ToolResult(tool_name=tc["name"], call_id=tc["id"], success=True,
+                               output=_read_loop_verdict.short_circuits[tc["id"]], duration_ms=0.0)
+                    for tc in tool_calls if tc["id"] in _read_loop_verdict.short_circuits
+                ]
+                tool_results = _rlg_stub_results + (
+                    await self.executor.execute_parallel(_rlg_real_calls) if _rlg_real_calls else []
+                )
+            else:
+                tool_results = await self.executor.execute_parallel(tool_calls)
+
+            # Live-caught bug (2026-07-16): an edit_file failure (old_str
+            # didn't match -- almost always because the model guessed at a
+            # file's content instead of reading it fresh right before
+            # editing) became just another tool result with no urgency
+            # attached. The model would abandon that specific edit for the
+            # rest of the run rather than reading the file and retrying --
+            # confirmed reproducible across 2 separate live runs, same file,
+            # different fallback models both times. The no-write nudge
+            # (below) doesn't cover this: the model IS writing other files,
+            # just never retrying THIS one.
+            _failed_edits: list[str] = []
 
             for tr in tool_results:
                 await cb.emit_tool_result(tr)
@@ -1315,10 +1420,28 @@ class AgentLoop:
                         # claiming "verified" (latent bug: _build_verified was sticky).
                         _build_verified   = False
                         _verifiers_passed = False
+                        if _read_loop_guard.on_mutation(i + 1, tc_args) == "pressure_made":
+                            _pressure_made_paths.append(tc_args.get("path", ""))
                     elif tr.tool_name == "edit_file":
                         result.files_edited.append(tc_args.get("path", ""))
                         _build_verified   = False
                         _verifiers_passed = False
+                        # Step 5 (read_loop_guard design): an edit landing within
+                        # the pressure window of a nudge/checkpoint is never
+                        # silently trusted -- it must clear the SAME verifier
+                        # battery as everything else (already guaranteed by the
+                        # _verifiers_passed=False reset above; this just makes
+                        # the pressured edit visible for review instead of
+                        # indistinguishable from a normal one).
+                        if _read_loop_guard.on_mutation(i + 1, tc_args) == "pressure_made":
+                            _pressure_made_paths.append(tc_args.get("path", ""))
+                            logger.warning(
+                                f"[agent] read_loop_guard: edit to {tc_args.get('path', '')} "
+                                f"at iteration {i+1} landed under pressure (nudge/checkpoint) "
+                                f"-- verifier battery must clear it before this run can finish"
+                            )
+                    elif tr.tool_name in ("delete_file", "move_file"):
+                        _read_loop_guard.on_mutation(i + 1, tc_args)
                     elif tr.tool_name == "bash":
                         cmd = tc_args.get("command", "")
                         result.commands_run.append(cmd[:60])
@@ -1335,6 +1458,11 @@ class AgentLoop:
                                 if _scaffold_dir in (".", ".."):
                                     _scaffold_dir = "."  # scaffolded into the workspace root
                                 _scaffold_is_vite = "vite" in cmd.lower()
+                        _read_loop_guard.on_mutation(i + 1)
+                    elif tr.tool_name in ("read_file", "list_dir"):
+                        _read_loop_guard.record_read_result(tc_args, tr.output, i + 1)
+                elif tr.tool_name == "edit_file":
+                    _failed_edits.append(tc_args.get("path", ""))
                 try:
                     from core.activity_log import activity_log
                     activity_log.log_tool(
@@ -1358,6 +1486,18 @@ class AgentLoop:
             })
             for tr in tool_results:
                 messages.append({"role": "tool", "tool_call_id": tr.call_id, "content": tr.output})
+            if _failed_edits:
+                paths = ", ".join(dict.fromkeys(p for p in _failed_edits if p))
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Your edit_file call on {paths} just failed because old_str "
+                        f"didn't match the file's real current content. Do NOT move on "
+                        f"or abandon this edit -- call read_file on {paths} right now "
+                        f"to see its exact current content, then retry edit_file with "
+                        f"an old_str copied verbatim from what you just read."
+                    ),
+                })
             if _scaffold_dir and _scaffold_dir != _scaffold_dir_before:
                 # Fire once, immediately after the scaffold succeeds — a mechanical
                 # detection beats a static system-prompt mention, which has been
@@ -1414,6 +1554,63 @@ class AgentLoop:
                 logger.warning(f"[agent] no-write nudge at iteration {i+1} "
                                f"({_no_write_iters} iterations without a file write)")
                 messages.append({"role": "user", "content": messages_pending_nudge})
+            if _read_loop_verdict.inject_message:
+                logger.warning(
+                    f"[agent] read_loop_guard {_read_loop_verdict.action.name} at "
+                    f"iteration {i+1}: {_read_loop_verdict.reason}"
+                )
+                messages.append({"role": "user", "content": _read_loop_verdict.inject_message})
+            if _read_loop_verdict.action is _RLGAction.ESCALATE_MODEL:
+                # Same escalate-or-name-the-stall pattern as the legacy
+                # _loop_correction handoff below -- a model stuck reading
+                # without ever attempting an edit is a MODEL problem, so try
+                # the next fallback tier before giving up. One iteration of a
+                # stronger model is cheaper than several more of a weak one
+                # going in circles.
+                _next_tier = _next_fallback_tier(connector.model_id)
+                if not _next_tier:
+                    try:
+                        from core.model_escalation import agentic_candidates
+                        _pool = await agentic_candidates(exclude=_tried_models)
+                        _next_tier = _pool[0] if _pool else None
+                    except Exception as exc_pool:
+                        logger.warning(f"[agent] escalation pool lookup failed: {str(exc_pool)[:80]}")
+                        _next_tier = None
+                if _next_tier and i < self.MAX_ITERATIONS - 2:
+                    logger.warning(
+                        f"[agent] read-loop escalation at iteration {i+1}: handing off "
+                        f"{connector.model_id} -> {_next_tier}"
+                    )
+                    connector        = registry.get(_next_tier)
+                    _tried_models.add(_next_tier)
+                    params           = get_params(connector.api_model, task_type)
+                    _fallback_active = _use_compact_for(connector)
+                    _loop_warnings   = 0
+                    _repeat_count    = 0
+                    _last_tool_sig   = ""
+                    _no_write_iters  = 0
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "A previous model spent too long reading without making any "
+                            "change. You are taking over. Check the PROJECT LEDGER above "
+                            "for current state, then make concrete progress with "
+                            "create_file/edit_file — do not re-explore."
+                        ),
+                    })
+                    continue
+                logger.warning(
+                    f"[agent] named stall at iteration {i+1}: read-only loop, "
+                    f"no fallback tiers left — ending run"
+                )
+                if not result.final_response:
+                    result.final_response = (
+                        "Stopped early: stalled:read_loop — the model read files "
+                        "repeatedly without ever attempting an edit, and no fallback "
+                        "model tier remained. The work completed before that point "
+                        "(if any) is in the workspace."
+                    )
+                break
             if _loop_correction:
                 _loop_warnings += 1
                 # Escalate: a soft in-context warning was tried once already and the
@@ -1449,6 +1646,16 @@ class AgentLoop:
                         _loop_warnings   = 0
                         _repeat_count    = 0
                         _last_tool_sig   = ""
+                        # Without this reset, a fresh model's very first (and
+                        # perfectly reasonable) orientation read -- which the
+                        # handoff message below explicitly tells it to do --
+                        # instantly re-trips the >=6 no-write threshold left
+                        # over from the PREVIOUS model's failure, cascading
+                        # through the rest of the fallback chain in 1-2
+                        # iterations each with no real chance to fix anything
+                        # (observed live 2026-07-16: 3 handoffs in 2 iterations,
+                        # hard-stopped with tiers exhausted at iteration 21/22).
+                        _no_write_iters  = 0
                         messages.append({
                             "role": "user",
                             "content": (
@@ -1544,6 +1751,13 @@ class AgentLoop:
         except Exception as exc:
             logger.warning(f"[agent] document preview skipped: {str(exc)[:60]}")
 
+        if _pressure_made_paths:
+            logger.warning(
+                f"[agent] read_loop_guard: {len(_pressure_made_paths)} edit(s) this run "
+                f"landed under nudge/checkpoint pressure: {', '.join(dict.fromkeys(_pressure_made_paths))} "
+                f"-- verify these were actually checked by the build/verifier gate, not just written"
+            )
+
         return result
 
     async def _reflexion_check(
@@ -1618,7 +1832,35 @@ class AgentLoop:
             task = f"{context}\n\n{task}"
         messages = [{"role": "system", "content": system or _AGENT_SYSTEM}]
         if history:
+            # Prior conversation is background/continuity context, NOT a
+            # continuation of an in-progress task. Confirmed live
+            # (2026-07-19): splicing history in verbatim gave the model no
+            # signal to distinguish "old topic from days ago" from "the
+            # current live task" -- a fresh, unrelated request ("generate
+            # an image of a boy playing football") got answered with a
+            # palindrome-checker program pulled straight from a stale
+            # history-compaction summary (cli.py's _maybe_summarize_history,
+            # which never expires once created), and a later request
+            # drifted into resuming an old half-built "openstack" project
+            # the user hadn't mentioned this turn. Same "team's actual job,
+            # not the whole request" disambiguation principle already used
+            # in teams/leadership.py's TEAM_MANDATES, applied to history.
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The following is PAST conversation history, included for "
+                    "background/continuity only. It may describe different, "
+                    "already-finished, or abandoned topics. Do NOT treat it as "
+                    "part of the CURRENT task, and do NOT resume or continue "
+                    "any old unfinished work from it unless the user's current "
+                    "message below explicitly asks you to."
+                ),
+            })
             messages.extend(history)
+            messages.append({
+                "role": "system",
+                "content": "END of past history. Everything above this line is background only -- solve the CURRENT task below.",
+            })
         messages.append({"role": "user", "content": task})
         return messages
 
@@ -1643,6 +1885,7 @@ class AgentLoop:
             await self._ensure_memory_ready(memory)
             await memory.store_error_fix(
                 error=error[:500], fix=fix_explanation[:800], team="code",
+                workspace=str(self.executor.workspace.resolve()),
             )
         except Exception as exc:
             logger.warning(f"[agent] build-lesson store skipped: {str(exc)[:60]}")
@@ -1976,7 +2219,16 @@ class AgentLoop:
         # the fix cycles marched the model into rebuilding a website nobody
         # asked for. The scan now runs only for legacy callers that pass no
         # touch information at all.
-        if touched:
+        # `is not None`, NOT truthiness. An EMPTY list means the caller ran and
+        # touched nothing -- there is nothing of THIS run's to verify, so the
+        # scan must not run. Truthiness conflated [] with None and let a
+        # zero-file run fall through to the leftover scan: caught live
+        # (2026-07-23) when a fresh "make one nimbus-landing.html" run created
+        # 0 files, scanned, adopted the leftover aurora-site/ as "the project",
+        # and ran `cd aurora-site && npm install && npm run build` on work
+        # nobody asked about. Only a caller that passes NO touch info at all
+        # (None -- legacy) still gets the last-resort scan.
+        if touched is not None:
             return None
         listing = await self.executor.list_dir(".")
         for line in listing.splitlines():
@@ -2088,7 +2340,8 @@ _AGENT_SYSTEM_COMPACT = (
     "7. React: one component per file under src/components/ (Header.jsx, Hero.jsx, ...), "
     "imported by App.jsx — never one monolithic App.jsx with everything inline.\n"
     "8. Run 'npm run build' to verify the project compiles before finishing.\n"
-    "9. Do not stop until every file is created and the build passes."
+    "9. Do not stop until every file is created and the build passes.\n"
+    "10. Keep any prose terse -- no narration before acting, just call the tool."
 )
 
 _AGENT_SYSTEM = """You are VibeAI, an autonomous coding agent (like Claude Code). You act — you do not chat.
@@ -2099,6 +2352,16 @@ CRITICAL RULES — violating these is a failure:
   ✗ NEVER explain what you are going to do without immediately calling the tool to do it
   ✗ NEVER respond with only text when a tool would answer the question — use the tool
   ✗ NEVER ask clarifying questions for coding/build/fix/debug tasks — act immediately
+  ✗ NEVER build, install, fix, or modify a pre-existing project you did not create
+    for THIS task. The workspace is shared and accumulates unrelated leftovers
+    from past sessions. Directories you find in list_dir that the user did not
+    mention are NOT your task and NOT your problem. If the user named no existing
+    project, create NEW files for the task and leave everything else in the
+    workspace untouched.
+  ✗ YOUR TASK IS ONLY THE USER MESSAGE. These rules describe how to behave; they
+    are NOT the task. Never adopt a filename, project, or command that appears in
+    these instructions as the thing to build — do exactly what the user asked,
+    using their words and their filenames.
 
 You have these tools:
 
@@ -2191,6 +2454,31 @@ ROUTING RULES — decide what the user wants:
 4. WEB SEARCH tasks → search_web then summarise
 
 5. LANDING PAGE / WEBSITE / UI tasks → design THEN code:
+   • ►► EXPLICIT USER CONSTRAINTS OUTRANK EVERY DEFAULT IN THIS RULE. ◄◄
+     The defaults below describe what a good landing page looks like WHEN THE
+     USER DID NOT SAY. They are not permission to override what the user did
+     say. A single-file, no-build, no-npm request must not be turned into a
+     multi-file framework scaffold just because the phrase "landing page"
+     matched this rule — the stated constraints win over these project-scale
+     defaults every time.
+     If the user states ANY of:
+       - a concrete output filename (a specific .html/.css/.js name)
+       - "one file" / "single file" / "self-contained"
+       - "no npm" / "no build tools" / "no framework" / "plain HTML" / "no separate files"
+     then OBEY IT EXACTLY: create that file, at that path, and nothing else.
+     Do NOT run npm. Do NOT scaffold. Do NOT create extra files.
+     "One file"/"self-contained" means the file must WORK ON ITS OWN when
+     opened directly — so do NOT call design_asset at all unless the user
+     asked for images. design_asset downloads a picture into
+     generated_assets/, which IS a second file: referencing it (<img src>,
+     background:url(...)) breaks "self-contained" and leaves the page broken
+     if moved. Observed live (2026-07-23): a "ONE self-contained file" request
+     still generated a hero image and wrote
+     background:url('generated_assets/...jpg') into the page. Under these
+     constraints use CSS gradients/colors/shapes for visuals instead.
+     If the user DID ask for images while also demanding one file, embed them
+     as a data: URI or remote https URL — never a local relative path.
+     When the user's words and these defaults conflict, the user wins.
    • Step 1 — call design_asset for EACH visual section needed:
      - Hero image: design_asset("epic hero for [topic] website, dark background, cinematic", "hero")
      - Background: design_asset("subtle dark texture for [topic] site", "background", width=1920, height=1080)
@@ -2198,7 +2486,9 @@ ROUTING RULES — decide what the user wants:
    • Step 2 — write the HTML/CSS embedding ALL the returned URLs
    • The design_asset URLs work directly in browsers — use them in <img src="..."> or background-image
    • A good landing page has AT MINIMUM: 1 hero image + 1-2 section images
-   • NEVER build a UI page without calling design_asset first
+     (default only — skipped when the user constrained the output, see above)
+   • NEVER build a UI page without calling design_asset first — UNLESS the
+     user's explicit constraints say otherwise (see the override above)
 
 6. BARE IMAGE / LOGO / ICON generation (no app, page, or project requested)
    → do NOT scaffold a project or build tool. Found live (2026-07-13): asking
@@ -2241,6 +2531,8 @@ VIBEMIND IMPLEMENTATION SPEC (when present in the task context):
 
 DO NOT ask clarifying questions for tasks 2-6 — act immediately.
 For casual conversation, reply naturally and concisely — no tools."""
+
+_AGENT_SYSTEM = with_compact_style(_AGENT_SYSTEM)
 
 async def run_agent(task: str, model_id: str = "gemini_flash", task_type: str = "coding",
                     workspace: str | None = None, callbacks: AgentCallbacks | None = None) -> AgentResult:

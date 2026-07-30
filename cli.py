@@ -363,6 +363,219 @@ class LiveDisplay:
 # AGENT MODE — direct AgentLoop (Claude-Code-style, tool calls visible)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_CHAT_SYSTEM = (
+    "You are VibeAI, a friendly, knowledgeable multi-model AI assistant. Answer "
+    "the user's message directly and correctly.\n"
+    "- Greeting / small talk: reply briefly and warmly (1-2 sentences).\n"
+    "- A QUESTION you can answer in words -- including math, physics, science, "
+    "logic, or a coding CONCEPT, and including a derivation, proof, or "
+    "calculation -- ANSWER it fully: show the reasoning steps and the final "
+    "result. Never deflect a question you are able to answer.\n"
+    "- ONLY if the user is asking you to CREATE, EDIT, or RUN files/code/a "
+    "project (real build work) should you say: describe the task and you'll "
+    "switch to building it.\n"
+    "You have no file or tool access in this reply -- you are reasoning and "
+    "explaining, not building. Ignore unrelated earlier project context unless "
+    "the user brings it up.\n"
+    "If a block labelled LIVE SEARCH RESULTS appears below, it was fetched from "
+    "the web just now -- it is more current than your training data. For any "
+    "time-sensitive fact (scores, prices, news, \"latest\"/\"current\"/\"last\"), "
+    "prefer it over your own memory. STRICT GROUNDING RULE: state ONLY figures, "
+    "dates, and names that literally appear in that block -- never invent or "
+    "guess a specific number/date/margin that isn't there, even one that feels "
+    "plausible from your training. If the snippets describe the situation but "
+    "don't state the exact figure asked for, say plainly that the search didn't "
+    "return that specific number, then share what the snippets DO say. Attribute "
+    "by outlet name only (e.g. \"per NDTV Profit\") -- never invent a footnote "
+    "marker or citation number.\n"
+    "DO NOT CONTRADICT YOURSELF: if YOUR OWN earlier reply in this same "
+    "conversation already stated a fact (a score, a date, an outcome) -- "
+    "including one grounded in a live search result shown earlier -- treat "
+    "it as established. Restate or build on it in later replies. Do not "
+    "walk it back to a hedge like \"that hasn't happened yet\" just because "
+    "a later search attempt in this same conversation returned nothing; "
+    "a failed lookup is not evidence the earlier one was wrong."
+)
+
+
+# ── Last-successful-search cache (chat live-search fallback) ─────────────────
+# Live-caught (2026-07-27): a same-topic follow-up's search query
+# deliberately folds in the prior turn's words (see below), which makes it
+# look near-identical to the query DDG just served moments ago -- and DDG's
+# anti-abuse throttle treats that as a repeat/duplicate and blocks it almost
+# every time. When THAT happens, the follow-up gets NO grounding at all, and
+# the model reverted to its own stale training-time assumption ("that hasn't
+# happened yet"), directly CONTRADICTING the correct, search-grounded answer
+# it had just given one turn earlier. Caching the last successful result and
+# reusing it for a same-topic follow-up sidesteps the duplicate-query
+# throttle entirely (no new request needed) and guarantees the model sees
+# the same grounding again, rather than relying purely on "remember what you
+# just said" prompt-following under a weak/fast chat model.
+_LAST_SEARCH_QUERY: str = ""
+_LAST_SEARCH_BLOCK: str = ""
+_LAST_SEARCH_TS:    float = 0.0
+_SEARCH_CACHE_TTL_S = 600.0   # 10 minutes -- long enough for a same-session follow-up
+
+
+_OVERLAP_STOPWORDS = {
+    "the", "a", "an", "of", "in", "on", "at", "is", "was", "were", "what",
+    "who", "it", "though", "actually", "really", "give", "me", "tell",
+    "about", "and", "both", "for", "to", "did", "with", "provide", "please",
+    "just", "here", "now", "today",
+}
+
+
+def _significant_words(text: str) -> set[str]:
+    return {w for w in re.sub(r"[^\w\s]", " ", text.lower()).split()
+            if len(w) >= 4 and w not in _OVERLAP_STOPWORDS}
+
+
+def _overlaps_recent_search(message: str) -> bool:
+    """True if the bare CURRENT message plausibly continues the topic of the
+    last successful search, so it's safe to reuse that cached result instead
+    of leaving the model to guess from scratch.
+
+    Deliberately checks the CURRENT MESSAGE ALONE, not the context-folded
+    search query -- folding always re-includes the prior turn's topic words,
+    so comparing against the folded query would ALWAYS "overlap" and leak a
+    stale answer into a genuinely unrelated next question. A pronoun-heavy
+    follow-up ("who actually won it though") carries no significant words of
+    its own at all once trivial words are stripped -- that emptiness IS the
+    signal it's a follow-up, not a new topic. A message that DOES carry its
+    own clear subject ("what's the weather in Delhi") is treated as a
+    genuinely different question and must NOT reuse an unrelated cache."""
+    if not _LAST_SEARCH_BLOCK or (time.time() - _LAST_SEARCH_TS) > _SEARCH_CACHE_TTL_S:
+        return False
+    cur = _significant_words(message)
+    if not cur:
+        return True   # topically empty -- e.g. "who won", "is that true"
+    prev = _significant_words(_LAST_SEARCH_QUERY)
+    return cur <= prev   # every word the message DOES carry is already in the cached topic
+
+
+async def handle_chat(message: str) -> None:
+    """Conversational reply -- a real chat turn, NOT the coding agent. Uses
+    recent history so the conversation flows, appends to it, and never touches
+    files or tools. This is the 'conversation' half of the system; agent mode
+    is the 'action' half.
+
+    Exception: when the question needs post-training-cutoff information (a
+    live score, a price, "who won") it gets ONE bounded web search first --
+    still no file writes, no agent loop, no 25-iteration framing. Live-caught
+    (2026-07-24): "what is rohit sharma's last score" routed here (correctly)
+    and got answered from stale training memory because this path had no way
+    to look anything up at all. The search stack itself was already fine
+    (verified live: real DDG web search surfaced the actual current score) --
+    the gap was that nothing in the chat path ever called it."""
+    from models.registry import generate_resilient
+
+    # Recent history as plain context (last few turns), so "what did I just
+    # ask?" works -- but capped so an old build task can't dominate a greeting.
+    hist = _history()[-6:] if _session is not None else []
+    convo = "\n".join(
+        f"{m.get('role', 'user').upper()}: {str(m.get('content', ''))[:300]}"
+        for m in hist if m.get("role") in ("user", "assistant")
+    )
+    prompt = (f"{convo}\nUSER: {message}" if convo else message)
+
+    # ── Live-search augmentation (fail-open) ──────────────────────────────
+    # A false positive here just costs one extra ~5-10s search before
+    # answering; a search failure/timeout silently falls back to the plain
+    # prompt above -- never blocks or breaks the chat turn.
+    used_search = False
+    from core.intent_router import needs_live_search
+    if needs_live_search(message):
+        try:
+            from tools.search import search_stack
+            # A bare follow-up ("what was the final score", "give me both
+            # team's scores") loses its topic entirely when searched alone --
+            # live-caught (2026-07-27): a 4-turn conversation established
+            # "2026 World Cup final" as the topic, then asked these follow-ups
+            # verbatim. Searched bare, they returned totally generic
+            # sports-scoreboard homepages (LiveScore, ESPN, Flashscore)
+            # instead of the actual Spain-vs-Argentina result -- DDG has no
+            # way to know what "the final score" refers to without the
+            # conversation's own topic. Confirmed live: re-running the exact
+            # follow-up text alone reproduced the generic results; the same
+            # query WITH the topic folded in correctly surfaced the real
+            # match report. Fold in the last couple of the USER's own turns
+            # (their words carry the topic more reliably than paraphrased
+            # assistant replies) -- cheap for an already self-contained query,
+            # essential for a follow-up that has no subject of its own.
+            prior_user_turns = [
+                str(m.get("content", "")) for m in hist if m.get("role") == "user"
+            ][-2:]
+            search_query = " ".join(prior_user_turns + [message]) if prior_user_turns else message
+            # extract_full=False: a chat-speed lookup needs the search
+            # engine's own snippet, not the full page markdown both
+            # Firecrawl and Exa already return in the same call.
+            # 20s: Firecrawl (primary, real API) + Exa (ranking) run
+            # concurrently, each individually capped at 15s -- 20s gives
+            # headroom for real network variance without the old DDG
+            # stack's multi-hop worst case (that stack is retired, see
+            # tools/search.py's module docstring).
+            results = await asyncio.wait_for(
+                search_stack.search(search_query, extract_full=False), timeout=20.0
+            )
+            if results:
+                global _LAST_SEARCH_QUERY, _LAST_SEARCH_BLOCK, _LAST_SEARCH_TS
+                block = search_stack.format_for_prompt(results)
+                _LAST_SEARCH_QUERY, _LAST_SEARCH_BLOCK, _LAST_SEARCH_TS = search_query, block, time.time()
+                prompt = f"LIVE SEARCH RESULTS (fetched just now):\n{block}\n\n{prompt}"
+                used_search = True
+            elif _overlaps_recent_search(message):
+                # Fresh search came back empty (often the duplicate-query
+                # throttle above), but this looks like a follow-up on the
+                # topic we just successfully answered -- reuse that grounding
+                # instead of leaving the model to guess from scratch.
+                prompt = f"LIVE SEARCH RESULTS (from earlier in this conversation):\n{_LAST_SEARCH_BLOCK}\n\n{prompt}"
+                used_search = True
+        except Exception as exc:
+            from loguru import logger as _logger
+            _logger.debug(f"[chat] live search skipped: {str(exc)[:80]}")
+            if _overlaps_recent_search(message):
+                prompt = f"LIVE SEARCH RESULTS (from earlier in this conversation):\n{_LAST_SEARCH_BLOCK}\n\n{prompt}"
+                used_search = True
+
+    # Show which model is answering -- chat mode was silent about its work,
+    # unlike agent mode. A dim line, matching the agent-header style but lighter.
+    _chat_model = "gemini_flash"
+    _search_note = "  ·  web search" if used_search else ""
+    console.print(
+        f"\n  [{C_DIM}]── {time.strftime('%H:%M:%S')} ─── chat  ·  {_chat_model}{_search_note} ─────[/{C_DIM}]"
+    )
+
+    try:
+        # 4096 tokens (was 250 -> 600 -> 4096). A ceiling, not a floor -- a
+        # "hello" still returns a one-liner. The jump to 4096 is because the
+        # chat model (Gemini 2.5 Flash) is a THINKING model: it spends most of
+        # the budget on hidden reasoning before any visible text, so a math/
+        # physics DERIVATION was cut to a 188-char stub ("...Given:\n*") at
+        # 1000. Measured live: 1000 -> 188 chars, 4096 -> a real multi-step
+        # derivation. Proper fix (pending Gemini free-quota reset to verify) is
+        # to CAP the thinking budget (reasoning_effort=low /
+        # thinking_config.thinking_budget) so the tokens go to the answer, not
+        # to raise the ceiling -- see models/connectors/google_conn.py.
+        reply = await generate_resilient(
+            _chat_model, prompt=prompt, system=_CHAT_SYSTEM,
+            max_tokens=4096, temperature=0.6,
+        )
+    except Exception as exc:
+        reply = f"(chat unavailable: {str(exc)[:60]})"
+
+    # Escape the model's reply: console.print parses [..] as Rich markup, so
+    # raw model text silently eats "[Enter]" -> "" (data loss) and RAISES
+    # MarkupError on an unbalanced tag like "[/list]" (crashes the chat turn).
+    # Only the VibeAI: label is intentional markup.
+    from rich.markup import escape as _rich_escape
+    console.print()
+    console.print(f"  [{C_AI}]VibeAI:[/{C_AI}] {_rich_escape(reply.strip())}")
+    console.print()
+    if _session is not None and reply.strip():
+        _session.append("user", message)
+        _session.append("assistant", reply.strip())
+
+
 async def handle_agent_task(task: str, model_id: str | None = None) -> None:
     """Run task through AgentLoop with live tool-call display."""
     from core.agent_loop import AgentLoop, AgentCallbacks
@@ -608,11 +821,36 @@ class ThinkingPanel:
         if "[brain] deep reasoning via VibeMind" in msg:
             self.stage = "VibeMind reasoning"
             return t("🧠", "VibeMind engaged — fleet reasoning as one network")
+        # Pre-flight phase (core/agent_loop.py, before the first real iteration):
+        # this can run 25-35s on planning-heavy tasks with nothing else visible,
+        # so every step gets its own line instead of leaving the user staring at
+        # a bare "Thinking…" spinner during the biggest part of the wait.
+        if "[agent] skills injected" in msg:
+            return t("📚", "Loaded relevant skill guidance from past sessions")
+        if "[agent] pre-flight workspace scan injected" in msg:
+            self.stage = "Scanning workspace"
+            return t("📁", "Scanning your workspace for existing files")
+        if "[agent] repo map injected" in msg:
+            return t("🗺", "Mapped existing code signatures — won't redefine what's already there")
+        if "[agent] build-system hint injected" in msg:
+            return t("🛠", "Detected build system — added framework-specific hints")
+        if "[agent] existing-site grounding injected" in msg:
+            return t("🏗", "Found your existing site — preserving branding and content")
         if "[agent] hard reasoning detected" in msg:
             self.stage = "VibeMind pre-reasoning"
             return t("🧠", "Hard reasoning detected — VibeMind pre-analysis engaged")
+        if "[agent] creative/build task" in msg:
+            self.stage = "Planning your build"
+            return t("🧠", "Planning implementation — 3 models drafting the spec in parallel (up to 25s)")
         if "[agent] VibeMind plan injected" in msg:
             return t("🎯", "VibeMind plan ready — agent executing", "green dim")
+        if "[agent] VibeMind implementation spec injected" in msg:
+            return t("🎯", "Implementation spec ready — starting the build", "green dim")
+        if "[agent] VibeMind planning timed out" in msg or "[agent] VibeMind pre-reasoning timed out" in msg:
+            self.stage = "Thinking"
+            return t("⚠", "Planning pass timed out — starting without a pre-built spec", "yellow dim")
+        if "[agent] past-lesson context injected" in msg:
+            return t("🧷", "Recalled a relevant fix from a past session")
         if "[brain] VibeMind failed" in msg:
             return t("♻", "VibeMind unavailable — single-model planner stepping in", "yellow dim")
         if "[brain] flash reasoning" in msg:
@@ -1714,7 +1952,15 @@ async def main() -> None:
                 console.print(f"  [red]Image generation failed:[/red] {result.error}\n")
             continue
 
-        # Agent mode (default)
+        # Triage: is this a conversation, or an action task? A plain "hello"
+        # must NOT launch the 25-iteration coding agent (caught live
+        # 2026-07-23: "hello" started calling design_asset on a prior task).
+        from core.intent_router import classify_intent
+        if await classify_intent(user_input) == "chat":
+            await handle_chat(user_input)
+            continue
+
+        # Agent mode (action tasks)
         console.print(
             f"\n  [{C_DIM}]── {time.strftime('%H:%M:%S')} ─── agent ──────────────[/{C_DIM}]"
         )

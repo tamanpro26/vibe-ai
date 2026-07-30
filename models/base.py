@@ -44,6 +44,27 @@ def _should_retry(exc: BaseException) -> bool:
     return code not in (400, 401, 403, 404, 413)
 
 
+def finish_reason_class(finish_reason: str | None, produced_valid_output: bool) -> str:
+    """Classify a call outcome from its finish_reason -- the ground-truth
+    discriminator this project decided it needed after the truncation-mystery
+    night (a 237-char response was misdiagnosed as a budget clip because this
+    field wasn't captured). Rules (jcode Feature 1 port):
+      - finish_reason == "length" on a FAILED attempt  -> "budget_artifact"
+        (the model ran out of output budget mid-answer -- NOT a reasoning
+        failure; never count it against the model).
+      - finish_reason == "stop" but no valid output    -> "empty_or_malformed"
+      - anything else with no valid output              -> "incomplete"
+      - valid output                                    -> "ok"
+    """
+    if produced_valid_output:
+        return "ok"
+    if finish_reason == "length":
+        return "budget_artifact"
+    if finish_reason == "stop":
+        return "empty_or_malformed"
+    return "incomplete"
+
+
 class BaseModelConnector(ABC):
 
     def __init__(self, model_def: ModelDef) -> None:
@@ -57,6 +78,59 @@ class BaseModelConnector(ABC):
         # share the same breaker, or tripping it via one model_id wouldn't
         # stop the others from wastefully rediscovering the same exhaustion.
         self._breaker_key = f"{model_def.provider}:{model_def.api_model}"
+        # Last-call metadata, captured by _note_completion() so eval harnesses,
+        # canary_stats, and guard logs can read it WITHOUT changing generate()'s
+        # str return type across every caller. finish_reason classification
+        # (Feature 1, jcode port): "length" on a failed attempt is a
+        # budget_artifact, not a model failure -- see finish_reason_class().
+        self.last_finish_reason: str | None = None
+        self.last_usage: Any = None
+
+    # ── Provider request-body extras (jcode extra_body port) ──────────────────
+
+    @staticmethod
+    def _deep_merge(base: dict, extra: dict) -> dict:
+        """Merge `extra` into `base` in place; nested dicts merge, scalars from
+        `extra` win on collision. Used to fold a model's configured extra_body
+        into the request without clobbering sibling keys."""
+        for k, v in extra.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                BaseModelConnector._deep_merge(base[k], v)
+            else:
+                base[k] = v
+        return base
+
+    def _merged_extra_body(self, existing: dict | None = None) -> dict | None:
+        """Return the extra_body to pass to the OpenAI SDK's extra_body= kwarg:
+        the connector's own `existing` extras deep-merged with the model's
+        configured extra_body (config wins). A malformed config value is logged
+        and ignored -- a bad line must never take the seat down (jcode policy)."""
+        out: dict = dict(existing) if existing else {}
+        cfg = getattr(self.model_def, "extra_body", None)
+        if cfg:
+            if isinstance(cfg, dict):
+                self._deep_merge(out, cfg)
+            else:
+                logger.warning(f"[{self.model_id}] extra_body is not a dict ({type(cfg).__name__}) — ignoring")
+        return out or None
+
+    def _request_timeout(self) -> float | None:
+        """Per-model total-timeout override (seconds), or None for the client
+        default. The non-streaming equivalent of jcode's stream_idle_timeout."""
+        return getattr(self.model_def, "request_timeout_s", None)
+
+    def _note_completion(self, resp: Any) -> None:
+        """Capture finish_reason + usage off an OpenAI-style response object.
+        Best-effort: never raises (a metadata-capture bug must not fail a real,
+        successful call)."""
+        try:
+            self.last_finish_reason = resp.choices[0].finish_reason
+        except Exception:
+            self.last_finish_reason = None
+        try:
+            self.last_usage = getattr(resp, "usage", None)
+        except Exception:
+            self.last_usage = None
 
     # ── Standard text generation ──────────────────────────────────────────────
 

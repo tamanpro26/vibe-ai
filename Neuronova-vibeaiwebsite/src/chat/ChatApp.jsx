@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from './auth.jsx'
 import { loadChats, saveChats, newConversation, newId, titleFrom } from './store.js'
-import { respond } from './engine.js'
+import {
+  respond,
+  respondLive,
+  checkLive,
+  respondOmni,
+  checkOmni,
+  respondEdge,
+  checkEdge,
+  continueOmni,
+  continueEdge,
+  DEFAULT_MODE,
+} from './engine.js'
 import Sidebar from './Sidebar.jsx'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
@@ -14,25 +25,57 @@ const TEAMS = [
   { value: 'design', label: 'Team · Design' },
 ]
 
+const MODES = [
+  { value: 'fast', label: 'Fast', title: 'Quick answers, smaller model. Best for simple asks.' },
+  { value: 'balanced', label: 'Balanced', title: 'Default: solid quality without added latency.' },
+  { value: 'deep', label: 'Deep', title: 'Slower, reasons through the problem first. Best for hard questions.' },
+]
+
 const SUGGESTIONS = [
   { icon: '⌨', text: 'Build a Python CLI that renames files in bulk' },
-  { icon: '🌐', text: 'Create a landing page and give me the zip' },
-  { icon: '🛡', text: 'Explain the circuit breaker pattern simply' },
-  { icon: '🧠', text: 'How does a 5-stage reasoning council beat one model?' },
+  { icon: '🔍', text: 'Research the best free-tier LLM providers right now' },
+  { icon: '✍', text: 'Write a LinkedIn post about a solo-built AI project' },
+  { icon: '🧠', text: 'Explain how a 5-stage reasoning council beats one model' },
 ]
 
 export default function ChatApp() {
-  const { user } = useAuth()
+  const { user, getToken } = useAuth()
   const [chats, setChats] = useState(() => loadChats(user.id))
   const [activeId, setActiveId] = useState(() => loadChats(user.id)[0]?.id ?? null)
   const [team, setTeam] = useState('auto')
+  const [mode, setMode] = useState(DEFAULT_MODE)
   const [streaming, setStreaming] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [attachments, setAttachments] = useState([])
   const [dragging, setDragging] = useState(false)
+  const [live, setLive] = useState(false)
+  const [omni, setOmni] = useState(false)
+  const [edge, setEdge] = useState(false)
   const timerRef = useRef(null)
+  const stopRef = useRef(false)
   const dragDepth = useRef(0)
   const scrollRef = useRef(null)
+
+  // Probe all three engines; re-check so starting a local server (or the
+  // edge function going live on deploy) upgrades the chat without a reload.
+  // Probed in parallel: a down server costs a full timeout, and serially
+  // that would triple the delay.
+  useEffect(() => {
+    let alive = true
+    const probe = async () => {
+      const [okLive, okOmni, okEdge] = await Promise.all([checkLive(), checkOmni(), checkEdge()])
+      if (!alive) return
+      setLive(okLive)
+      setOmni(okOmni)
+      setEdge(okEdge)
+    }
+    probe()
+    const id = setInterval(probe, 20000)
+    return () => {
+      alive = false
+      clearInterval(id)
+    }
+  }, [])
 
   const active = chats.find((c) => c.id === activeId) || null
 
@@ -64,7 +107,25 @@ export default function ChatApp() {
                 ...c,
                 messages: c.messages.map((m, idx) =>
                   idx === c.messages.length - 1
-                    ? { ...m, content: slice, project: done ? reply.project : null }
+                    ? {
+                        ...m,
+                        content: slice,
+                        project: done ? reply.project : null,
+                        // Attach the image job as soon as streaming STARTS, not
+                        // on completion: the render bay should open and begin
+                        // scanning while the text types, so the ~17s fetch is
+                        // already underway by the time the copy finishes.
+                        image: reply.image || null,
+                        // Sources land only when the answer completes: showing
+                        // citations beside half-typed prose reads as if the
+                        // claims are already sourced when they aren't yet.
+                        sources: done ? reply.sources || null : null,
+                        // Surfaced only once the full (possibly cut-off) text
+                        // has actually finished typing out, so the Continue
+                        // affordance can't appear mid-type and get confused
+                        // for part of the answer itself.
+                        truncated: done ? !!reply.truncated : false,
+                      }
                     : m,
                 ),
               }
@@ -78,6 +139,97 @@ export default function ChatApp() {
         setStreaming(false)
       }
     }, 35)
+  }
+
+  // Types out a continuation ONTO existing message content, rather than
+  // replacing it from empty like streamReply -- used after a truncated
+  // reply's Continue action returns more text.
+  const appendContinuation = (convId, messageId, baseText, addition, stillTruncated) => {
+    setStreaming(true)
+    let i = 0
+    timerRef.current = setInterval(() => {
+      i += 4 + Math.floor(Math.random() * 5)
+      const done = i >= addition.length
+      const slice = done ? addition : addition.slice(0, i)
+      setChats((prev) => {
+        const next = prev.map((c) =>
+          c.id === convId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === messageId
+                    ? { ...m, content: baseText + slice, truncated: done ? stillTruncated : false }
+                    : m,
+                ),
+              }
+            : c,
+        )
+        if (done) saveChats(user.id, next)
+        return next
+      })
+      if (done) {
+        clearInterval(timerRef.current)
+        setStreaming(false)
+      }
+    }, 35)
+  }
+
+  // Engine cascade, best-answer first:
+  //   1. VibeAI API  - the real Manager, can execute code (localhost:8000)
+  //   2. OmniRoute   - real LLM answers via the local gateway (localhost:20128)
+  //   3. Edge proxy  - real LLM answers via our own /api/chat (works anywhere,
+  //                    including the public deploy, where 1 and 2 can never
+  //                    be reached since they're localhost-only)
+  //   4. simulated   - canned templates, last resort
+  // Each failure falls through to the next, the same way the model registry's
+  // circuit breaker degrades across providers rather than erroring out.
+  const dispatchReply = async (convId, text, sent) => {
+    stopRef.current = false
+    const conv = chats.find((c) => c.id === convId)
+    // Drop the just-appended user turn and the empty assistant placeholder;
+    // the prompt is passed separately.
+    const history = (conv?.messages || []).slice(0, -2)
+
+    setStreaming(true)
+
+    if (live) {
+      try {
+        const reply = await respondLive(text, convId)
+        if (stopRef.current) return
+        streamReply(convId, reply)
+        return
+      } catch {
+        setLive(false)                 // fall through to OmniRoute
+      }
+    }
+
+    if (omni) {
+      try {
+        const reply = await respondOmni(text, history, mode)
+        if (stopRef.current) return
+        streamReply(convId, reply)
+        return
+      } catch {
+        setOmni(false)                 // fall through to the edge proxy
+      }
+    }
+
+    if (edge) {
+      try {
+        const token = await getToken()
+        const reply = await respondEdge(text, history, token, mode)
+        if (stopRef.current) return
+        streamReply(convId, reply)
+        return
+      } catch {
+        setEdge(false)                 // fall through to simulated
+      }
+    }
+
+    if (stopRef.current) return
+    const sim = respond(text, sent, team)
+    sim.text = `[CB] no live engine reachable - simulated response\n${sim.text}`
+    streamReply(convId, sim)
   }
 
   const handleSend = (text) => {
@@ -108,10 +260,11 @@ export default function ChatApp() {
     )
     persist(next)
     setAttachments([])
-    streamReply(convId, respond(text, sent, team))
+    dispatchReply(convId, text, sent)
   }
 
   const handleStop = () => {
+    stopRef.current = true
     clearInterval(timerRef.current)
     setStreaming(false)
     setChats((prev) => {
@@ -137,7 +290,56 @@ export default function ChatApp() {
         : c,
     )
     persist(next)
-    streamReply(active.id, respond(lastUser.content, lastUser.attachments || [], team))
+    dispatchReply(active.id, lastUser.content, lastUser.attachments || [])
+  }
+
+  // Recovers from a real, reproduced bug: a reply that hit its token ceiling
+  // mid-answer used to just... stop, with the cut text presented as if it
+  // were the complete answer. This re-asks for a seamless continuation and
+  // appends it, rather than the user having to notice, re-ask, and hope the
+  // model resumes where it left off.
+  const handleContinue = async (messageId) => {
+    if (!active || streaming) return
+    const idx = active.messages.findIndex((m) => m.id === messageId)
+    if (idx === -1) return
+    const msg = active.messages[idx]
+    const history = active.messages.slice(0, idx)
+    const convId = active.id
+
+    // Hide the affordance immediately so a slow connection can't invite a
+    // second click while the first continuation is still in flight.
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === convId
+          ? { ...c, messages: c.messages.map((m) => (m.id === messageId ? { ...m, truncated: false } : m)) }
+          : c,
+      ),
+    )
+    setStreaming(true)
+    try {
+      let result
+      if (omni) {
+        result = await continueOmni(history, msg.content, mode)
+      } else if (edge) {
+        const token = await getToken()
+        result = await continueEdge(history, msg.content, token, mode)
+      } else {
+        setStreaming(false)
+        return
+      }
+      appendContinuation(convId, messageId, msg.content, result.text, result.truncated)
+    } catch {
+      setStreaming(false)
+      // Restore the affordance so the user can retry rather than silently
+      // losing the option after one failed attempt.
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === convId
+            ? { ...c, messages: c.messages.map((m) => (m.id === messageId ? { ...m, truncated: true } : m)) }
+            : c,
+        ),
+      )
+    }
   }
 
   const handleNew = () => {
@@ -238,7 +440,24 @@ export default function ChatApp() {
                 </option>
               ))}
             </select>
-            <span className="engine-badge">SIMULATED ENGINE</span>
+            <div className="mode-switch" role="radiogroup" aria-label="Reasoning mode">
+              {MODES.map((mo) => (
+                <button
+                  key={mo.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === mo.value}
+                  title={mo.title}
+                  className={`mode-btn${mode === mo.value ? ' is-active' : ''}`}
+                  onClick={() => setMode(mo.value)}
+                >
+                  {mo.label}
+                </button>
+              ))}
+            </div>
+            <span className={`engine-badge${live || omni || edge ? ' is-live' : ''}`}>
+              {live ? 'LIVE ENGINE' : omni ? 'OMNIROUTE' : edge ? 'CLOUD ENGINE' : 'SIMULATED ENGINE'}
+            </span>
           </div>
         </header>
         <div className="chat-scroll" ref={scrollRef}>
@@ -253,6 +472,7 @@ export default function ChatApp() {
               </svg>
               <h1>How can VibeAI help?</h1>
               <p>
+                Any task routes to a specialist team — search, research, writing, reasoning.
                 Coding tasks come back as a runnable project with a downloadable zip.
               </p>
               <div className="suggestions">
@@ -273,6 +493,7 @@ export default function ChatApp() {
                   isStreaming={streaming && i === active.messages.length - 1 && m.role === 'assistant'}
                   canRegenerate={i === active.messages.length - 1}
                   onRegenerate={handleRegenerate}
+                  onContinue={handleContinue}
                 />
               ))}
             </div>

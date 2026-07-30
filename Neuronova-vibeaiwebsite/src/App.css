@@ -81,14 +81,32 @@ main,
 
 .nav-links a {
   color: var(--text-dim);
-  transition: color 0.2s;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
 .nav-links a:hover {
   color: var(--cyan);
 }
 
-.nav-status {
+.nav-auth {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.nav-login {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 1.5px;
+  color: var(--text-dim);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.nav-login:hover {
+  color: var(--cyan);
+}
+
+.nav-signup {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -99,10 +117,10 @@ main,
   border: 1px solid rgba(125, 255, 176, 0.35);
   border-radius: 3px;
   padding: 6px 12px;
-  transition: background 0.2s, box-shadow 0.2s;
+  transition: background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 
-.nav-status:hover {
+.nav-signup:hover {
   background: rgba(125, 255, 176, 0.08);
   box-shadow: 0 0 14px rgba(125, 255, 176, 0.2);
 }
@@ -135,6 +153,14 @@ main,
   background: radial-gradient(ellipse at 50% 25%, #0a1420 0%, var(--bg) 60%, #020304 100%);
 }
 
+/* Wrapper exists so Motion can drive the mesh's opacity from scroll progress
+   without touching the canvas element's own layout. */
+.hero-net-wrap {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 .hero-net {
   position: absolute;
   inset: 0;
@@ -149,6 +175,15 @@ main,
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* Flex items default to `min-width: auto`, so this refuses to shrink below
+     its widest child's min-content. The orchestrator feed's log lines are
+     `white-space: nowrap`, giving them a ~438px min-content that pushed this
+     container to 494px inside a 390px viewport. `body { overflow-x: hidden }`
+     then silently CLIPPED the overflow instead of scrolling it, so on phones
+     the eyebrow, tagline, body copy, second CTA, and half the stats were cut
+     off with no scrollbar to reveal them. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .hero-eyebrow {
@@ -162,7 +197,11 @@ main,
 .hero-title {
   font-size: clamp(64px, 13vw, 160px);
   font-weight: 700;
-  letter-spacing: 2px;
+  /* Was +2px: at 160px that reads visibly loose. See --track-hero. */
+  letter-spacing: var(--track-hero);
+  /* Display type set this large also wants tighter leading than the 1.2-1.4
+     that suits body copy, or the lines drift apart into separate objects. */
+  line-height: 0.92;
   color: var(--text);
   text-shadow: 0 0 60px rgba(43, 232, 255, 0.25);
 }
@@ -170,6 +209,13 @@ main,
 .hero-title-accent {
   color: var(--cyan);
   text-shadow: 0 0 30px rgba(43, 232, 255, 0.65);
+}
+
+/* inline-block so the per-character reveal can transform y/filter -- a plain
+   inline span ignores transforms. */
+.hero-char {
+  display: inline-block;
+  will-change: transform, opacity, filter;
 }
 
 .hero-tagline {
@@ -233,6 +279,10 @@ main,
 
 .ops-log {
   width: min(680px, 100%);
+  /* Paired with .hero-inner's min-width:0 above: lets the nowrap log lines
+     ellipsis (they already set overflow/text-overflow) instead of forcing
+     the whole hero wider than the viewport. */
+  min-width: 0;
   text-align: left;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -281,6 +331,7 @@ main,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .ops-line.is-new {
@@ -307,33 +358,7 @@ main,
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.hero-scroll {
-  position: absolute;
-  bottom: 26px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 4px;
-  color: var(--text-faint);
-}
-
-.hero-scroll-line {
-  width: 1px;
-  height: 34px;
-  background: linear-gradient(var(--cyan), transparent);
-  animation: scroll-hint 1.8s ease-in-out infinite;
-}
-
-@keyframes scroll-hint {
-  0%, 100% { opacity: 1; transform: scaleY(1); }
-  50% { opacity: 0.3; transform: scaleY(0.6); }
+  min-width: 0;
 }
 
 /* ── sections ───────────────────────────────────────── */
@@ -368,6 +393,8 @@ main,
 .sec-title {
   font-size: clamp(30px, 4.6vw, 46px);
   font-weight: 700;
+  letter-spacing: var(--track-display);
+  line-height: 1.06;
   color: var(--text);
 }
 
@@ -401,7 +428,8 @@ main,
   font-family: var(--font-display);
   font-size: clamp(22px, 3vw, 30px);
   font-weight: 500;
-  line-height: 1.4;
+  letter-spacing: var(--track-heading);
+  line-height: 1.34;
   color: var(--text);
 }
 
@@ -422,7 +450,10 @@ main,
 .problem-note {
   margin-top: 18px;
   padding-left: 16px;
-  border-left: 2px solid var(--cyan-dim);
+  /* 1px, not 2px: a colored side-rule above a hairline on a callout is a
+     recognized generated-UI tell. The indent plus a hairline still reads as
+     an aside, which is all this rule was doing. */
+  border-left: 1px solid var(--cyan-dim);
   font-size: 14.5px;
   color: var(--text-faint);
 }
@@ -452,7 +483,7 @@ main,
   border-radius: 5px;
   background: var(--bg-panel);
   font-family: var(--font-mono);
-  transition: border-color 0.4s, box-shadow 0.4s, transform 0.4s;
+  transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 
 .prov-dot {
@@ -537,7 +568,7 @@ main,
   border-radius: 6px;
   background: var(--bg-panel);
   padding: 22px 18px;
-  transition: border-color 0.5s, box-shadow 0.5s, transform 0.5s;
+  transition: border-color var(--dur-slow) var(--ease-out), box-shadow var(--dur-slow) var(--ease-out), transform var(--dur-slow) var(--ease-out);
 }
 
 .council-stage.is-active {
@@ -688,7 +719,6 @@ main,
 .team-card {
   position: relative;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--team);
   border-radius: 6px;
   background: var(--bg-panel);
   padding: 22px;
@@ -888,7 +918,8 @@ main,
 .eng-note {
   font-size: 14px;
   color: var(--text-faint);
-  border-left: 2px solid rgba(255, 176, 32, 0.5);
+  /* Hairline for the same reason as .problem-note above. */
+  border-left: 1px solid rgba(255, 176, 32, 0.5);
   padding-left: 16px;
 }
 
@@ -911,6 +942,8 @@ main,
 
 .footer-title {
   font-size: clamp(28px, 4vw, 40px);
+  letter-spacing: var(--track-display);
+  line-height: 1.08;
   margin-bottom: 28px;
 }
 
@@ -922,7 +955,7 @@ main,
   border: 1px solid rgba(43, 232, 255, 0.35);
   border-radius: 4px;
   padding: 14px 28px;
-  transition: background 0.2s, box-shadow 0.2s;
+  transition: background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .footer-mail:hover {
@@ -1035,5 +1068,136 @@ main,
   .footer-base {
     flex-direction: column;
     text-align: center;
+  }
+}
+
+/* ── spotlight cards ─────────────────────────────────────
+ * Cursor-follow glow: JS (App.jsx's useSpotlight) only ever writes the
+ * pointer's position into --spot-x/--spot-y; visibility is a plain CSS
+ * :hover, so the effect is fully inert whenever nothing is hovered.
+ * Falls back to var(--cyan) so cards without a per-team --team var (the
+ * CEO/stat/council cards) still glow; team cards pick up their own color
+ * automatically since --team is already set inline per card.
+ */
+.spotlight-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.spotlight-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: radial-gradient(
+    280px circle at var(--spot-x, 50%) var(--spot-y, 50%),
+    color-mix(in srgb, var(--team, var(--cyan)) 16%, transparent),
+    transparent 70%
+  );
+  transition: opacity var(--dur-base) var(--ease-out);
+  pointer-events: none;
+}
+
+.spotlight-card:hover::before {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* Touch devices have no persistent pointer position to track -- would
+     otherwise leave a stale glow wherever the last tap happened. */
+  .spotlight-card::before {
+    display: none;
+  }
+}
+
+/* ── nav scroll state ────────────────────────────────────
+ * Compacts on scroll: the nav's initial padding matches the hero's open
+ * feel, but that much chrome persists at the top of every section is
+ * exactly the "unconsidered" feeling premium sites avoid. Toggled by
+ * App.jsx's scroll listener.
+ */
+.nav {
+  /* padding is intentionally NOT transitioned: animating it forces layout
+     reflow every frame (it changes box geometry, not just paint). It snaps
+     instantly; only the compositor-cheap properties below ease, which is
+     enough to keep the state change from feeling like a hard cut. */
+  transition: background var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+
+.nav.is-scrolled {
+  padding: 9px 28px;
+  background: rgba(5, 7, 10, 0.94);
+  box-shadow: 0 1px 0 var(--line), 0 12px 24px -16px rgba(0, 0, 0, 0.6);
+}
+
+/* ── button press feedback ───────────────────────────────
+ * Hover states existed everywhere; nothing acknowledged an actual click.
+ * A hover-only button reads as decoration until it's pressed and nothing
+ * happens in response -- the scale-down on :active is the difference
+ * between a picture of a button and a button.
+ */
+.cta-primary,
+.cta-secondary,
+.nav-signup,
+.auth-clerk-submit {
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+}
+
+.cta-primary:active,
+.cta-secondary:active,
+.nav-signup:active,
+.auth-clerk-submit:active {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spotlight-card::before {
+    transition: none;
+  }
+  .cta-primary,
+  .cta-secondary,
+  .nav-signup,
+  .auth-clerk-submit {
+    transition: box-shadow var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+  }
+  .cta-primary:active,
+  .cta-secondary:active,
+  .nav-signup:active,
+  .auth-clerk-submit:active {
+    transform: none;
+  }
+}
+
+/* ── word-stagger reveal (StaggerReveal.jsx) ────────────
+ * Each word sits in its own inline-block overflow-hidden mask; the word
+ * itself translates from below the mask rather than fading, so it reads
+ * as rising into place -- the clip is what makes it read as typeset
+ * rather than a generic fade-in. Driven by the container's own `.is-in`
+ * class (added by an IntersectionObserver in the component) rather than
+ * per-word JS animation, so every word's transition is just a plain CSS
+ * transition staggered by its own `transitionDelay` inline style.
+ */
+.stagger-mask {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+  line-height: inherit;
+}
+
+.stagger-word {
+  display: inline-block;
+  transform: translateY(110%);
+  transition: transform 0.6s var(--ease-out);
+  will-change: transform;
+}
+
+.is-in .stagger-word {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stagger-word {
+    transform: none;
+    transition: none;
   }
 }

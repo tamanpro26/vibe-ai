@@ -1,0 +1,35 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/App.css"
+        ],
+        "createdAt": "2026-07-28T16:17:48.084Z",
+        "reason": "CSS-triangle arrowhead on Council flow-diagram connector, not a card side-tab; user confirmed intentional"
+      },
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "src/chat/chat.css"
+        ],
+        "createdAt": "2026-07-28T16:18:08.555Z",
+        "reason": "Render-bay measurement lattice: transient, frame-scoped, only mounts while generating; user confirmed intentional"
+      },
+      {
+        "rule": "codex-grid-background",
+        "value": "*",
+        "files": [
+          "src/App.css"
+        ],
+        "createdAt": "2026-07-29T08:00:18.593Z",
+        "reason": "Ambient HUD-terminal background grid, deliberate cyan-scanline identity; user confirmed keep"
+      }
+    ]
+  }
+}

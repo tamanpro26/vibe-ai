@@ -18,6 +18,7 @@ it never produces a wrong signature.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -29,11 +30,17 @@ _MAX_CHARS = 4000  # hard cap on the rendered map — must never itself blow a t
 
 
 def _iter_source_files(root: Path):
-    for p in root.rglob("*"):
-        if any(part in _IGNORE_DIRS for part in p.parts):
-            continue
-        if p.is_file() and p.suffix.lower() in (_PY_EXT + _JS_EXT):
-            yield p
+    # os.walk with in-place dirnames pruning instead of root.rglob("*") --
+    # found in code review (2026-07-13): rglob fully materializes the entire
+    # tree, including node_modules/dist, before this same _IGNORE_DIRS filter
+    # discards them; os.walk's dirnames[:] mutation stops it from ever
+    # descending into a pruned directory in the first place.
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS]
+        dp = Path(dirpath)
+        for name in filenames:
+            if Path(name).suffix.lower() in (_PY_EXT + _JS_EXT):
+                yield dp / name
 
 
 def _args(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:

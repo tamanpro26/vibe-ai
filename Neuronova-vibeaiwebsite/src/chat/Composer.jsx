@@ -98,7 +98,7 @@ export default function Composer({
           ref={taRef}
           rows={1}
           value={text}
-          placeholder="Message VibeAI — try a coding task to get a zip back…"
+          placeholder="Message VibeAI — code, research, writing, anything…"
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
         />

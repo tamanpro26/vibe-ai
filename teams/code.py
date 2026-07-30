@@ -28,6 +28,7 @@ from loguru import logger
 
 from core.confidence_cascade import run_cascade
 from core.imcp import TaskJSON, TaskType, Complexity
+from core.peer_consult import with_confidence_invite
 from teams.base_team import BaseTeam
 
 
@@ -172,9 +173,14 @@ class CodeTeam(BaseTeam):
             # Vision-capable models only -- the cascade's cheap tier
             # (llama33_70b_coder) has no vision capability, so a screenshot
             # request skips the cascade and goes straight to the model that
-            # can actually see it.
+            # can actually see it. Unlike the cascade/best-of-N paths below,
+            # this one has no independent quality check of its own, so it's
+            # the one call site that actually invites the CONFIDENCE tag
+            # (core/peer_consult.py) rather than leaving it dead.
             code = await self._get_model("gpt_oss_120b_coder").generate(
-                prompt=instruction, system=_CODE_SYSTEM, images=[image_b64],
+                prompt=instruction,
+                system=with_confidence_invite(_CODE_SYSTEM, "gpt_oss_120b_coder"),
+                images=[image_b64],
                 max_tokens=budget, temperature=0.2,
             )
         else:
