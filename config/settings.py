@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     vibe_api_token: str = Field(default="", description="Bearer token for mutating API routes")
     log_level: str = "INFO"
 
+    # ── Web Push (fire-alert broadcast, core/push_notify.py) ──────────────
+    # Private half of the VAPID key pair -- signs outgoing push messages so
+    # browsers can verify they came from this server. The public half is
+    # not a secret (browsers receive it directly) and lives as a plain
+    # constant in push_notify.py instead of here.
+    vapid_private_key: str = Field(default="", description="VAPID private key -- generate with `npx web-push generate-vapid-keys`")
+
 
 settings = Settings()
 

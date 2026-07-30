@@ -3,6 +3,8 @@ api/server.py  (v2 — video upload + full team wiring)
 FastAPI server with:
   POST /api/prompt        — text prompt
   POST /api/sensor        — edge-triggered hardware alerts (school heat monitor)
+  GET  /api/push/vapid-public-key — Web Push public key
+  POST /api/push/subscribe        — register a browser for fire alerts
   POST /api/video         — video file upload → .frames pipeline
   POST /api/screenshot    — screenshot → vision team
   GET  /api/health
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field
 from config.settings import settings
 from core.bus import bus
 from core.state import state
+from core.push_notify import VAPID_PUBLIC_KEY, broadcast_alert, push_store
 from manager.claude_manager import manager
 
 UPLOAD_DIR = Path("./uploads")
@@ -98,6 +101,7 @@ async def require_ws_token(token: str | None = Query(default=None)) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("VibeAI v2 starting...")
     await state.init()
+    await push_store.init()
     logger.info("VibeAI ready ✓  (multi-provider orchestration · video_observer integrated)")
     yield
     logger.info("VibeAI shutting down.")
@@ -113,6 +117,7 @@ app.add_middleware(
         "http://localhost:3000", "http://127.0.0.1:3000",   # web GUI dev server
         "http://localhost:5173", "http://127.0.0.1:5173",   # vite previews
         "vscode-webview://*",                                # VS Code extension
+        "https://vibeai-showcase.vercel.app",                # showcase site (push subscribe)
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
@@ -195,7 +200,8 @@ class SensorResponse(BaseModel):
 async def handle_sensor(req: SensorRequest) -> SensorResponse:
     if not req.message.strip():
         raise HTTPException(400, "message cannot be empty")
-    context = req.message.strip()
+    raw_message = req.message.strip()
+    context = raw_message
     if req.temperature is not None:
         context += f" (reading: {req.temperature:.1f}°C"
         if req.device_id:
@@ -203,7 +209,42 @@ async def handle_sensor(req: SensorRequest) -> SensorResponse:
         context += ")"
     logger.info(f"[sensor] {context}")
     response = await manager.handle_user_request(context)
+
+    # Fire-alert broadcast: matched on the firmware's own exact edge-trigger
+    # strings (hardware/controller.py sends exactly one of these two, never
+    # a variant), so this fires once per real crossing -- same guarantee the
+    # firmware's own state machine already gives the HTTP call itself.
+    if raw_message == "HIGH TEMPERATURE DETECTED":
+        temp_note = f" ({req.temperature:.1f}°C)" if req.temperature is not None else ""
+        await broadcast_alert("🔥 High temperature detected", f"Heat sensor tripped{temp_note}. Investigating.")
+    elif raw_message == "Temperature normalized":
+        await broadcast_alert("✅ All clear", "Temperature is back to normal.")
+
     return SensorResponse(received=context, response=response)
+
+
+# ── REST: Web Push subscriptions (fire-alert broadcast) ───────────────────────
+# Deliberately NOT behind require_token: this is a safety opt-in, not a
+# mutating agent action, and gating a fire-alert signup behind login would
+# be a real usability regression for the one thing that most wants zero
+# friction. VAPID public key has its own GET so the frontend never needs a
+# copy of it baked into a separate secret channel.
+
+class PushSubscribeRequest(BaseModel):
+    subscription: dict
+
+
+@app.get("/api/push/vapid-public-key")
+async def push_vapid_public_key() -> dict:
+    return {"publicKey": VAPID_PUBLIC_KEY}
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(req: PushSubscribeRequest) -> dict:
+    if not req.subscription.get("endpoint"):
+        raise HTTPException(400, "subscription.endpoint is required")
+    await push_store.add(req.subscription)
+    return {"ok": True}
 
 
 # ── REST: standalone image generation ─────────────────────────────────────────

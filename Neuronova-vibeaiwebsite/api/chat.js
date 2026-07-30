@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify } from 'jose'
+import { requireSession } from './_lib/clerkAuth.js'
 
 /*
  * Server-side chat proxy for the deployed (public) site.
@@ -14,12 +14,9 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
  * is an open proxy anyone on the internet could hammer to burn the free
  * tier -- the same class of risk already flagged for Firecrawl earlier in
  * this project (a browser-callable key-holding endpoint gets scraped).
- * Verification uses Clerk's public JWKS (no secret key needed -- only the
- * publishable key's own instance domain), so no new credential was required
- * to add this.
+ * See _lib/clerkAuth.js for the verification itself (shared with team.js).
  */
 
-const PUBLISHABLE_KEY = process.env.VITE_CLERK_PUBLISHABLE_KEY || ''
 const GROQ_API_KEY = process.env.GROQ_API_KEY
 
 /*
@@ -39,27 +36,6 @@ const MODES = {
   fast: { model: 'llama-3.1-8b-instant', maxTokens: 1024 },
   balanced: { model: 'llama-3.3-70b-versatile', maxTokens: 3072 },
   deep: { model: 'openai/gpt-oss-120b', maxTokens: 8192 },
-}
-
-function clerkIssuer(publishableKey) {
-  const encoded = publishableKey.replace(/^pk_(test|live)_/, '').replace(/\$$/, '')
-  const domain = Buffer.from(encoded, 'base64').toString('utf8')
-  return `https://${domain}`
-}
-
-let jwks = null
-function getJwks() {
-  if (!jwks) {
-    jwks = createRemoteJWKSet(new URL(`${clerkIssuer(PUBLISHABLE_KEY)}/.well-known/jwks.json`))
-  }
-  return jwks
-}
-
-async function requireSession(req) {
-  const auth = req.headers.authorization || ''
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
-  if (!token) throw new Error('missing session token')
-  await jwtVerify(token, getJwks(), { issuer: clerkIssuer(PUBLISHABLE_KEY) })
 }
 
 export default async function handler(req, res) {

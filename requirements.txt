@@ -17,6 +17,9 @@ python-dotenv>=1.0.0
 # ── State & Storage ───────────────────────────────────────
 aiosqlite>=0.20.0
 
+# ── Web Push (fire-alert broadcast) ───────────────────────
+pywebpush>=2.0.0
+
 # ── video_observer (.frames pipeline) ─────────────────────
 opencv-python-headless>=4.10.0
 numpy>=1.26.0

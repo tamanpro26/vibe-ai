@@ -5,15 +5,22 @@ heat-monitor.
 Behavior (as specified):
   - Reads the heat sensor once per second, continuously, forever.
   - temp < 50: no action, no connection to the AI at all.
-  - temp > 50, the FIRST time after being normal: sends
+  - temp > 50, the FIRST time after being normal: sounds the buzzer
+    immediately (local, no network round trip needed to react) and sends
     "HIGH TEMPERATURE DETECTED" to the AI exactly once. While it stays
     above 50 on later seconds, nothing more is sent.
-  - temp < 50 again, after having been high: sends "Temperature normalized"
-    exactly once, then the connection is dismissed (closed) and the
-    device is ready to detect the next HIGH event.
+  - temp < 50 again, after having been high: silences the buzzer and sends
+    "Temperature normalized" exactly once, then the connection is
+    dismissed (closed) and the device is ready to detect the next HIGH
+    event.
 
 This only reports EDGES (state changes), never a running feed of every
 reading -- that is the whole point of the state guard below.
+
+The buzzer is driven locally (a plain GPIO write), independent of the
+network call: it should still sound even if WiFi or the server is down at
+the exact moment of the event -- an alarm that depends on a working
+internet connection to go off is worse than a dumb wired one.
 
 Networking: urequests.post() opens one plain HTTP connection for the
 duration of a single request and closes it immediately after
@@ -45,6 +52,16 @@ API_TOKEN = "YOUR_VIBE_API_TOKEN"
 TEMP_THRESHOLD_C = 50
 POLL_INTERVAL_S = 1
 DEVICE_ID = "esp32-heat-01"
+
+# ── buzzer / alarm ──────────────────────────────────────────────────────────
+# A plain digital output: HIGH sounds the alarm, LOW silences it. Wire an
+# active buzzer directly to this pin (its own driver just needs the GPIO
+# signal), or a relay module's IN pin if driving something louder (siren,
+# strobe) -- this firmware doesn't need to know which; it only ever sets a
+# pin high or low.
+BUZZER_PIN = 27
+buzzer = Pin(BUZZER_PIN, Pin.OUT)
+buzzer.value(0)  # off at boot
 
 # ── sensor ──────────────────────────────────────────────────────────────────
 # Analog heat sensor (LM35-style: 10 mV per °C, 0 V = 0 °C) on GPIO34, an
@@ -107,9 +124,11 @@ def main():
         temp = read_temperature()
 
         if temp > TEMP_THRESHOLD_C and state != "high":
+            buzzer.value(1)
             send_message("HIGH TEMPERATURE DETECTED", temp)
             state = "high"
         elif temp < TEMP_THRESHOLD_C and state == "high":
+            buzzer.value(0)
             send_message("Temperature normalized", temp)
             state = "normal"
         # Otherwise: either temp < 50 while already normal (do nothing, per

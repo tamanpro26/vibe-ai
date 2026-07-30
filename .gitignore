@@ -45,3 +45,4 @@ vscode-extension/node_modules/
 *.egg-info/
 *.egg-link
 build/
+render-env.txt

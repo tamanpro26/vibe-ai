@@ -5,6 +5,8 @@ import {
   respond,
   respondLive,
   checkLive,
+  respondTeam,
+  checkTeam,
   respondOmni,
   checkOmni,
   respondEdge,
@@ -16,6 +18,7 @@ import {
 import Sidebar from './Sidebar.jsx'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
+import { pushSubscriptionStatus, subscribeToPushAlerts } from './pushAlerts.js'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -49,33 +52,73 @@ export default function ChatApp() {
   const [attachments, setAttachments] = useState([])
   const [dragging, setDragging] = useState(false)
   const [live, setLive] = useState(false)
+  // Named distinctly from `team` (the routing selector above) -- this is
+  // whether the real Manager/Council is reachable via api/team.js, not
+  // which team a task routes to.
+  const [manager, setManager] = useState(false)
   const [omni, setOmni] = useState(false)
   const [edge, setEdge] = useState(false)
+  const [pushStatus, setPushStatus] = useState('unsupported')
   const timerRef = useRef(null)
   const stopRef = useRef(false)
   const dragDepth = useRef(0)
   const scrollRef = useRef(null)
+  // Mirrors live/manager/omni/edge state, updated synchronously (no waiting
+  // on a React re-render) so dispatchReply can always read the freshest
+  // known values -- see probeRef below for why this exists.
+  const engineRef = useRef({ live: false, manager: false, omni: false, edge: false })
+  // Holds the currently in-flight probe's promise. A message sent in the
+  // first couple seconds after page load can race ahead of the very first
+  // health-check probe (it's a real network round trip, not instant) --
+  // without this, dispatchReply would see the initial `false` defaults and
+  // fall straight to the simulated engine even though everything actually
+  // works, just a moment too early to know it yet. Reproduced live: sending
+  // "wassup" immediately on page load hit "[CB] no live engine reachable"
+  // despite every tier being confirmed working seconds later.
+  const probeRef = useRef(null)
 
-  // Probe all three engines; re-check so starting a local server (or the
-  // edge function going live on deploy) upgrades the chat without a reload.
-  // Probed in parallel: a down server costs a full timeout, and serially
-  // that would triple the delay.
+  // Probe all four engines; re-check so starting a local server (or the
+  // edge function / team proxy going live on deploy) upgrades the chat
+  // without a reload. Probed in parallel: a down server costs a full
+  // timeout, and serially that would quadruple the delay.
   useEffect(() => {
     let alive = true
     const probe = async () => {
-      const [okLive, okOmni, okEdge] = await Promise.all([checkLive(), checkOmni(), checkEdge()])
+      const [okLive, okManager, okOmni, okEdge] = await Promise.all([
+        checkLive(),
+        checkTeam(),
+        checkOmni(),
+        checkEdge(),
+      ])
+      engineRef.current = { live: okLive, manager: okManager, omni: okOmni, edge: okEdge }
       if (!alive) return
       setLive(okLive)
+      setManager(okManager)
       setOmni(okOmni)
       setEdge(okEdge)
     }
-    probe()
-    const id = setInterval(probe, 20000)
+    probeRef.current = probe()
+    const id = setInterval(() => {
+      probeRef.current = probe()
+    }, 20000)
     return () => {
       alive = false
       clearInterval(id)
     }
   }, [])
+
+  useEffect(() => {
+    pushSubscriptionStatus().then(setPushStatus)
+  }, [])
+
+  const handleSubscribeAlerts = async () => {
+    try {
+      await subscribeToPushAlerts()
+      setPushStatus('subscribed')
+    } catch {
+      setPushStatus(await pushSubscriptionStatus())
+    }
+  }
 
   const active = chats.find((c) => c.id === activeId) || null
 
@@ -175,12 +218,14 @@ export default function ChatApp() {
   }
 
   // Engine cascade, best-answer first:
-  //   1. VibeAI API  - the real Manager, can execute code (localhost:8000)
-  //   2. OmniRoute   - real LLM answers via the local gateway (localhost:20128)
-  //   3. Edge proxy  - real LLM answers via our own /api/chat (works anywhere,
-  //                    including the public deploy, where 1 and 2 can never
-  //                    be reached since they're localhost-only)
-  //   4. simulated   - canned templates, last resort
+  //   1. VibeAI API  - the real Manager, direct (localhost:8000, dev only)
+  //   2. Team proxy  - the SAME real Manager, reached via our own
+  //                    /api/team on the public deploy (Render-hosted)
+  //   3. OmniRoute   - single-model fallback via the local gateway
+  //                    (localhost:20128)
+  //   4. Edge proxy  - single-model fallback via our own /api/chat (works
+  //                    anywhere, including the public deploy)
+  //   5. simulated   - canned templates, last resort
   // Each failure falls through to the next, the same way the model registry's
   // circuit breaker degrades across providers rather than erroring out.
   const dispatchReply = async (convId, text, sent) => {
@@ -192,37 +237,63 @@ export default function ChatApp() {
 
     setStreaming(true)
 
-    if (live) {
+    // Wait for any in-flight probe before trusting engineRef -- otherwise a
+    // message sent right after page load reads the initial `false`
+    // defaults instead of the real (still-resolving) availability.
+    if (probeRef.current) await probeRef.current
+    const engines = engineRef.current
+
+    if (engines.live) {
       try {
         const reply = await respondLive(text, convId)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
-      } catch {
-        setLive(false)                 // fall through to OmniRoute
+      } catch (err) {
+        console.error('[engine:live] failed, falling through:', err)
+        setLive(false)                 // fall through to the team proxy
+        engineRef.current.live = false
       }
     }
 
-    if (omni) {
+    if (engines.manager) {
+      try {
+        const token = await getToken()
+        const reply = await respondTeam(text, convId, token)
+        if (stopRef.current) return
+        streamReply(convId, reply)
+        return
+      } catch (err) {
+        console.error('[engine:manager] failed, falling through:', err)
+        setManager(false)              // fall through to OmniRoute
+        engineRef.current.manager = false
+      }
+    }
+
+    if (engines.omni) {
       try {
         const reply = await respondOmni(text, history, mode)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
-      } catch {
+      } catch (err) {
+        console.error('[engine:omni] failed, falling through:', err)
         setOmni(false)                 // fall through to the edge proxy
+        engineRef.current.omni = false
       }
     }
 
-    if (edge) {
+    if (engines.edge) {
       try {
         const token = await getToken()
         const reply = await respondEdge(text, history, token, mode)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
-      } catch {
+      } catch (err) {
+        console.error('[engine:edge] failed, falling through:', err)
         setEdge(false)                 // fall through to simulated
+        engineRef.current.edge = false
       }
     }
 
@@ -455,8 +526,33 @@ export default function ChatApp() {
                 </button>
               ))}
             </div>
-            <span className={`engine-badge${live || omni || edge ? ' is-live' : ''}`}>
-              {live ? 'LIVE ENGINE' : omni ? 'OMNIROUTE' : edge ? 'CLOUD ENGINE' : 'SIMULATED ENGINE'}
+            {pushStatus !== 'unsupported' && (
+              <button
+                type="button"
+                className={`alert-btn${pushStatus === 'subscribed' ? ' is-on' : ''}`}
+                onClick={pushStatus === 'unsubscribed' ? handleSubscribeAlerts : undefined}
+                disabled={pushStatus !== 'unsubscribed'}
+                title={
+                  pushStatus === 'subscribed'
+                    ? 'Fire alerts on: this browser gets notified if the heat sensor trips'
+                    : pushStatus === 'denied'
+                      ? 'Notifications blocked in browser settings'
+                      : 'Get notified if the heat sensor detects a fire'
+                }
+              >
+                {pushStatus === 'subscribed' ? '🔔 Alerts on' : pushStatus === 'denied' ? '🔕 Blocked' : '🔔 Fire alerts'}
+              </button>
+            )}
+            <span className={`engine-badge${live || manager || omni || edge ? ' is-live' : ''}`}>
+              {live
+                ? 'LIVE ENGINE'
+                : manager
+                  ? 'MANAGER TEAM'
+                  : omni
+                    ? 'OMNIROUTE'
+                    : edge
+                      ? 'CLOUD ENGINE'
+                      : 'SIMULATED ENGINE'}
             </span>
           </div>
         </header>

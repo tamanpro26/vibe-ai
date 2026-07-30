@@ -435,6 +435,47 @@ export async function respondLive(prompt, sessionId) {
   return { text: data.response, project: null }
 }
 
+/* ── Team proxy: the real Manager, reached from the public URL ─────────────
+ * respondLive above only ever works from localhost -- the real Manager API
+ * binds there by design (it can execute code). This is the SAME real
+ * multi-agent system (manager/claude_manager.py, teams/*, confidence
+ * cascade, comparison judge), reached instead through our own Vercel
+ * function (api/team.js), which holds the backend's bearer token
+ * server-side and forwards to wherever that backend is actually hosted
+ * (Render). Without this, the public site's chat degrades to a single
+ * model (OmniRoute/Groq) even though the real multi-agent system exists --
+ * that gap is exactly what this closes.
+ */
+export async function checkTeam() {
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 4000)
+    const res = await fetch('/api/team', { signal: ctrl.signal })
+    clearTimeout(t)
+    if (!res.ok) return false
+    const data = await res.json()
+    return !!data.ok
+  } catch {
+    return false
+  }
+}
+
+export async function respondTeam(prompt, sessionId, token) {
+  if (isImageRequest(prompt)) return imageReply(prompt, '\n')
+
+  const res = await fetch('/api/team', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ prompt, session_id: sessionId }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data?.error || `team proxy ${res.status}`)
+  return { text: data.text, project: null }
+}
+
 const STRONG_CODE = [
   'python', 'javascript', 'typescript', 'react', 'html', 'css', 'sql', 'api',
   'cli', 'script', 'function', 'class', 'bug', 'refactor', 'server',
