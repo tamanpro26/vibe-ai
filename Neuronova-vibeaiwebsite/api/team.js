@@ -58,8 +58,28 @@ export default async function handler(req, res) {
     return
   }
 
-  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : ''
-  if (!prompt) {
+  const rawPrompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : ''
+
+  /*
+   * Personalization for the Manager tier.
+   *
+   * The Python backend takes a single prompt string, not an OpenAI-style
+   * messages array, so there is no system role to use -- the profile has to
+   * be prefixed onto the prompt itself. It is also STATELESS per call
+   * (handle_user_request generates a fresh session id and keeps nothing), so
+   * this must be re-sent on every request; there is no "set it once" option.
+   *
+   * Capped server-side for the same reason as chat.js: the browser limit is
+   * a typing affordance, not a control.
+   */
+  const MAX_SYSTEM_CHARS = 4000
+  const persona =
+    typeof req.body?.systemPrompt === 'string'
+      ? req.body.systemPrompt.trim().slice(0, MAX_SYSTEM_CHARS)
+      : ''
+  const prompt = persona ? `[About the user]\n${persona}\n\n[Request]\n${rawPrompt}` : rawPrompt
+
+  if (!rawPrompt) {
     res.status(400).json({ error: 'prompt required' })
     return
   }

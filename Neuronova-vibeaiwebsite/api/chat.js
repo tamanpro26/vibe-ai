@@ -66,6 +66,34 @@ export default async function handler(req, res) {
   }
   const cfg = MODES[req.body?.mode] || MODES.balanced
 
+  /*
+   * User custom instructions (Settings -> Personalization), prepended as a
+   * system message.
+   *
+   * Capped HERE and not only in the browser. The client enforces its own
+   * limit for feedback while typing, but that is a UX affordance, not a
+   * control: anyone can POST this endpoint directly with a megabyte of text
+   * and blow up the token bill on our key. The server cap is the real one.
+   *
+   * The client's own `role: 'system'` message (the app's operating prompt) is
+   * passed through rather than stripped. Filtering it out was tried and is
+   * wrong twice over: it silently deleted the app's own system prompt, and it
+   * bought no real security -- a direct caller with a valid session controls
+   * the entire request body anyway, so they could put the same text in a user
+   * turn. The controls that actually matter here are the Clerk gate, the
+   * model whitelist, and the token caps, none of which depend on this.
+   *
+   * The personalization block is prepended FIRST so the app's own operating
+   * prompt comes after it and therefore wins on any direct conflict.
+   */
+  const MAX_SYSTEM_CHARS = 4000
+  const rawSystem = typeof req.body?.systemPrompt === 'string' ? req.body.systemPrompt : ''
+  const systemPrompt = rawSystem.trim().slice(0, MAX_SYSTEM_CHARS)
+
+  const outbound = systemPrompt
+    ? [{ role: 'system', content: `About the user:\n${systemPrompt}` }, ...messages]
+    : messages
+
   try {
     const upstream = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -75,7 +103,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: cfg.model,
-        messages,
+        messages: outbound,
         max_tokens: cfg.maxTokens,
       }),
     })

@@ -58,6 +58,221 @@
      One curve, used everywhere: consistency is most of what separates
      considered motion from incidental motion. */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ── Structural tokens (theme layer, P0) ───────────────────────────────
+   * These live in :root rather than only in [data-theme="cockpit"] on
+   * purpose: they are the DEFAULT. If the data-theme attribute is ever
+   * missing -- an unstyled first paint, a stale cached index.html, a route
+   * that renders outside the themed shell -- the UI still gets the correct
+   * cockpit values instead of collapsing to browser defaults (0 radius, no
+   * shadow). [data-theme="studio"] below overrides them.
+   *
+   * Values here are EXACTLY the ones previously hardcoded in chat.css, so
+   * introducing them is a no-op refactor. Rationalising the radius scale
+   * (3/4/5/6px is finer than any layout needs) is deliberately deferred to
+   * the Cockpit-refinement phase, where visual change is intended.
+   */
+  /* Raw channels, not colours. Tints throughout the UI need the accent at
+     many different alphas (0.06 hover wash, 0.12 active, 0.35 glow...). A
+     normal --accent hex cannot be given an alpha inside rgba(), so those 39
+     tints were previously hardcoded and would have silently stayed cyan on
+     a warm Studio surface. Exposing the channels lets one token drive every
+     alpha. */
+  --accent-rgb: 43, 232, 255;
+  --mint-rgb: 125, 255, 176;
+  --text-rgb: 217, 246, 251;
+
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius: 5px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  --radius-full: 50%;
+
+  /* Depth in this theme is GLOW, not elevation -- negative spread keeps it
+     a tight inset-feeling halo rather than a broad bloom (DESIGN.md 4). */
+  --glow-sm: 0 0 12px -4px var(--cyan);
+  --glow-md: 0 0 16px -6px var(--cyan);
+  --glow-lg: 0 0 18px -2px var(--cyan);
+  --glow-xl: 0 0 20px -8px var(--cyan);
+  --glow-2xl: 0 0 40px -10px var(--cyan);
+  --glow-soft: 0 0 14px rgba(43, 232, 255, 0.2);
+  --glow-halo-sm: 0 0 16px rgba(43, 232, 255, 0.5);
+  --glow-halo-md: 0 0 22px rgba(43, 232, 255, 0.4);
+  --glow-halo-lg: 0 0 26px rgba(43, 232, 255, 0.5);
+  --glow-mint: 0 0 18px rgba(125, 255, 176, 0.45);
+  --glow-mint-sm: 0 0 12px -4px var(--mint);
+  --ring-focus: 0 0 0 3px rgba(43, 232, 255, 0.1);
+  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.6);
+
+  /* Spacing + font-role tokens are DEFINED here but not yet applied to
+     components; wiring them up is the next phase. Defining them now is what
+     lets the Studio block below exist as a complete, reviewable unit. */
+  --space-unit: 4px;
+  --font-ui: var(--font-mono);
+  --text-base: 14px;
+
+  /* ── Modular type scale ────────────────────────────────────────────────
+   * chat.css previously carried 18 distinct font sizes across 73
+   * declarations, including half-pixel steps (9.5/10.5/11.5/12.5/13.5/14.5).
+   * Half-pixel values are the signature of sizes nudged by eye rather than
+   * chosen from a system, and that inconsistency -- not the typeface -- is
+   * most of what makes an interface read as unconsidered.
+   *
+   * One ratio (1.125, a major second) rebuilds all of it as 9 steps. The
+   * ratio is deliberately tight: a dense tool needs many usable sizes close
+   * together, where an editorial layout would want 1.25+.
+   *
+   * Every step derives from --text-base, so the Appearance text-size control
+   * rescales the ENTIRE interface proportionally instead of only resizing
+   * message bodies and leaving the chrome behind.
+   */
+  --fs-1: calc(var(--text-base) * 0.702); /* micro labels   ~10px */
+  --fs-2: calc(var(--text-base) * 0.79); /*                ~11px */
+  --fs-3: calc(var(--text-base) * 0.889); /*                ~12.5px */
+  --fs-4: var(--text-base); /* body floor     14px  */
+  --fs-5: calc(var(--text-base) * 1.125); /*                ~15.75px */
+  --fs-6: calc(var(--text-base) * 1.266); /*                ~17.7px */
+  --fs-7: calc(var(--text-base) * 1.424); /*                ~20px */
+  --fs-8: calc(var(--text-base) * 1.602); /*                ~22.4px */
+  --fs-9: calc(var(--text-base) * 2.027); /* display        ~28.4px */
+
+  /* Reading typeface for message bodies, user-selectable in Appearance. */
+  --font-chat: var(--font-body);
+}
+
+/* ── Theme: Studio (soft premium) ────────────────────────────────────────
+ * Structure only at this stage -- radii, depth, density, font roles. The
+ * Studio COLOUR palette is intentionally not set yet: its accent is still an
+ * open decision, and shipping a half-chosen palette would bake in a colour
+ * nobody signed off on. Until then this theme is not reachable from the UI
+ * (there is no switch yet), so the partial state cannot be seen by a user.
+ *
+ * Depth inverts here: glow is a dark-HUD idiom and reads as cheap on a warm
+ * light surface, so every glow token becomes a real, neutral elevation
+ * shadow instead.
+ */
+[data-theme='studio'] {
+  /* Warm neutral surfaces. Deliberately not pure #ffffff/#000000 -- the same
+     rule the cockpit palette follows, for the same reason: pure values read
+     as harsh and make the accent fight the background.
+
+     PROVISIONAL ACCENT: a muted terracotta. Signal cyan on a warm off-white
+     reads cheap and clinical, so it cannot simply carry over. This is a
+     considered placeholder pending sign-off, not a final decision -- it is a
+     single token, so changing it later is a one-line edit. */
+  --accent-rgb: 193, 92, 60;
+  --mint-rgb: 42, 122, 84;
+  --text-rgb: 44, 41, 37;
+
+  --bg: #faf9f7;
+  --bg2: #f4f2ee;
+  --bg-panel: #ffffff;
+  --line: rgba(44, 41, 37, 0.11);
+  --line-soft: rgba(44, 41, 37, 0.06);
+
+  --cyan: #c15c3c;
+  --cyan-dim: #a04a2e;
+  --amber: #b5730d;
+  --rose: #c0392b;
+  --mint: #2a7a54;
+
+  --text: #2c2925;
+  --text-dim: #6b635a;
+  --text-faint: #9a9086;
+
+  /* Team identity hues, darkened for legibility on a light surface. The
+     cockpit values are tuned to glow against near-black and would be far too
+     light to read here -- reusing them directly is the usual way a light
+     theme ends up looking washed out. */
+  --c-manager: #c15c3c;
+  --c-code: #c2410c;
+  --c-brain: #a16207;
+  --c-vision: #7c3aed;
+  --c-design: #be185d;
+  --c-router: #1d4ed8;
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius: 10px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --radius-full: 50%;
+
+  --glow-sm: 0 1px 2px rgba(16, 14, 12, 0.06);
+  --glow-md: 0 1px 3px rgba(16, 14, 12, 0.08), 0 4px 12px rgba(16, 14, 12, 0.05);
+  --glow-lg: 0 2px 4px rgba(16, 14, 12, 0.06), 0 8px 24px rgba(16, 14, 12, 0.07);
+  --glow-xl: 0 2px 4px rgba(16, 14, 12, 0.06), 0 12px 32px rgba(16, 14, 12, 0.08);
+  --glow-2xl: 0 4px 8px rgba(16, 14, 12, 0.07), 0 24px 56px rgba(16, 14, 12, 0.1);
+  --glow-soft: 0 1px 2px rgba(16, 14, 12, 0.05);
+  --glow-halo-sm: 0 0 0 1px rgba(16, 14, 12, 0.06);
+  --glow-halo-md: 0 0 0 2px rgba(16, 14, 12, 0.05);
+  --glow-halo-lg: 0 0 0 3px rgba(16, 14, 12, 0.04);
+  --glow-mint: 0 1px 3px rgba(20, 90, 55, 0.18);
+  --glow-mint-sm: 0 1px 2px rgba(20, 90, 55, 0.14);
+  --shadow-overlay: 0 12px 32px rgba(16, 14, 12, 0.18);
+
+  --space-unit: 6px;
+  --font-ui: var(--font-body);
+  --text-base: 16px;
+
+  /* Studio's editorial voice. DESIGN.md 3 bans serif outright, which is
+     correct FOR THE COCKPIT DASHBOARD -- that ban is hereby scoped to that
+     theme rather than the product, and serif is permitted here in DISPLAY
+     roles only. It must never reach body copy in either theme: Instrument
+     Serif is a display face and degrades badly at reading sizes. */
+  --font-display: 'Instrument Serif', Georgia, serif;
+}
+
+/* ── Appearance preferences ──────────────────────────────────────────────
+ * Driven by data-attributes on <html>, set by the pre-paint script in
+ * index.html and by settings.js. Kept as attribute selectors rather than
+ * class toggles so the pre-paint script can apply them without knowing
+ * anything about React.
+ */
+[data-density='compact'] {
+  --space-unit: 3px;
+}
+[data-text-size='s'] {
+  --text-base: 13px;
+}
+[data-text-size='l'] {
+  --text-base: 16px;
+}
+
+/* Reading typeface for message bodies. Georgia is deliberate for the serif
+   option: it is present on effectively every desktop and mobile OS, so it
+   costs no extra webfont request, and it was designed for screen reading --
+   unlike Instrument Serif, which is a display face and turns mushy at body
+   sizes. Display serif and reading serif are different jobs. */
+[data-chat-font='sans'] {
+  --font-chat: var(--font-body);
+}
+[data-chat-font='mono'] {
+  --font-chat: var(--font-mono);
+}
+[data-chat-font='serif'] {
+  --font-chat: Georgia, 'Times New Roman', serif;
+}
+
+/* Motion preferences. "off" kills transitions outright; "reduced" keeps them
+   but makes them near-instant, which preserves state changes that rely on
+   transitionend without the visible travel. Note 0.01ms rather than 0: a
+   true zero duration means the transitionend event never fires at all in
+   some engines, which can strand any logic waiting on it. */
+[data-motion='off'] *,
+[data-motion='off'] *::before,
+[data-motion='off'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+[data-motion='reduced'] * {
+  transition-duration: 0.08s !important;
 }
 
 * {

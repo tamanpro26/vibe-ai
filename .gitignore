@@ -46,3 +46,11 @@ vscode-extension/node_modules/
 *.egg-link
 build/
 render-env.txt
+.pio/
+
+# ESP32 WiFi credentials -- real values, never commit (public repo).
+# Template lives at hardware/esp32-firmware/src/wifi_secrets.example.h
+hardware/esp32-firmware/src/wifi_secrets.h
+
+# Local tool cache, not project source.
+.freebuff/

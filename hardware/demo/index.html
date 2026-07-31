@@ -112,14 +112,20 @@
       <span id="statusText">Waiting for sensor event...</span>
     </div>
 
-    <button id="subscribeBtn">🔔 Subscribe to fire alerts</button>
+    <button id="triggerHighBtn">🔥 Trigger HIGH TEMPERATURE (manual, sensor offline)</button>
+    <button id="triggerNormalBtn" style="border-color: rgba(125,255,176,0.4); color: var(--mint); margin-top: 8px;">✅ Reset to normal</button>
+
+    <button id="subscribeBtn" style="display:none; margin-top: 8px;">🔔 Retry notification permission</button>
 
     <div class="log" id="log"></div>
 
     <p class="note">
-      Subscribes this browser to Web Push from the local server (127.0.0.1:8000).
-      Trigger a real event by heating the sensor past the threshold, or simulate one:<br />
-      <code>curl -X POST http://localhost:8000/api/sensor -H "Content-Type: application/json" -d "{\"message\":\"HIGH TEMPERATURE DETECTED\",\"temperature\":57}"</code>
+      The physical DHT11 sensor is offline -- these two buttons queue a
+      manual trigger that the ESP32 itself picks up on its next poll (once
+      per second) and fires exactly like a real sensor edge would, running
+      the full AI pipeline (device-plan generation, buzzer, chasing LEDs)
+      unchanged. This replaces the serial 'h'/'n' keystroke, not any of the
+      AI/hardware logic downstream of it.
     </p>
   </div>
 
@@ -134,6 +140,23 @@
       line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`
       logEl.prepend(line)
     }
+
+    async function queueTrigger(event) {
+      try {
+        const res = await fetch('/api/sensor/manual-trigger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event }),
+        })
+        if (!res.ok) throw new Error(`trigger failed: ${res.status}`)
+        log(`Queued manual trigger: ${event}. ESP32 will pick this up on its next poll.`)
+      } catch (e) {
+        log('Error: ' + e.message)
+      }
+    }
+
+    document.getElementById('triggerHighBtn').addEventListener('click', () => queueTrigger('high'))
+    document.getElementById('triggerNormalBtn').addEventListener('click', () => queueTrigger('normal'))
 
     function urlBase64ToUint8Array(base64String) {
       const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
@@ -166,11 +189,19 @@
         body: JSON.stringify({ subscription: subscription.toJSON() }),
       })
       if (!res.ok) throw new Error(`subscribe failed: ${res.status}`)
-      btn.textContent = '✅ Subscribed'
-      btn.disabled = true
+      btn.style.display = 'none'
       log('Subscribed to fire alerts on this browser.')
     }
 
+    // Auto-subscribe on load -- no button click needed. The browser's own
+    // native permission prompt is the one unavoidable step (Apple/Google
+    // both require explicit per-device consent for push; no web page or app
+    // can bypass that). The button only reappears as a manual retry if this
+    // fails (e.g. permission denied, or the user dismissed the prompt).
+    subscribe().catch((e) => {
+      log('Error: ' + e.message)
+      btn.style.display = 'block'
+    })
     btn.addEventListener('click', () => subscribe().catch((e) => log('Error: ' + e.message)))
 
     // Page-visible confirmation in addition to the OS notification -- lets

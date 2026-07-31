@@ -11,6 +11,7 @@ export default function Sidebar({
   onDelete,
   open,
   onClose,
+  onOpenSettings,
 }) {
   const { user, logout } = useAuth()
   const [query, setQuery] = useState('')
@@ -107,6 +108,9 @@ export default function Sidebar({
             <span className="user-name">{user?.name}</span>
             <span className="user-email">{user?.email}</span>
           </div>
+          <button className="logout-btn" onClick={onOpenSettings} aria-label="Open settings">
+            Settings
+          </button>
           <button className="logout-btn" onClick={logout}>
             Log out
           </button>

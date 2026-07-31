@@ -16,6 +16,8 @@ import {
   DEFAULT_MODE,
 } from './engine.js'
 import Sidebar from './Sidebar.jsx'
+import SettingsModal from './SettingsModal.jsx'
+import { applyAppearance, composeSystemPrompt, loadSettings } from './settings.js'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
 
@@ -48,8 +50,31 @@ export default function ChatApp() {
   const [mode, setMode] = useState(DEFAULT_MODE)
   const [streaming, setStreaming] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [attachments, setAttachments] = useState([])
   const [dragging, setDragging] = useState(false)
+
+  // Composed personalization prompt. Held in a ref, not state, for the same
+  // reason engineRef exists below: dispatchReply is async and would otherwise
+  // capture a stale value from the render it started in, so a preference
+  // changed mid-conversation would not apply until some later re-render.
+  const systemPromptRef = useRef('')
+
+  const refreshSettings = () => {
+    if (!user?.id) return
+    const s = loadSettings(user.id)
+    applyAppearance(s)
+    systemPromptRef.current = composeSystemPrompt(s)
+  }
+
+  // Re-apply once the user is known. The pre-paint script in index.html
+  // already set the theme, but it runs before Clerk resolves who is signed
+  // in, so it can only guess at per-user preferences. This corrects them for
+  // the actual account -- and matters most when two people share a browser.
+  useEffect(() => {
+    refreshSettings()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id])
   const [live, setLive] = useState(false)
   // Named distinctly from `team` (the routing selector above) -- this is
   // whether the real Manager/Council is reachable via api/team.js, not
@@ -244,7 +269,7 @@ export default function ChatApp() {
     if (engines.manager) {
       try {
         const token = await getToken()
-        const reply = await respondTeam(text, convId, token)
+        const reply = await respondTeam(text, convId, token, systemPromptRef.current)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
@@ -257,7 +282,7 @@ export default function ChatApp() {
 
     if (engines.omni) {
       try {
-        const reply = await respondOmni(text, history, mode)
+        const reply = await respondOmni(text, history, mode, systemPromptRef.current)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
@@ -271,7 +296,7 @@ export default function ChatApp() {
     if (engines.edge) {
       try {
         const token = await getToken()
-        const reply = await respondEdge(text, history, token, mode)
+        const reply = await respondEdge(text, history, token, mode, systemPromptRef.current)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
@@ -472,6 +497,16 @@ export default function ChatApp() {
         onDelete={handleDelete}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => {
+          setSettingsOpen(false)
+          // Re-read on close so edited instructions apply to the very next
+          // message, rather than only after a reload.
+          refreshSettings()
+        }}
       />
       <main className="chat-main">
         <header className="chat-top">

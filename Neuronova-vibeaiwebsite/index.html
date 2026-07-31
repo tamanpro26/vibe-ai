@@ -12,9 +12,44 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap"
       rel="stylesheet"
     />
+    <!-- Theme applied before first paint. This has to be a blocking inline
+         script, not React state: the bundle loads and hydrates after the
+         browser has already painted, so setting the theme there would show
+         every Studio user a flash of the dark Cockpit palette on every page
+         load. Kept tiny and dependency-free so it costs no meaningful time,
+         and wrapped in try/catch because localStorage throws outright in
+         some privacy modes -- a storage failure must fall back to the
+         default theme, never abort the script and leave the page unthemed. -->
+    <script>
+      (function () {
+        var d = document.documentElement
+        try {
+          var t = localStorage.getItem('vibeai_theme')
+          d.dataset.theme = t === 'studio' ? 'studio' : 'cockpit'
+          // Appearance prefs live under the per-user settings key, which we
+          // cannot resolve this early (no user yet). Scanning for the first
+          // settings bucket is a pragmatic trade: on a shared browser the
+          // previous user's density could briefly apply, which is a cosmetic
+          // nit, whereas flashing the wrong layout on every load is not.
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i)
+            if (k && k.indexOf('vibeai_settings_') === 0) {
+              var s = JSON.parse(localStorage.getItem(k) || '{}')
+              if (s.density) d.dataset.density = s.density
+              if (s.textSize) d.dataset.textSize = s.textSize
+              if (s.motion) d.dataset.motion = s.motion
+              if (s.chatFont) d.dataset.chatFont = s.chatFont
+              break
+            }
+          }
+        } catch (e) {
+          d.dataset.theme = 'cockpit'
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

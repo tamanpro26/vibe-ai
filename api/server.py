@@ -2,7 +2,7 @@
 api/server.py  (v2 — video upload + full team wiring)
 FastAPI server with:
   POST /api/prompt        — text prompt
-  POST /api/sensor        — edge-triggered hardware alerts (school heat monitor)
+  POST /api/sensor        — edge-triggered hardware alerts + generated device plan
   GET  /api/push/vapid-public-key — Web Push public key
   POST /api/push/subscribe        — register a browser for fire alerts
   GET  /demo, /sw.js      — local-only fire-alert demo page (not deployed)
@@ -36,6 +36,7 @@ from config.settings import settings
 from core.bus import bus
 from core.state import state
 from core.push_notify import VAPID_PUBLIC_KEY, broadcast_alert, push_store
+from core.device_planner import plan_device_response
 from manager.claude_manager import manager
 
 UPLOAD_DIR = Path("./uploads")
@@ -195,6 +196,7 @@ class SensorRequest(BaseModel):
 class SensorResponse(BaseModel):
     received: str
     response: str
+    device_plan: dict[str, list[dict[str, int]]] = Field(default_factory=dict)
 
 
 @app.post("/api/sensor", response_model=SensorResponse, dependencies=[Depends(require_token)])
@@ -209,19 +211,84 @@ async def handle_sensor(req: SensorRequest) -> SensorResponse:
             context += f", device: {req.device_id}"
         context += ")"
     logger.info(f"[sensor] {context}")
-    response = await manager.handle_user_request(context)
 
-    # Fire-alert broadcast: matched on the firmware's own exact edge-trigger
-    # strings (hardware/controller.py sends exactly one of these two, never
-    # a variant), so this fires once per real crossing -- same guarantee the
-    # firmware's own state machine already gives the HTTP call itself.
-    if raw_message == "HIGH TEMPERATURE DETECTED":
-        temp_note = f" ({req.temperature:.1f}°C)" if req.temperature is not None else ""
-        await broadcast_alert("🔥 High temperature detected", f"Heat sensor tripped{temp_note}. Investigating.")
-    elif raw_message == "Temperature normalized":
-        await broadcast_alert("✅ All clear", "Temperature is back to normal.")
+    # The device plan is the ONLY thing the ESP32 waits on -- it cannot sound
+    # the alarm until this returns, so it is on the critical path and nothing
+    # else may block it.
+    device_plan = await plan_device_response(raw_message, req.temperature)
 
-    return SensorResponse(received=context, response=response)
+    # Everything below is operator-facing (log narrative + phone push) and the
+    # hardware never reads it, so it runs detached. Previously this was an
+    # asyncio.gather() with the Manager call, which meant the device sat
+    # waiting for a full multi-agent reasoning chain before it could make a
+    # sound: measured live at ~1s to build the plan but ~14s until the HTTP
+    # response actually came back. Detaching it takes the alarm's start-up
+    # latency from ~15s to ~1-2s without losing any of the reasoning.
+    async def _reasoning_and_alert() -> None:
+        try:
+            response = await manager.handle_user_request(context)
+            logger.info(f"[sensor] manager: {response[:200]}")
+            if raw_message == "HIGH TEMPERATURE DETECTED":
+                temp_note = f" ({req.temperature:.1f}°C)" if req.temperature is not None else ""
+                await broadcast_alert(
+                    "🔥 High temperature detected",
+                    f"Heat sensor tripped{temp_note}. Investigating.",
+                )
+            elif raw_message == "Temperature normalized":
+                await broadcast_alert("✅ All clear", "Temperature is back to normal.")
+        except Exception as exc:
+            # Must never surface as an unhandled task exception: the alarm has
+            # already fired successfully by this point, and a failure here is
+            # strictly a degraded log/notification, not a failed alert.
+            logger.warning(f"[sensor] background reasoning/alert failed: {exc}")
+
+    asyncio.create_task(_reasoning_and_alert())
+
+    return SensorResponse(
+        received=context,
+        response="device plan dispatched; reasoning and alerts continue in background",
+        device_plan=device_plan,
+    )
+
+
+# ── Manual trigger flag (web-button demo fallback) ────────────────────────────
+# The DHT11 sensor is confirmed dead (2026-07-30) -- this lets a web page
+# button substitute for it. Only the ESP32 itself can actually run the
+# buzzer/LED device plan (that code lives in its own firmware, driven by ITS
+# OWN HTTP call to /api/sensor), so a web button hitting the server directly
+# can't make the hardware react. Instead: the button sets this flag, the
+# ESP32 polls it once per loop tick (alongside its existing DHT poll) and,
+# when set, calls its own existing sendMessage() exactly like the serial
+# 'h'/'n' trigger already does -- this only replaces the fragile serial link
+# used to ask "please fire a test event now", not any of the working
+# AI/device-plan/hardware pipeline downstream of that.
+_pending_manual_trigger: str | None = None
+
+
+class ManualTriggerRequest(BaseModel):
+    event: str  # "high" or "normal"
+
+
+@app.post("/api/sensor/manual-trigger", dependencies=[Depends(require_token)])
+async def set_manual_trigger(req: ManualTriggerRequest) -> dict:
+    global _pending_manual_trigger
+    if req.event not in ("high", "normal"):
+        raise HTTPException(400, "event must be 'high' or 'normal'")
+    _pending_manual_trigger = req.event
+    return {"queued": req.event}
+
+
+@app.get("/api/sensor/manual-trigger")
+async def get_manual_trigger() -> dict:
+    """
+    Consumed exactly once per poll: returns the pending event (or null) and
+    clears it immediately, so the ESP32 fires it exactly once rather than
+    repeatedly on every subsequent poll while nothing new has happened.
+    """
+    global _pending_manual_trigger
+    event = _pending_manual_trigger
+    _pending_manual_trigger = None
+    return {"event": event}
 
 
 # ── REST: Web Push subscriptions (fire-alert broadcast) ───────────────────────

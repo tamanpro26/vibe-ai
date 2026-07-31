@@ -49,10 +49,35 @@ const WIKI_SUMMARY = 'https://en.wikipedia.org/api/rest_v1/page/summary/'
 const RESEARCH_LEAD = /\b(who|what|tell me|info|information|about|research|explain|overview|history|compare|list)\b/i
 const RESEARCH_HINT = /\b(compan(y|ies)|brand|organi[sz]ation|business|industry|corporation|founder|ceo|product|person|city|country|university|history of)\b/i
 
+/*
+ * Anything time-sensitive. These are the questions Wikipedia structurally
+ * cannot answer, so before real search existed they were pointless to route
+ * here -- now they are the single strongest reason TO route here.
+ */
+const RESEARCH_RECENCY =
+  /\b(latest|current|recent|today|yesterday|now|this (week|month|year)|202[4-9]|news|update[ds]?|price|stock|release[ds]?|announce[ds]?|who won|score|weather|status)\b/i
+
+/* Explicit asks to look something up -- unambiguous, no second signal needed. */
+const RESEARCH_EXPLICIT =
+  /\b(search|look ?up|google|find out|sources?|cite|citation|according to|on the (web|internet))\b/i
+
+/* Requests to WRITE something, which must not be hijacked into a research
+   lookup even though they often contain words like "explain" or "list". */
+const MAKE_REQUEST =
+  /\b(write|code|implement|refactor|debug|fix|build|create|generate|convert|translate|summari[sz]e this|rewrite)\b/i
+
 export function isResearchRequest(text) {
   const t = text || ''
   if (isImageRequest(t)) return false          // "draw a mango" is not research
   if (t.trim().length < 8) return false        // greetings are not research
+  if (MAKE_REQUEST.test(t)) return false       // "write a function" is a task, not a lookup
+
+  // Any one of these is sufficient. The original rule required an entity
+  // keyword (company/brand/city/...) AND a question lead, which meant the
+  // common cases -- "what's the latest on X", "search for Y" -- never
+  // triggered research at all and silently answered from model memory.
+  if (RESEARCH_EXPLICIT.test(t)) return true
+  if (RESEARCH_RECENCY.test(t)) return true
   return RESEARCH_HINT.test(t) && RESEARCH_LEAD.test(t)
 }
 
@@ -92,6 +117,39 @@ async function commonsImage(title) {
   }
 }
 
+/*
+ * Real web search via the server-side Exa proxy (api/research.js).
+ *
+ * Returns [] rather than throwing on ANY failure -- unconfigured (501), not
+ * signed in (401), network error -- because the caller treats an empty result
+ * as "fall back to Wikipedia". A throw here would take down research entirely
+ * on a deployment where the search key simply is not set, which is a worse
+ * outcome than the encyclopaedic-only answer we had before.
+ */
+export async function webSearchSources(query) {
+  try {
+    const res = await fetch('/api/research', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data?.sources || [])
+      .filter((s) => s.extract)
+      .map((s) => ({
+        title: s.title,
+        extract: s.extract,
+        thumb: s.image || null,
+        url: s.url,
+        site: s.site,
+        published: s.published || null,
+      }))
+  } catch {
+    return []
+  }
+}
+
 /** Search Wikipedia, then hydrate each hit with its extract + thumbnail. */
 export async function researchSources(query, limit = 4) {
   const params = new URLSearchParams({
@@ -122,7 +180,17 @@ export async function researchSources(query, limit = 4) {
 }
 
 export async function respondResearch(prompt, history = [], mode = DEFAULT_MODE) {
-  const sources = await researchSources(researchQuery(prompt))
+  // Real web search first, Wikipedia only as the fallback. Order matters:
+  // Exa can answer current/niche/non-encyclopaedic questions that Wikipedia
+  // structurally cannot, and those are exactly the ones that used to fall
+  // through to an ungrounded answer.
+  //
+  // Note the query sent to each differs on purpose. Wikipedia is a title
+  // index, so it needs the bare subject (researchQuery strips the ask). A
+  // real search engine does better with the FULL natural question, since the
+  // extra words carry intent -- stripping them there would throw away signal.
+  let sources = await webSearchSources(prompt)
+  if (!sources.length) sources = await researchSources(researchQuery(prompt))
   if (!sources.length) throw new Error('no sources found')
 
   const context = sources
@@ -281,7 +349,7 @@ export async function omniComplete(messages, { model = MODES[DEFAULT_MODE].omniM
   return { text: out.trim(), truncated: finishReason === 'length' }
 }
 
-export async function respondOmni(prompt, history = [], mode = DEFAULT_MODE) {
+export async function respondOmni(prompt, history = [], mode = DEFAULT_MODE, systemPrompt = '') {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
 
   // Research is attempted first, but never at the cost of an answer: if
@@ -296,7 +364,11 @@ export async function respondOmni(prompt, history = [], mode = DEFAULT_MODE) {
   }
 
   const cfg = modeConfig(mode)
-  const sys = cfg.hint ? `${OMNI_SYSTEM}\n\n${cfg.hint}` : OMNI_SYSTEM
+  let sys = cfg.hint ? `${OMNI_SYSTEM}\n\n${cfg.hint}` : OMNI_SYSTEM
+  // OmniRoute is a direct local call with no proxy in between, so the profile
+  // is folded into the system message here rather than being sent as its own
+  // field the way the /api/* tiers do it.
+  if (systemPrompt) sys = `${sys}\n\nAbout the user:\n${systemPrompt}`
   const { text, truncated } = await omniComplete(
     [
       { role: 'system', content: sys },
@@ -332,7 +404,7 @@ export async function checkEdge() {
   }
 }
 
-export async function respondEdge(prompt, history = [], token, mode = DEFAULT_MODE) {
+export async function respondEdge(prompt, history = [], token, mode = DEFAULT_MODE, systemPrompt = '') {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
   if (isResearchRequest(prompt)) {
     try {
@@ -358,6 +430,7 @@ export async function respondEdge(prompt, history = [], token, mode = DEFAULT_MO
     },
     body: JSON.stringify({
       mode,
+      systemPrompt,
       messages: [
         { role: 'system', content: sys },
         ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
@@ -460,7 +533,7 @@ export async function checkTeam() {
   }
 }
 
-export async function respondTeam(prompt, sessionId, token) {
+export async function respondTeam(prompt, sessionId, token, systemPrompt = '') {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
 
   const res = await fetch('/api/team', {
@@ -469,7 +542,7 @@ export async function respondTeam(prompt, sessionId, token) {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ prompt, session_id: sessionId }),
+    body: JSON.stringify({ prompt, session_id: sessionId, systemPrompt }),
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data?.error || `team proxy ${res.status}`)
