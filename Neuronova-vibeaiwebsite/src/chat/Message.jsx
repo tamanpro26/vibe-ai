@@ -394,7 +394,14 @@ function SourceCards({ sources }) {
   )
 }
 
-export default function Message({ msg, isStreaming, onRegenerate, canRegenerate, onContinue }) {
+export default function Message({
+  msg,
+  entryNo,
+  isStreaming,
+  onRegenerate,
+  canRegenerate,
+  onContinue,
+}) {
   const [copied, setCopied] = useState(false)
   const copyAll = async () => {
     await navigator.clipboard.writeText(msg.content)
@@ -405,11 +412,18 @@ export default function Message({ msg, isStreaming, onRegenerate, canRegenerate,
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-ai'}`}>
+      {/* The margin column of the record: every entry is numbered, the way a
+          bound notebook numbers each one. Assistant entries additionally carry
+          the drafting rule (drawn in CSS) marking work the system produced. */}
       <div className="msg-avatar" aria-hidden="true">
-        {isUser ? 'U' : 'V'}
+        {isUser && entryNo != null ? String(entryNo).padStart(3, '0') : ''}
       </div>
       <div className="msg-body">
-        <div className="msg-role">{isUser ? 'You' : 'VibeAI'}</div>
+        {/* Attribution slug. "Countersigned" is the product's honesty claim
+            made visible: a second pass checked this before it was entered. */}
+        <div className="msg-role">
+          {isUser ? 'You' : 'VibeAI · drafted by the team · countersigned'}
+        </div>
         {msg.attachments?.length > 0 && (
           <div className="msg-attachments">
             {msg.attachments.map((a, i) => (
@@ -431,14 +445,26 @@ export default function Message({ msg, isStreaming, onRegenerate, canRegenerate,
           {isStreaming && !msg.content && <Thinking />}
           {isStreaming && msg.content && <span className="msg-caret" aria-hidden="true" />}
         </div>
-        {/* A reply that hit its token ceiling used to just stop mid-sentence
-            with nothing telling the reader it was cut off -- the exact bug
-            this fixes. finish_reason "length" sets msg.truncated, and this
-            is the only thing that tells the reader the answer isn't done. */}
+        {/* Record vocabulary overleaf affordance for length-truncated responses */}
         {msg.truncated && !isStreaming && (
           <div className="msg-truncated">
-            <span>⚠ Response cut short by length limit.</span>
-            <button onClick={() => onContinue(msg.id)}>Continue →</button>
+            <span className="msg-truncated-stamp">ENTRY CONTINUES OVERLEAF</span>
+            <span className="msg-truncated-text">Response reached length limit.</span>
+            <button className="msg-continue-btn" onClick={() => onContinue(msg.id)}>
+              Continue entry →
+            </button>
+          </div>
+        )}
+        {/* Error copy names the problem and the recovery. The previous
+            "ATTESTATION FAILED / failed to countersign entry" was vocabulary
+            from a design direction that no longer exists, and told the user
+            nothing about what to do next. */}
+        {msg.isError && (
+          <div className="msg-error-block" role="alert">
+            <span className="msg-error-stamp">Couldn&apos;t respond.</span>
+            <span className="msg-error-text">
+              {msg.errorText || 'Every engine was unreachable. Try sending again.'}
+            </span>
           </div>
         )}
         {/* Mounted DURING streaming, unlike ZipCard: the render bay should be

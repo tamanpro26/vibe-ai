@@ -21,7 +21,7 @@ function NetworkCanvas() {
     const canvas = ref.current
     const ctx = canvas.getContext('2d')
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const CYAN = '#2be8ff'
+    const CYAN = '#e8573d'
     const AMBER = '#ffb020'
     const LINK = 140
 
@@ -96,7 +96,7 @@ function NetworkCanvas() {
           const dead = a.tripped > 0 || b.tripped > 0
           ctx.strokeStyle = dead
             ? `rgba(255, 176, 32, ${0.1 * fade})`
-            : `rgba(43, 232, 255, ${0.13 * fade})`
+            : `rgba(232, 87, 61, ${0.13 * fade})`
           ctx.lineWidth = 1
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
@@ -114,7 +114,7 @@ function NetworkCanvas() {
         const y = a.y + (b.y - a.y) * s.t
         // Short comet tail reading back toward the source.
         const tail = Math.max(0, s.t - 0.16)
-        ctx.strokeStyle = 'rgba(43, 232, 255, 0.5)'
+        ctx.strokeStyle = 'rgba(232, 87, 61, 0.5)'
         ctx.lineWidth = 1.4
         ctx.beginPath()
         ctx.moveTo(a.x + (b.x - a.x) * tail, a.y + (b.y - a.y) * tail)

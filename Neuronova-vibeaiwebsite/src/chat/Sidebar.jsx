@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import { groupChats } from './store.js'
 import { useAuth } from './auth.jsx'
 
@@ -17,6 +18,24 @@ export default function Sidebar({
   const [query, setQuery] = useState('')
   const [editingId, setEditingId] = useState(null)
   const [draft, setDraft] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  // Dismiss the account menu on any outside click or Escape. A menu that only
+  // closes via its own trigger is the usual bug here: click elsewhere and it
+  // stays open, floating over the app.
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = () => setMenuOpen(false)
+    const onKey = (e) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
   const filtered = query.trim()
     ? chats.filter((c) => c.title.toLowerCase().includes(query.toLowerCase()))
@@ -100,7 +119,11 @@ export default function Sidebar({
             </div>
           ))}
         </nav>
-        <div className="sidebar-user">
+        {/* One avatar row. Settings and Log out live behind the ⋯ menu:
+            previously both were full buttons competing with the avatar and
+            two text lines inside 264px, which truncated the name and email
+            to "TA…" over "ta…". */}
+        <div className="sidebar-user" onClick={() => setMenuOpen((v) => !v)}>
           <span className="user-avatar" aria-hidden="true">
             {(user?.name || 'U')[0].toUpperCase()}
           </span>
@@ -108,12 +131,51 @@ export default function Sidebar({
             <span className="user-name">{user?.name}</span>
             <span className="user-email">{user?.email}</span>
           </div>
-          <button className="logout-btn" onClick={onOpenSettings} aria-label="Open settings">
-            Settings
+          <button
+            className="user-menu-btn"
+            aria-label="Account menu"
+            aria-expanded={menuOpen}
+            onClick={(e) => {
+              e.stopPropagation()
+              setMenuOpen((v) => !v)
+            }}
+          >
+            ⋯
           </button>
-          <button className="logout-btn" onClick={logout}>
-            Log out
-          </button>
+
+          <AnimatePresence>
+            {menuOpen && (
+              <motion.div
+                className="user-menu"
+                role="menu"
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 4 }}
+                transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    onOpenSettings()
+                  }}
+                >
+                  Settings
+                </button>
+                <button
+                  role="menuitem"
+                  className="is-danger"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    logout()
+                  }}
+                >
+                  Log out
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </aside>
     </>

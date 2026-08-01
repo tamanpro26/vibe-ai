@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { motion, useReducedMotion } from 'motion/react'
 import { useAuth } from './auth.jsx'
 import { loadChats, saveChats, newConversation, newId, titleFrom } from './store.js'
 import {
@@ -20,6 +21,7 @@ import SettingsModal from './SettingsModal.jsx'
 import { applyAppearance, composeSystemPrompt, loadSettings } from './settings.js'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
+import ListboxSelect from './ListboxSelect.jsx'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -36,13 +38,42 @@ const MODES = [
 ]
 
 const SUGGESTIONS = [
-  { icon: '⌨', text: 'Build a Python CLI that renames files in bulk' },
-  { icon: '🔍', text: 'Research the best free-tier LLM providers right now' },
-  { icon: '✍', text: 'Write a LinkedIn post about a solo-built AI project' },
-  { icon: '🧠', text: 'Explain how a 5-stage reasoning council beats one model' },
+  /* SVG paths, not emoji. Emoji render differently per OS, cannot be coloured
+     or sized precisely, and always read as a placeholder nobody replaced.
+     Each card also carries a second descriptor line so it is a real object
+     rather than a label in a box. */
+  {
+    icon: 'M8 6 L4 12 L8 18 M16 6 L20 12 L16 18',
+    text: 'Build a Python CLI that renames files in bulk',
+    meta: 'Code team · returns a runnable zip',
+  },
+  {
+    icon: 'M11 4 a7 7 0 1 0 0 14 a7 7 0 1 0 0 -14 M16.5 16.5 L21 21',
+    text: 'Research the best free-tier LLM providers right now',
+    meta: 'Brain team · cites live sources',
+  },
+  {
+    icon: 'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10',
+    text: 'Write a LinkedIn post about a solo-built AI project',
+    meta: 'Brain team · drafts and revises',
+  },
+  {
+    icon: 'M12 4 a4 4 0 0 0 -4 4 a3 3 0 0 0 0 6 a4 4 0 0 0 8 0 a3 3 0 0 0 0 -6 a4 4 0 0 0 -4 -4 Z M12 4 L12 18',
+    text: 'Explain how a 5-stage reasoning council beats one model',
+    meta: 'Council · shows each stage',
+  },
 ]
 
+/* One shared entrance for everything that mounts: 8px rise, opacity resolving
+   with it. Defined once so the whole app moves with a single grammar rather
+   than each surface inventing its own. */
+const RISE = {
+  hidden: { opacity: 0, y: 8 },
+  shown: { opacity: 1, y: 0, transition: { duration: 0.36, ease: [0.22, 0.85, 0.28, 1] } },
+}
+
 export default function ChatApp() {
+  const reduceMotion = useReducedMotion()
   const { user, getToken } = useAuth()
   const [chats, setChats] = useState(() => loadChats(user.id))
   const [activeId, setActiveId] = useState(() => loadChats(user.id)[0]?.id ?? null)
@@ -519,18 +550,13 @@ export default function ChatApp() {
           </button>
           <span className="chat-title">{active?.title || 'New chat'}</span>
           <div className="chat-top-right">
-            <select
+            <ListboxSelect
               className="team-select"
+              options={TEAMS}
               value={team}
               aria-label="Route to team"
-              onChange={(e) => setTeam(e.target.value)}
-            >
-              {TEAMS.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
+              onChange={setTeam}
+            />
             <div className="mode-switch" role="radiogroup" aria-label="Reasoning mode">
               {MODES.map((mo) => (
                 <button
@@ -561,34 +587,64 @@ export default function ChatApp() {
         </header>
         <div className="chat-scroll" ref={scrollRef}>
           {!active || active.messages.length === 0 ? (
-            <div className="empty-state">
-              <svg className="empty-mark" viewBox="0 0 64 64" aria-hidden="true">
-                <g stroke="currentColor" strokeWidth="3" fill="none">
-                  <path d="M32 8 L53 20 L53 44 L32 56 L11 44 L11 20 Z" />
-                  <path d="M32 8 L32 32 M53 20 L32 32 M53 44 L32 32 M32 56 L32 32 M11 44 L32 32 M11 20 L32 32" opacity="0.4" />
-                </g>
-                <circle cx="32" cy="32" r="5" fill="currentColor" />
-              </svg>
-              <h1>How can VibeAI help?</h1>
-              <p>
+            /* Staggered mount: the headline settles first, then each card
+               60ms behind the last. A single simultaneous fade reads as a
+               page loading; a stagger reads as an interface arriving.
+               `reduceMotion` collapses every offset to zero rather than
+               disabling the animation, so the content still appears. */
+            <motion.div
+              className="empty-state"
+              initial="hidden"
+              animate="shown"
+              variants={{
+                hidden: {},
+                shown: { transition: { staggerChildren: reduceMotion ? 0 : 0.06 } },
+              }}
+            >
+              <motion.h1 variants={RISE}>How can VibeAI help?</motion.h1>
+              <motion.p variants={RISE}>
                 Any task routes to a specialist team — search, research, writing, reasoning.
                 Coding tasks come back as a runnable project with a downloadable zip.
-              </p>
+              </motion.p>
               <div className="suggestions">
                 {SUGGESTIONS.map((s) => (
-                  <button className="suggestion" key={s.text} onClick={() => handleSend(s.text)}>
-                    <span aria-hidden="true">{s.icon}</span>
-                    {s.text}
-                  </button>
+                  <motion.button
+                    className="suggestion"
+                    key={s.text}
+                    variants={RISE}
+                    whileHover={reduceMotion ? undefined : { y: -2 }}
+                    whileTap={reduceMotion ? undefined : { y: 0 }}
+                    transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
+                    onClick={() => handleSend(s.text)}
+                  >
+                    <svg className="suggestion-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d={s.icon}
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="suggestion-body">
+                      <span className="suggestion-text">{s.text}</span>
+                      <span className="suggestion-meta">{s.meta}</span>
+                    </span>
+                  </motion.button>
                 ))}
               </div>
-            </div>
+            </motion.div>
           ) : (
             <div className="msg-list">
               {active.messages.map((m, i) => (
                 <Message
                   key={m.id}
                   msg={m}
+                  /* Entry number in the record. 1-based and sequential across
+                     the whole conversation, so the margin column reads as a
+                     continuous numbered document. */
+                  entryNo={i + 1}
                   isStreaming={streaming && i === active.messages.length - 1 && m.role === 'assistant'}
                   canRegenerate={i === active.messages.length - 1}
                   onRegenerate={handleRegenerate}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useAuth } from './auth.jsx'
 import {
   CHAT_FONTS,
@@ -32,6 +33,7 @@ function Field({ label, hint, children }) {
 
 export default function SettingsModal({ open, onClose }) {
   const { user } = useAuth()
+  const reduceMotion = useReducedMotion()
   const [panel, setPanel] = useState('profile')
   const [settings, setSettings] = useState(() => loadSettings(user?.id))
   const dialogRef = useRef(null)
@@ -67,19 +69,37 @@ export default function SettingsModal({ open, onClose }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  if (!open) return null
-
+  /* AnimatePresence rather than `if (!open) return null`: without it the
+     dialog is torn out of the DOM on the same frame it closes, so an exit
+     animation can never play. This was the specific complaint — the panel
+     simply appeared and simply vanished. */
   return (
-    <div className="set-scrim" onClick={onClose}>
-      <div
-        className="set-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Settings"
-        tabIndex={-1}
-        ref={dialogRef}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="set-scrim"
+          onClick={onClose}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
+        >
+          <motion.div
+            className="set-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
+            tabIndex={-1}
+            ref={dialogRef}
+            onClick={(e) => e.stopPropagation()}
+            /* Scales up from just under full size while rising a few pixels.
+               Small numbers on purpose: a big scale reads as a cartoon zoom,
+               and this needs to feel like a panel arriving, not a popup. */
+            initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
+            animate={reduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.98, y: 4 }}
+            transition={{ duration: 0.2, ease: [0.22, 0.85, 0.28, 1] }}
+          >
         <nav className="set-nav" aria-label="Settings sections">
           <p className="set-nav-title">Settings</p>
           {PANELS.map((p) => (
@@ -106,7 +126,7 @@ export default function SettingsModal({ open, onClose }) {
                 <input
                   className="set-input"
                   maxLength={LIMITS.name}
-                  value={settings.displayName}
+                  value={settings?.displayName || ''}
                   onChange={(e) => update({ displayName: e.target.value })}
                   placeholder={user?.name || ''}
                 />
@@ -115,7 +135,7 @@ export default function SettingsModal({ open, onClose }) {
                 <input
                   className="set-input"
                   maxLength={LIMITS.name}
-                  value={settings.callMe}
+                  value={settings?.callMe || ''}
                   onChange={(e) => update({ callMe: e.target.value })}
                 />
               </Field>
@@ -123,7 +143,7 @@ export default function SettingsModal({ open, onClose }) {
                 <input
                   className="set-input"
                   maxLength={LIMITS.role}
-                  value={settings.role}
+                  value={settings?.role || ''}
                   onChange={(e) => update({ role: e.target.value })}
                   placeholder="Engineering, research, student…"
                 />
@@ -146,11 +166,11 @@ export default function SettingsModal({ open, onClose }) {
                   className="set-textarea"
                   rows={5}
                   maxLength={LIMITS.about}
-                  value={settings.about}
+                  value={settings?.about || ''}
                   onChange={(e) => update({ about: e.target.value })}
                 />
                 <span className="set-count">
-                  {settings.about.length}/{LIMITS.about}
+                  {(settings?.about || '').length}/{LIMITS.about}
                 </span>
               </Field>
               <Field label="How should VibeAI respond?">
@@ -158,11 +178,11 @@ export default function SettingsModal({ open, onClose }) {
                   className="set-textarea"
                   rows={5}
                   maxLength={LIMITS.style}
-                  value={settings.style}
+                  value={settings?.style || ''}
                   onChange={(e) => update({ style: e.target.value })}
                 />
                 <span className="set-count">
-                  {settings.style.length}/{LIMITS.style}
+                  {(settings?.style || '').length}/{LIMITS.style}
                 </span>
               </Field>
             </section>
@@ -248,8 +268,10 @@ export default function SettingsModal({ open, onClose }) {
               </Field>
             </section>
           )}
-        </div>
-      </div>
-    </div>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   )
 }

@@ -282,19 +282,38 @@ class CodeTeam(BaseTeam):
             return output
 
         error = _syntax_error(code)
-        if error is None and (">>>" in code or "assert " in code):
+
+        # GROUND TRUTH. compile() above only raises on SyntaxError -- NameError,
+        # ImportError, undefined symbols and bad attribute access all sail past
+        # it, and those are precisely what weak models get wrong. Nothing else
+        # in this pipeline can catch them: every other check is a model scoring
+        # another model's text, so the strongest reasoner in the pool is the
+        # ceiling. Actually importing the module supplies information no model
+        # here possessed.
+        #
+        # This used to run ONLY when the model happened to emit doctests or an
+        # assert, which is a minority of generated code -- so in the common
+        # case nothing was ever executed.
+        if error is None:
             from tools.code_executor import executor
-            harness = code
+
+            # Reassigning __name__ makes this an IMPORT test rather than a run
+            # of the program: `if __name__ == "__main__":` will not fire. That
+            # matters because a script expecting argv/stdin, or one with a
+            # long-running main, would otherwise "fail" verification and burn a
+            # repair pass fixing a bug that does not exist. Top-level asserts
+            # still execute, so self-checking code is still checked.
+            harness = '__name__ = "_vibeai_smoke"\n' + code
             if ">>>" in code:
+                # Called explicitly: the main guard above is deliberately dead.
                 harness += (
-                    "\n\nif __name__ == '__main__':\n"
-                    "    import doctest, sys\n"
-                    "    r = doctest.testmod()\n"
-                    "    sys.exit(1 if r.failed else 0)\n"
+                    "\n\nimport doctest as _dt, sys as _sys\n"
+                    "_r = _dt.testmod(_sys.modules['__main__'])\n"
+                    "_sys.exit(1 if _r.failed else 0)\n"
                 )
             result = await executor.run(harness)
             if not result.success:
-                error = (result.stderr or "self-tests failed").strip()[:1500]
+                error = (result.stderr or "execution failed").strip()[:1500]
 
         if error is None:
             return output

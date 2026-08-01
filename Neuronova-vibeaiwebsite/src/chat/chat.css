@@ -1,4 +1,7 @@
-/* ── chat shell ─────────────────────────────────────── */
+/* ═══ VibeAI chat shell ══════════════════════════════════════════════════
+ * Depth comes from stacked surfaces (canvas → surface → raised → overlay),
+ * shadow second, border last. Border-first depth reads as a wireframe.
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 .chat-app {
   position: relative;
@@ -6,18 +9,20 @@
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg-canvas);
 }
 
-/* ── sidebar ────────────────────────────────────────── */
-
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
-  width: 280px;
+  width: var(--sidebar-w);
   flex-shrink: 0;
-  border-right: 1px solid var(--line);
-  background: var(--bg2);
+  background: var(--bg-surface);
+  /* One hairline in the single neutral border family. The previous seam used
+     a green rule colour that no longer exists in the system. */
+  border-right: 1px solid var(--border-subtle);
+  z-index: 1;
 }
 
 .sidebar-top {
@@ -39,27 +44,36 @@
   color: var(--text);
 }
 
+/* Accent diet: this was an accent-outlined button, which is the Bootstrap-era
+   tell. It is a secondary action, so it reads as a normal raised control and
+   leaves the accent for the send button. */
 .newchat-btn {
-  font-family: var(--font-mono);
-  font-size: var(--fs-3);
-  letter-spacing: 1px;
-  color: var(--cyan);
-  background: rgba(var(--accent-rgb), 0.06);
-  border: 1px solid rgba(var(--accent-rgb), 0.35);
-  border-radius: var(--radius);
-  padding: 10px 12px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+  color: var(--text-primary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-3);
   cursor: pointer;
   text-align: left;
-  transition: background 0.2s, box-shadow 0.2s;
 }
 
 .newchat-btn:hover {
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: var(--glow-soft);
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--e-2);
+}
+
+.newchat-btn:active {
+  transform: translateY(0);
 }
 
 .sidebar-search {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text);
   background: var(--bg-panel);
@@ -84,14 +98,14 @@
 }
 
 .sidebar-empty {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text-faint);
   padding: 8px;
 }
 
 .chat-group-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-1);
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -170,27 +184,39 @@
   outline: none;
 }
 
+/* The footer was truncating to "TA…" over "ta…" because the avatar, both
+   text lines, and two full buttons were all competing for 264px. The buttons
+   move into a menu behind the ⋯ trigger, which gives the text room. */
 .sidebar-user {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px;
-  border-top: 1px solid var(--line);
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  margin: var(--sp-2);
+  border-radius: var(--r-md);
+  border-top: none;
+  cursor: pointer;
+}
+
+.sidebar-user:hover {
+  background: var(--bg-raised);
 }
 
 .user-avatar {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-full);
-  background: rgba(var(--accent-rgb), 0.12);
-  border: 1px solid rgba(var(--accent-rgb), 0.4);
-  color: var(--cyan);
-  font-family: var(--font-display);
-  font-weight: 700;
+  border-radius: var(--r-full);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-semi);
 }
 
 .user-meta {
@@ -201,59 +227,107 @@
 }
 
 .user-name {
-  font-size: var(--fs-3);
-  font-weight: 600;
-  color: var(--text);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 .user-email {
-  font-family: var(--font-mono);
-  font-size: var(--fs-2);
-  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.logout-btn {
-  font-family: var(--font-mono);
-  font-size: var(--fs-2);
-  color: var(--text-faint);
+/* The ⋯ trigger. A quiet icon button, not two competing outlined buttons. */
+.user-menu-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-label);
+  color: var(--text-tertiary);
   background: none;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 5px 9px;
+  border: none;
+  border-radius: var(--r-sm);
   cursor: pointer;
 }
 
-.logout-btn:hover {
-  color: var(--rose);
-  border-color: rgba(255, 63, 127, 0.4);
+.sidebar-user:hover .user-menu-btn,
+.user-menu-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-overlay);
+}
+
+.user-menu {
+  position: absolute;
+  bottom: calc(100% + var(--sp-2));
+  left: var(--sp-2);
+  right: var(--sp-2);
+  padding: var(--sp-1);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-3);
+  z-index: 20;
+}
+
+.user-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.user-menu button:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.user-menu button.is-danger:hover {
+  color: var(--danger);
 }
 
 .sidebar-scrim {
   display: none;
 }
 
-/* ── main column ────────────────────────────────────── */
+/* ── the page: the lit working surface ──────────────── */
 
 .chat-main {
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  background-color: var(--bg-canvas);
+  overflow: hidden;
 }
 
+/* Head of the page. Transparent so the sheet reads continuously beneath it;
+   separated by a rule rather than a filled bar. */
 .chat-top {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 12px 20px;
+  height: 56px;
+  padding: 0 calc(var(--space-unit) * 6);
   border-bottom: 1px solid var(--line);
-  background: rgba(5, 7, 10, 0.85);
+  background: transparent;
 }
 
 .hamburger {
@@ -265,6 +339,8 @@
   font-size: var(--fs-5);
   padding: 4px 9px;
   cursor: pointer;
+  height: 32px;
+  box-sizing: border-box;
 }
 
 .chat-title {
@@ -273,35 +349,136 @@
   font-family: var(--font-display);
   font-weight: 600;
   font-size: var(--fs-5);
+  line-height: 32px;
+  height: 32px;
   color: var(--text);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
 }
 
 .chat-top-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  height: 32px;
 }
 
-.team-select {
-  font-family: var(--font-mono);
+/* ── custom listbox dropdown ───────────────────────────── */
+.custom-listbox {
+  position: relative;
+  display: inline-block;
+}
+
+.listbox-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text);
   background: var(--bg-panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 6px 10px;
   cursor: pointer;
   outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  min-width: 140px;
 }
 
-/* Segmented control, not a <select> like team-select: only 3 fixed options
-   that the reader should be able to scan and switch between in one glance
-   and one click, not open a dropdown for. */
-.mode-switch {
+.listbox-trigger:hover,
+.listbox-trigger[aria-expanded="true"] {
+  border-color: var(--cyan-dim);
+  background: var(--bg-raised);
+}
+
+.listbox-trigger:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+.listbox-value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.listbox-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 0.18s ease;
+}
+
+.listbox-chevron.is-open {
+  transform: rotate(180deg);
+  color: var(--cyan);
+}
+
+.listbox-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 170px;
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--e-3);
+  z-index: 100;
+  padding: 4px 0;
+  margin: 0;
+  list-style: none;
+  outline: none;
+  animation: settle 0.15s var(--ease-out) both;
+}
+
+.listbox-option {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-3);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.listbox-option.is-focused,
+.listbox-option:hover {
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--text);
+}
+
+.listbox-option.is-selected {
+  color: var(--cyan);
+  font-weight: 500;
+}
+
+.listbox-check {
+  font-size: var(--fs-2);
+  color: var(--cyan);
+  margin-left: 8px;
+}
+
+/* Legacy fallback support */
+.team-select {
+  composes: custom-listbox;
+}
+
+/* Segmented control: 32px outer height */
+.mode-switch {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  box-sizing: border-box;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 2px;
@@ -310,14 +487,19 @@
 }
 
 .mode-btn {
-  font-family: var(--font-mono);
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   letter-spacing: 0.5px;
   color: var(--text-faint);
   background: none;
   border: none;
   border-radius: var(--radius-xs);
-  padding: 4px 9px;
+  padding: 0 9px;
   cursor: pointer;
   transition: color 0.18s ease, background 0.18s ease;
 }
@@ -331,21 +513,44 @@
   background: rgba(var(--accent-rgb), 0.1);
 }
 
+/* Status badge chip: 32px outer height */
 .engine-badge {
-  font-family: var(--font-mono);
-  font-size: var(--fs-1);
-  letter-spacing: 2px;
-  color: var(--amber);
-  border: 1px dashed rgba(255, 176, 32, 0.45);
-  border-radius: var(--radius-xs);
-  padding: 5px 9px;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  box-sizing: border-box;
+  gap: var(--sp-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
   white-space: nowrap;
 }
 
+.engine-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Live on the real agent team. The dot carries the state; no outline, no
+   fill, no shouting. */
 .engine-badge.is-live {
-  color: var(--mint);
-  border: 1px solid rgba(var(--mint-rgb), 0.45);
-  box-shadow: var(--glow-mint-sm);
+  color: var(--text-primary);
+}
+
+.engine-badge.is-live::before {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(79, 175, 124, 0.16);
 }
 
 .chat-scroll {
@@ -356,114 +561,178 @@
 
 /* ── empty state ────────────────────────────────────── */
 
+/* Left-aligned on the same spine as the messages and composer. Centred text
+   in left-aligned cards never reads premium, and four different content
+   widths on one screen leaves the eye with nothing to follow. */
 .empty-state {
-  max-width: 640px;
+  max-width: var(--col-content);
   margin: 0 auto;
-  padding-top: 8vh;
-  text-align: center;
+  padding-top: 10vh;
+  text-align: left;
 }
 
+/* The outlined accent glyph is gone: the headline carries this on its own,
+   and it was one more object wearing the accent. */
 .empty-mark {
-  width: 54px;
-  height: 54px;
-  color: var(--cyan);
-  filter: drop-shadow(0 0 12px rgba(var(--accent-rgb), 0.5));
-  margin-bottom: 20px;
+  display: none;
 }
 
 .empty-state h1 {
-  font-family: var(--font-display);
-  font-size: var(--fs-9);
-  font-weight: 700;
-  /* Negative tracking at display size -- see the optical tracking scale in
-     index.css. Typefaces are spaced for body copy, so the same face set
-     large reads loose unless it is tightened. */
-  letter-spacing: var(--track-display);
-  margin-bottom: 10px;
-}
-
-/* Studio's display face is an editorial serif, which carries its weight in
-   the letterforms rather than in stroke width -- forcing 700 on it produces
-   a clotted, artificially bolded look. It also sets optically larger than a
-   grotesque at the same px, so it wants slightly tighter tracking. */
-[data-theme='studio'] .empty-state h1 {
-  font-weight: 400;
+  font-family: var(--font-sans);
+  font-size: var(--fs-hero);
+  /* 600, not 700. At display sizes 700 reads chunky; premium display type is
+     500-600 with tighter tracking and more size. */
+  font-weight: var(--fw-semi);
   letter-spacing: var(--track-hero);
+  line-height: var(--lh-tight);
+  margin-bottom: var(--sp-3);
 }
 
 .empty-state > p {
-  color: var(--text-dim);
-  margin-bottom: 34px;
+  color: var(--text-secondary);
+  font-size: var(--fs-lg);
+  line-height: var(--lh-body);
+  max-width: 60ch;
+  margin-bottom: var(--sp-10);
 }
 
 .suggestions {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--sp-3);
   text-align: left;
 }
 
 .suggestion {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  font-family: var(--font-body);
-  font-size: var(--fs-4);
-  line-height: 1.45;
-  color: var(--text-dim);
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: 14px 16px;
+  gap: var(--sp-3);
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  line-height: var(--lh-snug);
+  text-align: left;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
   cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s, color 0.2s;
 }
 
+/* Three simultaneous cues on hover — lift, surface, border — which is what
+   makes a card feel like a physical object rather than a rectangle that
+   changes colour. The lift itself is driven by Framer Motion. */
 .suggestion:hover {
-  border-color: rgba(var(--accent-rgb), 0.4);
-  box-shadow: var(--glow-md);
-  color: var(--text);
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+  box-shadow: var(--e-2);
+  color: var(--text-primary);
 }
 
-/* ── messages ───────────────────────────────────────── */
+.suggestion-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--text-tertiary);
+}
+
+.suggestion:hover .suggestion-icon {
+  color: var(--accent);
+}
+
+.suggestion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.suggestion-text {
+  color: var(--text-primary);
+  font-weight: var(--fw-medium);
+}
+
+.suggestion-meta {
+  color: var(--text-tertiary);
+  font-size: var(--fs-caption);
+}
+
+/* ── entries ────────────────────────────────────────────────────────────
+ * Not chat bubbles. Each turn is an ENTRY in the record: struck off by a
+ * rule, carrying an attribution slug, and hanging from a marginal column the
+ * way a bound notebook's entry numbers do.
+ */
 
 .msg-list {
-  max-width: 760px;
+  max-width: var(--col-content);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 0;
 }
 
 .msg {
+  position: relative;
   display: flex;
-  gap: 14px;
+  gap: calc(var(--space-unit) * 4);
+  padding: calc(var(--space-unit) * 6) 0;
+  /* Entries are divided by the page's own rule, not by cards. Consecutive
+     entries share one line, which is what makes the record read as a
+     continuous document rather than a stack of containers. */
+  border-bottom: 1px solid var(--line-soft);
+  /* Paper coming to rest. Opacity resolves before travel finishes so text is
+     readable while it is still settling. */
+  animation: settle var(--dur-slow) var(--ease-out) both;
 }
 
+.msg:last-child {
+  border-bottom: none;
+}
+
+/* The margin column: where the record keeps its numbering and its hand. */
 .msg-avatar {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 22px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: var(--fs-4);
+  justify-content: flex-start;
+  border-radius: 0;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: var(--fs-1);
+  letter-spacing: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
 }
 
 .msg-user .msg-avatar {
-  background: rgba(var(--text-rgb), 0.08);
-  border: 1px solid var(--line);
-  color: var(--text-dim);
+  background: none;
+  border: none;
+  color: var(--text-faint);
 }
 
+/* The drafting hand. A short rule in the margin, in the accent, marking an
+   entry the system produced — the ink of the record rather than a badge. */
 .msg-ai .msg-avatar {
-  background: rgba(var(--accent-rgb), 0.1);
-  border: 1px solid rgba(var(--accent-rgb), 0.4);
+  background: none;
+  border: none;
+  box-shadow: none;
   color: var(--cyan);
-  box-shadow: var(--glow-sm);
+  position: relative;
+}
+
+.msg-ai .msg-avatar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 18px;
+  height: 2px;
+  background: var(--cyan);
+  transform: translateY(-50%);
 }
 
 .msg-body {
@@ -471,13 +740,15 @@
   min-width: 0;
 }
 
+/* Attribution slug: who made this entry. Ledger mono, because it is
+   metadata about the record — mono doing its actual job. */
 .msg-role {
-  font-family: var(--font-mono);
-  font-size: var(--fs-2);
-  letter-spacing: 2px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-1);
+  letter-spacing: var(--track-label);
   text-transform: uppercase;
   color: var(--text-faint);
-  margin-bottom: 6px;
+  margin-bottom: calc(var(--space-unit) * 2);
 }
 
 .msg-content {
@@ -513,7 +784,7 @@
 }
 
 .msg-sysline {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text-faint);
   margin-bottom: 4px !important;
@@ -525,14 +796,16 @@
   font-size: var(--fs-5);
 }
 
+/* The nib working. A ruled stroke advancing on the line, breathing rather
+   than blinking in hard steps — a pen does not switch on and off. */
 .msg-caret {
   display: inline-block;
-  width: 8px;
-  height: 16px;
+  width: 11px;
+  height: 2px;
   background: var(--cyan);
-  vertical-align: text-bottom;
-  margin-left: 2px;
-  animation: pulse 0.9s steps(2) infinite;
+  vertical-align: baseline;
+  margin-left: 3px;
+  animation: nib 1.1s var(--ease-out) infinite;
 }
 
 .msg-codeblock {
@@ -590,7 +863,7 @@
   background: none;
   border: none;
   cursor: pointer;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   letter-spacing: 1px;
   color: var(--text-faint);
@@ -600,39 +873,89 @@
   color: var(--cyan);
 }
 
-/* Cut-off reply banner: amber, distinct from the quiet copy/regenerate row
-   below it -- this is a state of the answer itself (incomplete), not an
-   optional action on a complete one, so it reads as a warning, not a link. */
+/* Record overleaf affordance for length-truncated responses */
 .msg-truncated {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 10px;
-  padding: 8px 12px;
+  margin-top: 12px;
+  padding: 8px 14px;
   border: 1px solid rgba(255, 176, 32, 0.35);
-  border-radius: var(--radius);
-  background: rgba(255, 176, 32, 0.06);
-  font-family: var(--font-mono);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 176, 32, 0.05);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--amber);
 }
 
-.msg-truncated button {
+.msg-truncated-stamp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-1);
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  color: var(--amber);
+  background: rgba(255, 176, 32, 0.12);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  flex-shrink: 0;
+}
+
+.msg-truncated-text {
+  color: var(--text-dim);
+  font-size: var(--fs-2);
+}
+
+.msg-continue-btn {
   margin-left: auto;
   flex-shrink: 0;
-  background: none;
+  background: rgba(255, 176, 32, 0.1);
   border: 1px solid rgba(255, 176, 32, 0.45);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   padding: 4px 10px;
   color: var(--amber);
   font-family: var(--font-mono);
   font-size: var(--fs-2);
   cursor: pointer;
-  transition: background 0.18s ease;
+  transition: background 0.18s ease, border-color 0.18s ease;
 }
 
-.msg-truncated button:hover {
-  background: rgba(255, 176, 32, 0.12);
+.msg-continue-btn:hover {
+  background: rgba(255, 176, 32, 0.2);
+  border-color: var(--amber);
+}
+
+/* Error state. Was hardcoded rgba(255,79,104) — a rose that no longer exists
+   in the system — with a mono all-caps stamp. Now a quiet raised block using
+   the danger token, with a status dot rather than a shouty label. */
+.msg-error-block {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-default);
+  border-left: 2px solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  line-height: var(--lh-snug);
+}
+
+.msg-error-stamp {
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0;
+  color: var(--danger);
+  background: none;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.msg-error-text {
+  color: var(--text-secondary);
+  font-size: var(--fs-label);
 }
 
 /* zip card */
@@ -663,7 +986,7 @@
 
 .zip-name {
   display: block;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-4);
   font-weight: 600;
   color: var(--mint);
@@ -678,7 +1001,7 @@
 
 .zip-btn {
   flex-shrink: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   font-weight: 600;
   color: #04140b;
@@ -701,14 +1024,17 @@
 
 /* ── composer ───────────────────────────────────────── */
 
+/* The foot of the page. Transparent so the sheet continues underneath —
+   a filled bar here would read as a separate toolbar bolted on. */
 .composer-wrap {
-  padding: 12px 20px 16px;
+  padding: calc(var(--space-unit) * 3) calc(var(--space-unit) * 6)
+    calc(var(--space-unit) * 4);
   border-top: 1px solid var(--line);
-  background: rgba(5, 7, 10, 0.9);
+  background: transparent;
 }
 
 .composer-attachments {
-  max-width: 760px;
+  max-width: var(--col-content);
   margin: 0 auto 10px;
   display: flex;
   flex-wrap: wrap;
@@ -719,7 +1045,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   color: var(--text-dim);
   background: var(--bg-panel);
@@ -745,45 +1071,57 @@
   color: var(--rose);
 }
 
+/* The composer is the primary object on this screen, so it must be the most
+   physically present thing on it. Previously a hairline with 7px of padding,
+   which is why it disappeared. Now: raised surface, real height, real
+   internal air, layered elevation. */
 .composer {
-  max-width: 760px;
+  position: relative;
+  max-width: var(--col-content);
   margin: 0 auto;
   display: flex;
   align-items: flex-end;
-  gap: 10px;
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xl);
-  padding: 10px 12px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  gap: var(--sp-2);
+  min-height: 56px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-xl);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+  box-shadow: var(--e-3);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .composer:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.45);
-  box-shadow: var(--glow-xl);
+  border-color: var(--border-strong);
+  box-shadow: var(--e-4);
 }
 
 .composer-plus {
   position: relative;
 }
 
+/* Accent diet: a secondary affordance inside the composer, so it carries no
+   accent at all. It sat in an accent-tinted outline competing with the send
+   button directly beside it. */
 .plus-btn {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--fs-7);
-  color: var(--cyan);
-  background: rgba(var(--accent-rgb), 0.07);
-  border: 1px solid rgba(var(--accent-rgb), 0.3);
-  border-radius: var(--radius-lg);
+  font-size: var(--fs-title);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-full);
   cursor: pointer;
-  transition: background 0.2s;
 }
 
 .plus-btn:hover {
-  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--text-primary);
+  background: var(--bg-raised);
 }
 
 .plus-menu {
@@ -823,55 +1161,64 @@
   background: none;
   border: none;
   outline: none;
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: var(--fs-4);
-  line-height: 1.5;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-snug);
   max-height: 200px;
-  padding: 7px 0;
+  /* Real air, not 7px. */
+  padding: var(--sp-2) 0;
 }
 
 .composer textarea::placeholder {
   color: var(--text-faint);
 }
 
+/* One of the two places filled accent is allowed on this screen. Circular and
+   solid: the primary action should be the single most obvious target here. */
 .send-btn {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--fs-5);
-  font-weight: 700;
-  color: #02141a;
-  background: var(--cyan);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semi);
+  color: var(--on-accent);
+  background: var(--accent);
   border: none;
-  border-radius: var(--radius-lg);
+  border-radius: var(--r-full);
   cursor: pointer;
-  transition: box-shadow 0.2s, opacity 0.2s;
 }
 
 .send-btn:hover:not(:disabled) {
-  box-shadow: var(--glow-halo-sm);
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: scale(0.96);
+  background: var(--accent-active);
 }
 
 .send-btn:disabled {
-  opacity: 0.35;
+  background: var(--bg-raised);
+  color: var(--text-disabled);
   cursor: default;
 }
 
 .send-btn.stop {
-  background: var(--rose);
-  color: #1a0410;
-  font-size: var(--fs-3);
+  background: var(--danger);
+  color: var(--on-accent);
+  font-size: var(--fs-caption);
 }
 
 .composer-hint {
-  max-width: 760px;
+  max-width: var(--col-content);
   margin: 8px auto 0;
   text-align: center;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   color: var(--text-faint);
 }
@@ -916,7 +1263,7 @@
 }
 
 .auth-back {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   letter-spacing: 1px;
   color: var(--text-faint);
@@ -966,7 +1313,7 @@
 }
 
 .auth-tabs button {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   letter-spacing: 1px;
   color: var(--text-faint);
@@ -1098,7 +1445,7 @@
 }
 
 .cta-secondary {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   letter-spacing: 1px;
   color: var(--cyan);
@@ -1393,7 +1740,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
 }
 
@@ -1435,7 +1782,7 @@
   align-items: baseline;
   gap: 10px;
   margin-bottom: 10px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-1);
   letter-spacing: 2px;
 }
@@ -1532,7 +1879,7 @@
 
 .src-site {
   margin-top: 2px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-1);
   letter-spacing: 1px;
   color: var(--text-faint);
@@ -1603,7 +1950,7 @@
 }
 
 .think-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text-dim);
   /* Keyed on the stage text, so React remounts the node and replays this on
@@ -1645,7 +1992,7 @@
 }
 
 .pv-title {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   letter-spacing: 1px;
   color: var(--cyan);
@@ -1662,7 +2009,7 @@
 .pv-tabs::-webkit-scrollbar { display: none; }
 
 .pv-tab {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   color: var(--text-faint);
   background: transparent;
@@ -1726,6 +2073,14 @@
  * inherits both themes automatically instead of needing a second stylesheet
  * when Studio lands.
  */
+/* ── front matter ───────────────────────────────────────────────────────
+ * Settings is not a modal that appears. It is the record's front matter,
+ * turned to from the spine: the desk behind recedes and dims, and the plate
+ * swings in on the bound edge.
+ *
+ * This is the specific defect that made the interface read as cheap — the
+ * old dialog simply existed on the next frame, with no motion at all.
+ */
 .set-scrim {
   position: fixed;
   inset: 0;
@@ -1734,31 +2089,53 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(2, 5, 8, 0.72);
-  backdrop-filter: blur(3px);
+  background: rgba(4, 6, 8, 0.62);
+  /* The desk pulls out of focus as attention moves to the front matter. */
+  backdrop-filter: blur(6px) saturate(0.7);
 }
+
+/* Turned to from the spine: the hinge is the LEFT edge, so the plate rotates
+   in on Y around it rather than scaling from its own centre like a generic
+   dialog. Perspective is what makes it read as a page turning rather than a
+   box growing. */
+@keyframes turn-to {
+  from {
+    opacity: 0;
+    transform: perspective(1600px) rotateY(-7deg) translateX(-26px);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(1600px) rotateY(0deg) translateX(0);
+  }
+}
+
 .set-dialog {
   display: grid;
-  grid-template-columns: 200px 1fr;
-  width: min(880px, 100%);
-  height: min(600px, 90vh);
+  grid-template-columns: 210px 1fr;
+  width: min(900px, 100%);
+  height: min(620px, 90vh);
   background: var(--bg2);
+  background-image: var(--rule-grid);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-overlay);
   overflow: hidden;
+  transform-origin: left center;
 }
 .set-dialog:focus {
   outline: none;
 }
+
+/* The index tabs, on the bound edge. */
 .set-nav {
+  position: relative;
   border-right: 1px solid var(--line);
-  padding: 20px 12px;
+  padding: calc(var(--space-unit) * 5) calc(var(--space-unit) * 3);
   background: var(--bg);
   overflow-y: auto;
 }
 .set-nav-title {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-1);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
@@ -1771,7 +2148,7 @@
   text-align: left;
   padding: 9px 10px;
   margin-bottom: 2px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-3);
   color: var(--text-dim);
   background: transparent;
@@ -1785,10 +2162,27 @@
   background: rgba(var(--accent-rgb), 0.06);
   color: var(--text);
 }
+/* An index tab: the active section reads as the tab currently turned to,
+   marked in the margin rather than filled like a button. */
 .set-nav-item.is-active {
-  background: rgba(var(--accent-rgb), 0.09);
+  background: var(--bg2);
   border-color: var(--line);
-  color: var(--cyan);
+  border-right-color: var(--bg2);
+  color: var(--text);
+  position: relative;
+  margin-right: -13px;
+  padding-right: 23px;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.set-nav-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--cyan);
 }
 .set-pane {
   position: relative;
@@ -1834,7 +2228,7 @@
 }
 .set-field-label {
   display: block;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1938,7 +2332,7 @@
 }
 .set-seg-btn {
   padding: 8px 16px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--fs-2);
   text-transform: capitalize;
   color: var(--text-dim);

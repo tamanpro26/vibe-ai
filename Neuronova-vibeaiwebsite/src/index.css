@@ -1,256 +1,307 @@
-:root {
-  --bg: #05070a;
-  --bg2: #070c12;
-  --bg-panel: #0a1119;
-  --line: rgba(43, 232, 255, 0.12);
-  --line-soft: rgba(217, 246, 251, 0.07);
+/* ═══════════════════════════════════════════════════════════════════════════
+ * VibeAI design tokens.
+ *
+ * Rewritten against a design audit of the running app (2026-07-31). The audit
+ * measured computed values rather than reading source, which surfaced things
+ * that were invisible from the code: 48 of 67 elements at 0 border-radius,
+ * 56 of 67 at transition-duration 0s, mono on 17 elements of UI chrome, and a
+ * mint-green neutral line colour on a blue-black surface with a red accent.
+ *
+ * The bar is explicitly Claude / ChatGPT / Perplexity / Raycast, executed
+ * straight. Three rules carry most of it:
+ *
+ *   RESTRAINT   one accent used twice, one sans, one content column, one
+ *               neutral family.
+ *   PHYSICALITY soft edges, stacked layers, response within 140ms of touch.
+ *   AIR         the composer gets real internal padding and real room above.
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
-  --cyan: #2be8ff;
-  --cyan-dim: #17747f;
-  --amber: #ffb020;
-  --rose: #ff3f7f;
-  --mint: #7dffb0;
-
-  --text: #d9f6fb;
-  --text-dim: #8fb3ba;
-  --text-faint: #5d7f88;
-
-  --c-manager: #2be8ff;
-  --c-code: #ff7a45;
-  --c-brain: #ffdd57;
-  --c-vision: #b98bff;
-  --c-design: #ff3f8f;
-  --c-router: #4d9dff;
-
-  /* Chakra Petch, deliberately. Its squared terminals ARE the HUD identity,
-     and it stays off the Inter/Geist/Space-Grotesk axis that most AI product
-     sites have converged on -- picking a face because it is "proven in this
-     category" is the mechanism that produces that convergence. */
-  --font-display: 'Chakra Petch', sans-serif;
-  --font-mono: 'IBM Plex Mono', monospace;
-  --font-body: 'IBM Plex Sans', sans-serif;
-
-  /* ── Optical tracking scale ────────────────────────────────────────────
-   * Typefaces are spaced for body copy (~16px). Scale the same face to
-   * display sizes and those built-in gaps scale with it, so large text
-   * reads loose and unset. Professional typesetting compensates with
-   * NEGATIVE tracking as size increases -- the bigger the type, the
-   * tighter it wants to be. These are in em so they track the font size.
+:root,
+[data-theme='cockpit'] {
+  /* ── Surface: four layers, not two ──────────────────────────────────────
+   * Depth comes from stacked surfaces first, shadow second, border last.
+   * Border-first depth is what makes an interface read as a wireframe.
    */
-  --track-hero: -0.035em;   /* 64-160px  */
-  --track-display: -0.02em; /* 30-46px   */
-  --track-heading: -0.01em; /* 20-30px   */
-  --track-body: 0;          /* 15-18px, leave as designed */
-  --track-label: 0.16em;    /* small mono caps NEED positive tracking */
+  --bg-canvas: #0a0a0d;
+  --bg-surface: #111116;
+  --bg-raised: #17171e;
+  --bg-overlay: #1e1e27;
+  --bg-inset: #08080b;
 
-  /* ── Motion system ─────────────────────────────────────────────────────
-   * Durations and curves were previously ad hoc (0.2/0.3/0.4/0.5/0.7s,
-   * mostly default `ease`). Consistency is most of what separates
-   * considered motion from incidental motion, so everything routes
-   * through these.
+  /* ── Border: ONE neutral family ─────────────────────────────────────────
+   * Previously mint green (rgba(122,176,154,...)) drawn across a blue-black
+   * surface with a red-orange accent — three unrelated hues in a system that
+   * needs one. White-alpha inherits the surface beneath it instead.
    */
-  --dur-fast: 0.18s;    /* colour/opacity swaps, hover tint          */
-  --dur-base: 0.28s;    /* the default: borders, shadows, transforms */
-  --dur-slow: 0.6s;     /* entrances, larger travel                  */
+  --border-subtle: rgba(255, 255, 255, 0.055);
+  --border-default: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.15);
 
-  /* Decisive start, long settle. Reads as physical deceleration rather
-     than the symmetric in-out that makes UI feel sluggish at both ends.
-     One curve, used everywhere: consistency is most of what separates
-     considered motion from incidental motion. */
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --text-primary: #ececf1;
+  --text-secondary: #9e9eac;
+  --text-tertiary: #6b6b7a;
+  --text-disabled: #46464f;
 
-  /* ── Structural tokens (theme layer, P0) ───────────────────────────────
-   * These live in :root rather than only in [data-theme="cockpit"] on
-   * purpose: they are the DEFAULT. If the data-theme attribute is ever
-   * missing -- an unstyled first paint, a stale cached index.html, a route
-   * that renders outside the themed shell -- the UI still gets the correct
-   * cockpit values instead of collapsing to browser defaults (0 radius, no
-   * shadow). [data-theme="studio"] below overrides them.
+  /* ── Accent, named honestly ─────────────────────────────────────────────
+   * The old name was --cyan holding #e0563f. A variable named cyan holding a
+   * red-orange makes every future reader — human or model — reason wrongly
+   * about the system.
    *
-   * Values here are EXACTLY the ones previously hardcoded in chat.css, so
-   * introducing them is a no-op refactor. Rationalising the radius scale
-   * (3/4/5/6px is finer than any layout needs) is deliberately deferred to
-   * the Cockpit-refinement phase, where visual change is intended.
+   * RULE: filled accent appears at most twice per screen, and never as an
+   * outline. One saturated colour ringing seven unrelated objects collapses
+   * hierarchy; that is what reads as generated.
    */
-  /* Raw channels, not colours. Tints throughout the UI need the accent at
-     many different alphas (0.06 hover wash, 0.12 active, 0.35 glow...). A
-     normal --accent hex cannot be given an alpha inside rgba(), so those 39
-     tints were previously hardcoded and would have silently stayed cyan on
-     a warm Studio surface. Exposing the channels lets one token drive every
-     alpha. */
-  --accent-rgb: 43, 232, 255;
-  --mint-rgb: 125, 255, 176;
-  --text-rgb: 217, 246, 251;
+  --accent: #e8573d;
+  --accent-hover: #f2694f;
+  --accent-active: #d14a31;
+  --accent-subtle: rgba(232, 87, 61, 0.1);
+  --accent-border: rgba(232, 87, 61, 0.28);
+  --accent-glow: rgba(232, 87, 61, 0.22);
+  --on-accent: #fff6f3;
 
-  --radius-xs: 3px;
-  --radius-sm: 4px;
-  --radius: 5px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 10px;
-  --radius-2xl: 12px;
-  --radius-full: 50%;
+  /* Agent identity — functional status (which specialist answered), muted to
+     sit with the accent rather than compete with it. */
+  --agent-manager: #e8573d;
+  --agent-code: #d9924f;
+  --agent-brain: #c4a94a;
+  --agent-vision: #9689c4;
+  --agent-design: #c47399;
+  --agent-router: #6493c4;
 
-  /* Depth in this theme is GLOW, not elevation -- negative spread keeps it
-     a tight inset-feeling halo rather than a broad bloom (DESIGN.md 4). */
-  --glow-sm: 0 0 12px -4px var(--cyan);
-  --glow-md: 0 0 16px -6px var(--cyan);
-  --glow-lg: 0 0 18px -2px var(--cyan);
-  --glow-xl: 0 0 20px -8px var(--cyan);
-  --glow-2xl: 0 0 40px -10px var(--cyan);
-  --glow-soft: 0 0 14px rgba(43, 232, 255, 0.2);
-  --glow-halo-sm: 0 0 16px rgba(43, 232, 255, 0.5);
-  --glow-halo-md: 0 0 22px rgba(43, 232, 255, 0.4);
-  --glow-halo-lg: 0 0 26px rgba(43, 232, 255, 0.5);
-  --glow-mint: 0 0 18px rgba(125, 255, 176, 0.45);
-  --glow-mint-sm: 0 0 12px -4px var(--mint);
-  --ring-focus: 0 0 0 3px rgba(43, 232, 255, 0.1);
-  --shadow-overlay: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --success: #4faf7c;
+  --warning: #d9a03c;
+  --danger: #d9556a;
 
-  /* Spacing + font-role tokens are DEFINED here but not yet applied to
-     components; wiring them up is the next phase. Defining them now is what
-     lets the Studio block below exist as a complete, reviewable unit. */
-  --space-unit: 4px;
-  --font-ui: var(--font-mono);
-  --text-base: 14px;
-
-  /* ── Modular type scale ────────────────────────────────────────────────
-   * chat.css previously carried 18 distinct font sizes across 73
-   * declarations, including half-pixel steps (9.5/10.5/11.5/12.5/13.5/14.5).
-   * Half-pixel values are the signature of sizes nudged by eye rather than
-   * chosen from a system, and that inconsistency -- not the typeface -- is
-   * most of what makes an interface read as unconsidered.
-   *
-   * One ratio (1.125, a major second) rebuilds all of it as 9 steps. The
-   * ratio is deliberately tight: a dense tool needs many usable sizes close
-   * together, where an editorial layout would want 1.25+.
-   *
-   * Every step derives from --text-base, so the Appearance text-size control
-   * rescales the ENTIRE interface proportionally instead of only resizing
-   * message bodies and leaving the chrome behind.
+  /* ── Type: one sans; mono only for code, counters, latency ──────────────
+   * Public Sans leads rather than Inter: Inter is the single most saturated
+   * face in this category, and the project's own design rules ban it. The
+   * audit's actual requirement — ONE sans, mono out of the chrome — is met
+   * either way, and Public Sans is already loaded so this costs nothing.
    */
-  --fs-1: calc(var(--text-base) * 0.702); /* micro labels   ~10px */
-  --fs-2: calc(var(--text-base) * 0.79); /*                ~11px */
-  --fs-3: calc(var(--text-base) * 0.889); /*                ~12.5px */
-  --fs-4: var(--text-base); /* body floor     14px  */
-  --fs-5: calc(var(--text-base) * 1.125); /*                ~15.75px */
-  --fs-6: calc(var(--text-base) * 1.266); /*                ~17.7px */
-  --fs-7: calc(var(--text-base) * 1.424); /*                ~20px */
-  --fs-8: calc(var(--text-base) * 1.602); /*                ~22.4px */
-  --fs-9: calc(var(--text-base) * 2.027); /* display        ~28.4px */
+  --font-sans: 'Public Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Martian Mono', ui-monospace, monospace;
 
-  /* Reading typeface for message bodies, user-selectable in Appearance. */
-  --font-chat: var(--font-body);
+  /* Fixed steps. The previous scale derived every size from --text-base via
+     calc(), which produced fractional computed values (9.828, 11.06, 12.446,
+     13.33, 19.936, 28.378) — fluid type is for marketing heroes, not app
+     chrome, where it just blurs the hierarchy. */
+  --fs-micro: 11px;
+  --fs-caption: 12px;
+  --fs-label: 13px;
+  --fs-body: 15px;
+  --fs-lg: 17px;
+  --fs-title: 20px;
+  --fs-h2: 26px;
+  --fs-hero: 38px;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.35;
+  --lh-body: 1.6;
+
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semi: 600; /* stop at 600 — 700 reads chunky at display sizes */
+
+  --track-hero: -0.022em;
+  --track-title: -0.014em;
+  --track-body: 0;
+  --track-caps: 0.08em;
+
+  /* ── Radius: the highest-leverage change ────────────────────────────────
+   * Sharp corners + near-black + a saturated accent is the visual signature
+   * of a terminal template. Every premium AI surface uses generous radii.
+   */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-2xl: 28px;
+  --r-full: 999px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+  --sp-20: 80px;
+
+  /* Layered elevation. A single shadow reads flat; two stacked reads like a
+     real object catching light. */
+  --e-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --e-2: 0 2px 4px rgba(0, 0, 0, 0.28), 0 6px 16px -4px rgba(0, 0, 0, 0.4);
+  --e-3: 0 4px 8px rgba(0, 0, 0, 0.3), 0 16px 40px -8px rgba(0, 0, 0, 0.55);
+  --e-4: 0 8px 16px rgba(0, 0, 0, 0.34), 0 32px 72px -12px rgba(0, 0, 0, 0.62);
+  --e-focus: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--accent-border);
+
+  /* ── Motion ─────────────────────────────────────────────────────────────
+   * These existed before and were almost never referenced: 56 of 67 elements
+   * measured at transition-duration 0s. Perceived quality in a chat UI is
+   * mostly motion, so tokens that never fire are worse than none — they hide
+   * the omission.
+   */
+  --dur-instant: 80ms;
+  --dur-fast: 140ms;
+  --dur-base: 200ms;
+  --dur-slow: 360ms;
+  --ease-out: cubic-bezier(0.22, 0.85, 0.28, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  /* No spring/overshoot curve here on purpose. One was specced, but nothing
+     ended up using it once the stamp animation it existed for was replaced,
+     and an overshoot reads dated next to the exponential deceleration
+     everything else uses. Reintroduce it only with a specific element that
+     genuinely needs to overshoot. */
+
+  /* One spine: hero, cards, messages, and composer all share this. */
+  --col-content: 720px;
+  --sidebar-w: 264px;
+  --header-h: 56px;
+
+  /* ── Compatibility aliases ──────────────────────────────────────────────
+   * chat.css and the landing route still reference the previous names. These
+   * map old to new so the rename lands in one place instead of as a 1700-line
+   * risky sweep. New code uses the honest names above.
+   */
+  --bg: var(--bg-canvas);
+  --bg2: var(--bg-surface);
+  --bg-panel: var(--bg-raised);
+  --line: var(--border-default);
+  --line-soft: var(--border-subtle);
+  --cyan: var(--accent);
+  --cyan-dim: var(--accent-active);
+  --amber: var(--warning);
+  --rose: var(--danger);
+  --mint: var(--success);
+  --text: var(--text-primary);
+  --text-dim: var(--text-secondary);
+  --text-faint: var(--text-tertiary);
+  --c-manager: var(--agent-manager);
+  --c-code: var(--agent-code);
+  --c-brain: var(--agent-brain);
+  --c-vision: var(--agent-vision);
+  --c-design: var(--agent-design);
+  --c-router: var(--agent-router);
+  --accent-rgb: 232, 87, 61;
+  --mint-rgb: 79, 175, 124;
+  --text-rgb: 236, 236, 241;
+
+  --font-display: var(--font-sans);
+  --font-body: var(--font-sans);
+  --font-chat: var(--font-sans);
+  --font-ui: var(--font-sans);
+
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius: var(--r-md);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --radius-2xl: var(--r-2xl);
+  --radius-full: var(--r-full);
+
+  --glow-sm: var(--e-1);
+  --glow-md: var(--e-2);
+  --glow-lg: var(--e-2);
+  --glow-xl: var(--e-3);
+  --glow-2xl: var(--e-4);
+  --glow-soft: var(--e-1);
+  --glow-halo-sm: var(--e-2);
+  --glow-halo-md: var(--e-2);
+  --glow-halo-lg: var(--e-3);
+  --glow-mint: var(--e-1);
+  --glow-mint-sm: var(--e-1);
+  --ring-focus: var(--e-focus);
+  --shadow-overlay: var(--e-4);
+
+  --fs-1: var(--fs-micro);
+  --fs-2: var(--fs-caption);
+  --fs-3: var(--fs-label);
+  --fs-4: var(--fs-body);
+  --fs-5: var(--fs-lg);
+  --fs-6: var(--fs-lg);
+  --fs-7: var(--fs-title);
+  --fs-8: var(--fs-h2);
+  --fs-9: var(--fs-hero);
+  --text-base: var(--fs-body);
+  --space-unit: var(--sp-1);
+  --track-label: var(--track-caps);
+  --track-display: var(--track-title);
+  --track-heading: var(--track-title);
+  --ease-impress: var(--ease-out);
+  --rule-grid: none;
 }
 
-/* ── Theme: Studio (soft premium) ────────────────────────────────────────
- * Structure only at this stage -- radii, depth, density, font roles. The
- * Studio COLOUR palette is intentionally not set yet: its accent is still an
- * open decision, and shipping a half-chosen palette would bake in a colour
- * nobody signed off on. Until then this theme is not reachable from the UI
- * (there is no switch yet), so the partial state cannot be seen by a user.
- *
- * Depth inverts here: glow is a dark-HUD idiom and reads as cheap on a warm
- * light surface, so every glow token becomes a real, neutral elevation
- * shadow instead.
+/* ── Daylight ───────────────────────────────────────────────────────────
+ * The same system under window light. Surfaces invert to a stacked light
+ * ramp; borders stay one neutral family (black-alpha here); the accent and
+ * every rule above are unchanged.
  */
 [data-theme='studio'] {
-  /* Warm neutral surfaces. Deliberately not pure #ffffff/#000000 -- the same
-     rule the cockpit palette follows, for the same reason: pure values read
-     as harsh and make the accent fight the background.
+  --bg-canvas: #f6f6f7;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --bg-inset: #f0f0f2;
 
-     PROVISIONAL ACCENT: a muted terracotta. Signal cyan on a warm off-white
-     reads cheap and clinical, so it cannot simply carry over. This is a
-     considered placeholder pending sign-off, not a final decision -- it is a
-     single token, so changing it later is a one-line edit. */
-  --accent-rgb: 193, 92, 60;
-  --mint-rgb: 42, 122, 84;
-  --text-rgb: 44, 41, 37;
+  --border-subtle: rgba(16, 16, 22, 0.06);
+  --border-default: rgba(16, 16, 22, 0.1);
+  --border-strong: rgba(16, 16, 22, 0.16);
 
-  --bg: #faf9f7;
-  --bg2: #f4f2ee;
-  --bg-panel: #ffffff;
-  --line: rgba(44, 41, 37, 0.11);
-  --line-soft: rgba(44, 41, 37, 0.06);
+  --text-primary: #1a1a1f;
+  --text-secondary: #5c5c68;
+  --text-tertiary: #8a8a96;
+  --text-disabled: #b4b4bd;
 
-  --cyan: #c15c3c;
-  --cyan-dim: #a04a2e;
-  --amber: #b5730d;
-  --rose: #c0392b;
-  --mint: #2a7a54;
+  --accent: #d1452b;
+  --accent-hover: #b93a23;
+  --accent-active: #a33220;
+  --accent-subtle: rgba(209, 69, 43, 0.08);
+  --accent-border: rgba(209, 69, 43, 0.26);
+  --accent-glow: rgba(209, 69, 43, 0.18);
 
-  --text: #2c2925;
-  --text-dim: #6b635a;
-  --text-faint: #9a9086;
+  --agent-manager: #d1452b;
+  --agent-code: #b45309;
+  --agent-brain: #8a6410;
+  --agent-vision: #6d4bb8;
+  --agent-design: #a83a6d;
+  --agent-router: #2a5fa8;
 
-  /* Team identity hues, darkened for legibility on a light surface. The
-     cockpit values are tuned to glow against near-black and would be far too
-     light to read here -- reusing them directly is the usual way a light
-     theme ends up looking washed out. */
-  --c-manager: #c15c3c;
-  --c-code: #c2410c;
-  --c-brain: #a16207;
-  --c-vision: #7c3aed;
-  --c-design: #be185d;
-  --c-router: #1d4ed8;
+  --success: #2f7d55;
+  --warning: #8a6410;
+  --danger: #b03349;
 
-  --radius-xs: 6px;
-  --radius-sm: 8px;
-  --radius: 10px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --radius-full: 50%;
+  --e-1: 0 1px 2px rgba(16, 16, 22, 0.06);
+  --e-2: 0 1px 2px rgba(16, 16, 22, 0.06), 0 4px 12px -2px rgba(16, 16, 22, 0.08);
+  --e-3: 0 2px 4px rgba(16, 16, 22, 0.07), 0 12px 32px -6px rgba(16, 16, 22, 0.12);
+  --e-4: 0 4px 8px rgba(16, 16, 22, 0.08), 0 24px 56px -10px rgba(16, 16, 22, 0.16);
 
-  --glow-sm: 0 1px 2px rgba(16, 14, 12, 0.06);
-  --glow-md: 0 1px 3px rgba(16, 14, 12, 0.08), 0 4px 12px rgba(16, 14, 12, 0.05);
-  --glow-lg: 0 2px 4px rgba(16, 14, 12, 0.06), 0 8px 24px rgba(16, 14, 12, 0.07);
-  --glow-xl: 0 2px 4px rgba(16, 14, 12, 0.06), 0 12px 32px rgba(16, 14, 12, 0.08);
-  --glow-2xl: 0 4px 8px rgba(16, 14, 12, 0.07), 0 24px 56px rgba(16, 14, 12, 0.1);
-  --glow-soft: 0 1px 2px rgba(16, 14, 12, 0.05);
-  --glow-halo-sm: 0 0 0 1px rgba(16, 14, 12, 0.06);
-  --glow-halo-md: 0 0 0 2px rgba(16, 14, 12, 0.05);
-  --glow-halo-lg: 0 0 0 3px rgba(16, 14, 12, 0.04);
-  --glow-mint: 0 1px 3px rgba(20, 90, 55, 0.18);
-  --glow-mint-sm: 0 1px 2px rgba(20, 90, 55, 0.14);
-  --shadow-overlay: 0 12px 32px rgba(16, 14, 12, 0.18);
-
-  --space-unit: 6px;
-  --font-ui: var(--font-body);
-  --text-base: 16px;
-
-  /* Studio's editorial voice. DESIGN.md 3 bans serif outright, which is
-     correct FOR THE COCKPIT DASHBOARD -- that ban is hereby scoped to that
-     theme rather than the product, and serif is permitted here in DISPLAY
-     roles only. It must never reach body copy in either theme: Instrument
-     Serif is a display face and degrades badly at reading sizes. */
-  --font-display: 'Instrument Serif', Georgia, serif;
+  --accent-rgb: 209, 69, 43;
+  --mint-rgb: 47, 125, 85;
+  --text-rgb: 26, 26, 31;
 }
 
-/* ── Appearance preferences ──────────────────────────────────────────────
- * Driven by data-attributes on <html>, set by the pre-paint script in
- * index.html and by settings.js. Kept as attribute selectors rather than
- * class toggles so the pre-paint script can apply them without knowing
- * anything about React.
- */
+/* ── Appearance preferences ──────────────────────────────────────────── */
 [data-density='compact'] {
-  --space-unit: 3px;
+  --sp-4: 12px;
+  --sp-5: 16px;
+  --sp-6: 20px;
 }
 [data-text-size='s'] {
-  --text-base: 13px;
+  --fs-body: 14px;
+  --fs-label: 12px;
 }
 [data-text-size='l'] {
-  --text-base: 16px;
+  --fs-body: 16px;
+  --fs-label: 14px;
 }
 
-/* Reading typeface for message bodies. Georgia is deliberate for the serif
-   option: it is present on effectively every desktop and mobile OS, so it
-   costs no extra webfont request, and it was designed for screen reading --
-   unlike Instrument Serif, which is a display face and turns mushy at body
-   sizes. Display serif and reading serif are different jobs. */
 [data-chat-font='sans'] {
-  --font-chat: var(--font-body);
+  --font-chat: var(--font-sans);
 }
 [data-chat-font='mono'] {
   --font-chat: var(--font-mono);
@@ -259,11 +310,6 @@
   --font-chat: Georgia, 'Times New Roman', serif;
 }
 
-/* Motion preferences. "off" kills transitions outright; "reduced" keeps them
-   but makes them near-instant, which preserves state changes that rely on
-   transitionend without the visible travel. Note 0.01ms rather than 0: a
-   true zero duration means the transitionend event never fires at all in
-   some engines, which can strand any logic waiting on it. */
 [data-motion='off'] *,
 [data-motion='off'] *::before,
 [data-motion='off'] *::after {
@@ -272,7 +318,62 @@
   transition-duration: 0.01ms !important;
 }
 [data-motion='reduced'] * {
-  transition-duration: 0.08s !important;
+  transition-duration: 80ms !important;
+}
+
+/* ── Global interaction motion ──────────────────────────────────────────
+ * The audit's core finding was that motion tokens existed but never fired.
+ * This is the floor: everything that can be touched responds within 140ms.
+ * Individual components still override with their own choreography, but
+ * nothing is static by default any more.
+ *
+ * Scoped to interactive elements rather than `*` so it never animates
+ * layout-heavy nodes, and limited to compositor-friendly properties.
+ */
+button,
+a,
+input,
+textarea,
+select,
+[role='button'],
+[role='option'],
+[tabindex]:not([tabindex='-1']) {
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+/* One focus treatment everywhere. Never `outline: none` without a
+   replacement — that is both an accessibility defect and a polish tell. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--e-focus);
+  border-radius: var(--r-sm);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes nib {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 * {
@@ -281,11 +382,6 @@
   box-sizing: border-box;
 }
 
-/* No `scroll-behavior: smooth` here. Lenis (see src/useLenis.js) drives
-   inertial scrolling on the landing route and the two fight each other:
-   the native smooth-jump and Lenis's rAF loop both try to own scrollTop,
-   which stutters anchor navigation. Lenis is skipped under reduced-motion,
-   and the rule below restores native smooth behavior for that case. */
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: smooth;
@@ -293,64 +389,62 @@
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-body);
-  font-size: 16px;
-  line-height: 1.65;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
 }
 
 ::selection {
-  background: rgba(43, 232, 255, 0.25);
-  color: #eafcff;
+  background: var(--accent-glow);
+  color: var(--text-primary);
 }
 
 ::-webkit-scrollbar {
   width: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #14222c;
-  border-radius: 5px;
+  background: var(--border-strong);
+  border-radius: var(--r-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #1d3340;
+  background: var(--text-tertiary);
+  background-clip: content-box;
 }
 
 a {
-  color: var(--cyan);
+  color: var(--accent);
   text-decoration: none;
 }
 
 h1,
 h2,
 h3 {
-  font-family: var(--font-display);
-  line-height: 1.15;
+  font-family: var(--font-sans);
+  font-weight: var(--fw-semi);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--track-title);
 }
 
-/* scroll reveal
- * Opacity resolves faster than travel (0.42s vs 0.72s). Matching both
- * durations makes an element still visibly sliding while already fully
- * opaque, which reads as lag; landing the fade early lets the motion
- * settle underneath text that is already readable. */
 [data-reveal] {
   opacity: 0;
   transform: translateY(22px);
   transition:
-    opacity 0.42s var(--ease-out),
-    transform 0.72s var(--ease-out);
+    opacity var(--dur-slow) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out);
   will-change: opacity, transform;
 }
 [data-reveal].is-in {
   opacity: 1;
   transform: none;
-  /* Released once settled: a permanent will-change keeps every revealed
-     element on its own compositor layer for the life of the page. */
   will-change: auto;
 }
 

@@ -63,7 +63,7 @@ main,
   width: 22px;
   height: 22px;
   color: var(--cyan);
-  filter: drop-shadow(0 0 6px rgba(43, 232, 255, 0.6));
+  filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 0.6));
 }
 
 .nav-brand-accent {
@@ -203,12 +203,12 @@ main,
      that suits body copy, or the lines drift apart into separate objects. */
   line-height: 0.92;
   color: var(--text);
-  text-shadow: 0 0 60px rgba(43, 232, 255, 0.25);
+  text-shadow: 0 0 60px rgba(var(--accent-rgb), 0.25);
 }
 
 .hero-title-accent {
   color: var(--cyan);
-  text-shadow: 0 0 30px rgba(43, 232, 255, 0.65);
+  text-shadow: 0 0 30px rgba(var(--accent-rgb), 0.65);
 }
 
 /* inline-block so the per-character reveal can transform y/filter -- a plain
@@ -263,7 +263,7 @@ main,
   font-weight: 700;
   font-size: 30px;
   color: var(--cyan);
-  text-shadow: 0 0 12px rgba(43, 232, 255, 0.45);
+  text-shadow: 0 0 12px rgba(var(--accent-rgb), 0.45);
 }
 
 .stat-label {
@@ -298,7 +298,7 @@ main,
   gap: 12px;
   padding: 9px 14px;
   border-bottom: 1px solid var(--line);
-  background: rgba(43, 232, 255, 0.04);
+  background: rgba(var(--accent-rgb), 0.04);
 }
 
 .ops-log-title {
@@ -839,7 +839,7 @@ main,
   font-weight: 700;
   font-size: 44px;
   color: var(--cyan);
-  text-shadow: 0 0 16px rgba(43, 232, 255, 0.4);
+  text-shadow: 0 0 16px rgba(var(--accent-rgb), 0.4);
   line-height: 1;
 }
 
@@ -952,15 +952,15 @@ main,
   font-family: var(--font-mono);
   font-size: clamp(16px, 2.6vw, 22px);
   color: var(--cyan);
-  border: 1px solid rgba(43, 232, 255, 0.35);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
   border-radius: 4px;
   padding: 14px 28px;
   transition: background var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .footer-mail:hover {
-  background: rgba(43, 232, 255, 0.08);
-  box-shadow: 0 0 24px rgba(43, 232, 255, 0.25);
+  background: rgba(var(--accent-rgb), 0.08);
+  box-shadow: 0 0 24px rgba(var(--accent-rgb), 0.25);
 }
 
 .footer-name {
