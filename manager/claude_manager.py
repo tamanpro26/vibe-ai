@@ -322,14 +322,55 @@ class ClaudeManager:
                 f"[manager] ⚡ fast path: {quick.get('quick_summary', user_prompt[:60])}"
             )
             from models.registry import generate_resilient
-            return await generate_resilient(
+            answer = await generate_resilient(
                 "qwen36_27b_verifier",   # GPT-OSS 120B on Groq — strong and ~1s
                 prompt=user_prompt,
                 system=_FAST_SYSTEM,
                 max_tokens=2000,
                 temperature=0.6,
             )
+
+            # The fast path skips team dispatch entirely, so code returned here
+            # never reached CodeTeam._verify and was the ONE output path with no
+            # ground-truth check at all. Confirmed live against the deployed
+            # backend (2026-08-01): asking for a snippet that calls an undefined
+            # function returned it unrepaired, because triage classified the
+            # request "simple" and answered directly.
+            #
+            # Simple requests are the common case, so leaving this unverified
+            # would mean most generated code is never executed -- which is the
+            # exact defect the verification work set out to remove.
+            if "```python" in (answer or ""):
+                answer = await self._verify_fast_code(user_prompt, answer)
+            return answer
         return None
+
+    async def _verify_fast_code(self, user_prompt: str, answer: str) -> str:
+        """
+        Import-test any Python in a fast-path answer; on failure hand the real
+        traceback to CodeTeam's repair pass.
+
+        Reuses CodeTeam rather than duplicating the harness: one definition of
+        "verified" for both paths, so they cannot drift apart.
+        """
+        try:
+            from teams.code import CodeTeam, _extract_python
+
+            code = _extract_python(answer)
+            if not code:
+                return answer
+
+            # CodeTeam._verify returns the input unchanged when the code is
+            # sound, and a repaired version when it is not -- so this is a
+            # no-op on the happy path and costs one extra model call only when
+            # the code genuinely does not run.
+            return await CodeTeam()._verify(answer, user_prompt)
+        except Exception as exc:
+            # Verification is an improvement, never a new failure mode: a
+            # broken checker must not take down an answer that was already
+            # produced successfully.
+            logger.warning(f"[manager] fast-path verify skipped ({str(exc)[:80]})")
+            return answer
 
     # ── Manager generate — all calls go through fallback chain ────────────────
 
