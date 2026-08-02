@@ -58,6 +58,32 @@ def test_clean_code_passes():
     assert r.success, r.stderr
 
 
+def test_best_of_n_skips_judge_when_one_candidate_executes():
+    """Execution beats judge-model opinion: if only one of three drafts
+    actually imports cleanly, best-of-N must return it without ever calling
+    the judge model."""
+    import teams.code as code_mod
+
+    class _FakeModel:
+        def __init__(self, model_id):
+            self.model_id = model_id
+
+        async def generate(self, prompt="", **kwargs):
+            if self.model_id == "gpt_oss_120b_coder":
+                return "```python\ndef add(a, b):\n    return a + b\n```"
+            if self.model_id == "glm_47_cerebras":
+                return "```python\nresult = undefined_symbol()\n```"
+            if self.model_id == "nemotron_super_bulk":
+                return "```python\nimport definitely_not_a_real_module_xyz\n```"
+            raise AssertionError(f"judge model must not be called, got {self.model_id}")
+
+    team = code_mod.CodeTeam()
+    team._get_model = lambda model_id: _FakeModel(model_id)
+
+    result = asyncio.run(team._best_of_n("add two numbers", budget=500))
+    assert "def add" in result
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

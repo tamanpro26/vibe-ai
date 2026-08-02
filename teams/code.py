@@ -259,6 +259,25 @@ class CodeTeam(BaseTeam):
             logger.info("[code] best-of-N: structural agreement — skipping judge pass")
             return await self._verify(ok[0][1], instruction, budget)
 
+        # Execution-based selection: run each candidate instead of asking a
+        # judge model to guess which one works. A candidate that fails to
+        # import is dropped before the judge ever sees it.
+        checked = []
+        for m, d in ok:
+            code = _extract_python(d)
+            error = await self._execution_error(code) if code else "no python code block found"
+            checked.append((m, d, error))
+        passing = [(m, d) for m, d, error in checked if error is None]
+
+        if len(passing) == 1:
+            logger.info("[code] best-of-N: one candidate passed execution — skipping judge pass")
+            return passing[0][1]
+        if passing:
+            logger.info(f"[code] best-of-N: {len(passing)}/{len(checked)} candidates passed execution")
+            ok = passing
+        # else: none executed cleanly -- fall through to judge across all
+        # candidates; _verify below still repairs whatever it picks.
+
         block = "\n\n".join(
             f"=== CANDIDATE {i+1} ({m}) ===\n{d}" for i, (m, d) in enumerate(ok)
         )
@@ -276,44 +295,48 @@ class CodeTeam(BaseTeam):
 
     # ── Empirical verification ─────────────────────────────────────────────────
 
+    async def _execution_error(self, code: str) -> str | None:
+        """GROUND TRUTH. compile() only raises on SyntaxError -- NameError,
+        ImportError, undefined symbols and bad attribute access all sail past
+        it, and those are precisely what weak models get wrong. Nothing else
+        in this pipeline can catch them: every other check is a model scoring
+        another model's text, so the strongest reasoner in the pool is the
+        ceiling. Actually importing the module supplies information no model
+        here possessed."""
+        error = _syntax_error(code)
+        if error is not None:
+            return error
+
+        from tools.code_executor import executor
+
+        # Reassigning __name__ makes this an IMPORT test rather than a run of
+        # the program: `if __name__ == "__main__":` will not fire. That
+        # matters because a script expecting argv/stdin, or one with a
+        # long-running main, would otherwise "fail" verification and burn a
+        # repair pass fixing a bug that does not exist. Top-level asserts
+        # still execute, so self-checking code is still checked.
+        harness = '__name__ = "_vibeai_smoke"\n' + code
+        if ">>>" in code:
+            # Called explicitly: the main guard above is deliberately dead.
+            harness += (
+                "\n\nimport doctest as _dt, sys as _sys\n"
+                "_r = _dt.testmod(_sys.modules['__main__'])\n"
+                "_sys.exit(1 if _r.failed else 0)\n"
+            )
+        result = await executor.run(harness)
+        if not result.success:
+            return (result.stderr or "execution failed").strip()[:1500]
+        return None
+
     async def _verify(self, output: str, instruction: str, budget: int = 4000) -> str:
         code = _extract_python(output)
         if not code:
             return output
 
-        error = _syntax_error(code)
-
-        # GROUND TRUTH. compile() above only raises on SyntaxError -- NameError,
-        # ImportError, undefined symbols and bad attribute access all sail past
-        # it, and those are precisely what weak models get wrong. Nothing else
-        # in this pipeline can catch them: every other check is a model scoring
-        # another model's text, so the strongest reasoner in the pool is the
-        # ceiling. Actually importing the module supplies information no model
-        # here possessed.
-        #
         # This used to run ONLY when the model happened to emit doctests or an
         # assert, which is a minority of generated code -- so in the common
         # case nothing was ever executed.
-        if error is None:
-            from tools.code_executor import executor
-
-            # Reassigning __name__ makes this an IMPORT test rather than a run
-            # of the program: `if __name__ == "__main__":` will not fire. That
-            # matters because a script expecting argv/stdin, or one with a
-            # long-running main, would otherwise "fail" verification and burn a
-            # repair pass fixing a bug that does not exist. Top-level asserts
-            # still execute, so self-checking code is still checked.
-            harness = '__name__ = "_vibeai_smoke"\n' + code
-            if ">>>" in code:
-                # Called explicitly: the main guard above is deliberately dead.
-                harness += (
-                    "\n\nimport doctest as _dt, sys as _sys\n"
-                    "_r = _dt.testmod(_sys.modules['__main__'])\n"
-                    "_sys.exit(1 if _r.failed else 0)\n"
-                )
-            result = await executor.run(harness)
-            if not result.success:
-                error = (result.stderr or "execution failed").strip()[:1500]
+        error = await self._execution_error(code)
 
         if error is None:
             return output
