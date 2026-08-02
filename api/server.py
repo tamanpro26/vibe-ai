@@ -196,7 +196,21 @@ class SensorRequest(BaseModel):
 class SensorResponse(BaseModel):
     received: str
     response: str
-    device_plan: dict[str, list[dict[str, int]]] = Field(default_factory=dict)
+    device_plan: dict[str, list[dict[str, int]]] | None = None
+
+
+# Keep this guard aligned with TEMP_THRESHOLD_C in the ESP32 firmware. It is a
+# server-side safety net for stale or misconfigured boards: a device's event
+# label alone must never produce a physical fire alarm below this temperature.
+HEAT_ALERT_THRESHOLD_C = 40.0
+
+
+def is_actionable_high_temperature(message: str, temperature: float | None) -> bool:
+    """Whether a sensor event is allowed to produce a high-temperature alarm."""
+    return (
+        message.strip() == "HIGH TEMPERATURE DETECTED"
+        and (temperature is None or temperature > HEAT_ALERT_THRESHOLD_C)
+    )
 
 
 @app.post("/api/sensor", response_model=SensorResponse, dependencies=[Depends(require_token)])
@@ -212,10 +226,32 @@ async def handle_sensor(req: SensorRequest) -> SensorResponse:
         context += ")"
     logger.info(f"[sensor] {context}")
 
-    # The device plan is the ONLY thing the ESP32 waits on -- it cannot sound
-    # the alarm until this returns, so it is on the critical path and nothing
-    # else may block it.
-    device_plan = await plan_device_response(raw_message, req.temperature)
+    # A stale ESP32 build previously used a 30C threshold and reported HIGH
+    # events around 34C. Do not send an alarm plan or a high-temperature push
+    # notification for an event that contradicts the configured 40C limit.
+    if raw_message == "HIGH TEMPERATURE DETECTED" and not is_actionable_high_temperature(
+        raw_message, req.temperature
+    ):
+        logger.warning(
+            "[sensor] ignored below-threshold HIGH event: "
+            f"{req.temperature:.1f}C <={HEAT_ALERT_THRESHOLD_C:.1f}C"
+        )
+        return SensorResponse(
+            received=context,
+            response=(
+                f"ignored: high-temperature alerts require a reading above "
+                f"{HEAT_ALERT_THRESHOLD_C:.0f}C"
+            ),
+        )
+
+    # Only an actionable HIGH event may produce a physical alarm plan. A
+    # normalized event is informational and must leave every buzzer and LED
+    # off, including on boards that still run the older firmware.
+    device_plan = None
+    if is_actionable_high_temperature(raw_message, req.temperature):
+        # The device plan is the ONLY thing the ESP32 waits on -- it cannot
+        # sound the alarm until this returns, so it is on the critical path.
+        device_plan = await plan_device_response(raw_message, req.temperature)
 
     # Everything below is operator-facing (log narrative + phone push) and the
     # hardware never reads it, so it runs detached. Previously this was an

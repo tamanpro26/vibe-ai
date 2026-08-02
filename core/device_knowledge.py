@@ -78,12 +78,12 @@ _DEVICES = [
         "heat_sensor",
         "DHT11 digital temperature sensor (single-wire protocol, NOT an "
         "analog voltage output) on GPIO27. Read roughly once per second. "
-        "Threshold is 30 degC: crossing above is the HIGH TEMPERATURE "
+        "Threshold is 40 degC: crossing above is the HIGH TEMPERATURE "
         "DETECTED edge, crossing below is the Temperature normalized edge. "
-        "30 is a demo-sensitivity setting (ambient is ~28.5 degC), not a "
-        "realistic fire threshold. The sensor's rated ceiling is 50 degC, so "
-        "it cannot report reliably above that. Readings meaningfully above "
-        "30 indicate escalating danger and the warning pattern should "
+        "40 is a realistic fire/overheat threshold; ambient temperature should "
+        "remain well below it. The sensor's rated ceiling is 50 degC, so "
+        "readings above 50 cannot be trusted. Readings meaningfully above "
+        "40 indicate escalating danger and the warning pattern should "
         "reflect how far above it is. "
         "This is a sensor, not something a device plan can control.",
     ),

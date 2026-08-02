@@ -126,13 +126,15 @@ Hard rules:
   reading; the alarm is the only channel the people in the room have, so
   someone listening must be able to tell roughly HOW hot it is without
   looking at a screen. Scale the urgency continuously with the reading:
-    * just over the 30C threshold (~30-36C) -- deliberately unhurried:
+    * just over the 40C threshold (~40-44C) -- deliberately unhurried:
       longer gaps, few steps, a calm "attention" signal, LEDs stepping
       slowly. It should NOT sound like an emergency.
-    * clearly elevated (~36-45C) -- steady, insistent mid-tempo, tighter
+    * clearly elevated (~44-47C) -- steady, insistent mid-tempo, tighter
       gaps, more steps, LEDs chasing at a moderate pace.
-    * dangerous (45C and above) -- rapid, dense, minimum permitted gaps,
+    * dangerous (47C and above) -- rapid, dense, minimum permitted gaps,
       maximum steps, all devices driven hard: unmistakably an emergency.
+      Note the DHT11's own rated ceiling is 50C, so this band only has
+      about 3 degrees of headroom before readings become unreliable.
   Interpolate between these; do not snap to three fixed presets. Two
   different readings should produce two audibly different alarms.
 """

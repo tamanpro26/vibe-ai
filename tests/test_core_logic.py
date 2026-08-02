@@ -3401,6 +3401,48 @@ class TestRestTokenCompare:
         assert r.status_code == 401
 
 
+class TestSensorAlertThreshold:
+    """A device-reported HIGH event must still meet the configured threshold."""
+
+    def test_high_temperature_requires_a_reading_above_40_c(self):
+        from api.server import is_actionable_high_temperature
+
+        assert not is_actionable_high_temperature("HIGH TEMPERATURE DETECTED", 34.1)
+        assert not is_actionable_high_temperature("HIGH TEMPERATURE DETECTED", 40.0)
+        assert is_actionable_high_temperature("HIGH TEMPERATURE DETECTED", 40.1)
+        assert is_actionable_high_temperature("HIGH TEMPERATURE DETECTED", None)
+        assert not is_actionable_high_temperature("Temperature normalized", 34.1)
+
+    def test_below_threshold_high_event_skips_device_planning(self, monkeypatch):
+        import asyncio
+        import api.server as server_mod
+
+        async def unexpected_plan(*_args, **_kwargs):
+            raise AssertionError("below-threshold event must not create an alarm plan")
+
+        monkeypatch.setattr(server_mod, "plan_device_response", unexpected_plan)
+        response = asyncio.run(server_mod.handle_sensor(server_mod.SensorRequest(
+            message="HIGH TEMPERATURE DETECTED", temperature=34.1, device_id="test-device"
+        )))
+
+        assert response.device_plan is None
+        assert "ignored" in response.response.lower()
+
+    def test_normal_event_skips_device_planning(self, monkeypatch):
+        import asyncio
+        import api.server as server_mod
+
+        async def unexpected_plan(*_args, **_kwargs):
+            raise AssertionError("normal event must not create an alarm plan")
+
+        monkeypatch.setattr(server_mod, "plan_device_response", unexpected_plan)
+        response = asyncio.run(server_mod.handle_sensor(server_mod.SensorRequest(
+            message="Temperature normalized", temperature=34.1, device_id="test-device"
+        )))
+
+        assert response.device_plan is None
+
+
 class TestVibemindFsReadAuth:
     """#3 -- GET /api/fs/read had no auth despite read_text_file(path) taking
     any path with no allowlist and returning raw file content (.env, SSH

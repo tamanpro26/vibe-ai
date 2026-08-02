@@ -65,13 +65,11 @@ const char *MANUAL_TRIGGER_URL = "http://" SERVER_HOST ":8000/api/sensor/manual-
 // with VIBE_API_TOKEN unset -- it skips the check on a localhost bind.
 const char *API_TOKEN = "YOUR_VIBE_API_TOKEN";
 
-// 30 C: chosen for demo sensitivity -- ambient here measures ~28.5 C, so a
-// hand or a lighter held near the sensor crosses it immediately, without
-// needing a heat source strong enough to reach 40+. Note this sits only
-// ~1.5 C above ambient, so ordinary room drift can trip it; raise it back
-// toward 40 for a realistic fire threshold. (The hard ceiling to respect is
-// 50 C, the DHT11's own rated max, above which it cannot report reliably.)
-const float TEMP_THRESHOLD_C = 30.0;
+// 40 C: a realistic fire/overheat threshold, well clear of ambient (~28.5 C
+// here) so ordinary room drift can't trip it by accident. Still comfortably
+// under the DHT11's own rated ceiling of 50 C, above which it cannot report
+// reliably -- this is the hard ceiling to respect if raising this further.
+const float TEMP_THRESHOLD_C = 40.0;
 const unsigned long POLL_INTERVAL_MS = 1000;
 const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000;
 const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;
@@ -359,7 +357,7 @@ void sendMessage(const char *message, float temperature) {
       Serial.println(err.c_str());
     } else if (!response["device_plan"].is<JsonObject>()) {
       Serial.println("Parsed OK, but response has no usable device_plan object");
-    } else {
+    } else if (strcmp(message, "HIGH TEMPERATURE DETECTED") == 0) {
       // Keep the plan so loop() can go on replaying it for as long as the
       // temperature stays high, instead of the alarm falling silent after a
       // single burst while the room is still overheating.
