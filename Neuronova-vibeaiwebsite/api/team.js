@@ -94,6 +94,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         prompt,
         session_id: typeof req.body?.session_id === 'string' ? req.body.session_id : undefined,
+        team: typeof req.body?.team === 'string' ? req.body.team : undefined,
       }),
     })
     const data = await upstream.json()

@@ -38,6 +38,8 @@ from teams.prompt_refiner import PromptRefinerPipeline
 from tools.manager_fallback import fallback_chain, BACKUP_MANAGER_SYSTEM
 
 
+_FORCEABLE_TEAMS = ("brain", "code", "vision", "design")
+
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".frames"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _MEDIA_RE   = re.compile(
@@ -80,7 +82,7 @@ def _get_team(name: str):
 
 
 _MANAGER_SYSTEM = """You are the manager of VibeAI — a 31-model AI system for vibe coding,
-debugging, UI/animation design, and video analysis. You manage 6 specialist teams.
+debugging, UI/animation design, and video analysis. You manage 5 specialist teams.
 
 REVIEW task — score output 0.0–1.0 against success_criteria[]. Return ONLY JSON:
 {
@@ -170,6 +172,7 @@ class ClaudeManager:
         self,
         user_prompt: str,
         extra: dict[str, Any] | None = None,
+        forced_team: str | None = None,
     ) -> str:
         session_id = f"s_{uuid.uuid4().hex[:8]}"
         extra      = extra or {}
@@ -192,7 +195,11 @@ class ClaudeManager:
 
         # 0a. Creative path — writing tasks get the 5-step creative pipeline
         #     (runs before fast path so creative tasks are never fast-pathed)
-        if not extra:
+        # Both 0a and 0b bypass classification entirely, so an explicit team
+        # override (e.g. the website's "Route to team" selector) must skip
+        # them -- otherwise the user's pick would be silently ignored exactly
+        # the way it was before this was wired up.
+        if not extra and forced_team is None:
             try:
                 from tools.creative_engine import creative_engine, is_creative_task
                 if is_creative_task(user_prompt):
@@ -203,7 +210,7 @@ class ClaudeManager:
                 logger.warning(f"[manager] creative engine failed ({str(exc)[:60]}) — pipeline")
 
         # 0b. Fast path — simple text-only requests skip the heavy pipeline
-        if not extra:
+        if not extra and forced_team is None:
             viz("stage", "Manager triaging request (fast path check)…")
             fast = await self._try_fast_path(user_prompt)
             if fast is not None:
@@ -223,6 +230,21 @@ class ClaudeManager:
         viz("stage", "Prompt Refiner analyzing and classifying the task…")
         task_json = await self._refiner.run(enhanced_prompt, session_id)
         task_json.original_prompt = user_prompt   # keep the user's raw prompt for review/memory
+
+        # Explicit team override beats the refiner's own classification -- the
+        # caller asked for a specific team by name, so honor it instead of
+        # guessing why their pick disagrees with the classifier. Mirrors the
+        # force-activation pattern _dispatch already uses for media-detected
+        # vision requests, just driven by the caller instead of by content.
+        if forced_team in _FORCEABLE_TEAMS:
+            for team_key in _FORCEABLE_TEAMS:
+                activation = task_json.active_teams.get(team_key)
+                if activation is None:
+                    activation = TeamActivation(active=False)
+                    task_json.active_teams[team_key] = activation
+                activation.active = (team_key == forced_team)
+            logger.info(f"[manager] team override: forcing '{forced_team}'")
+
         await state.save_session(session_id, task_json)
         _active_teams = [t.upper() for t, c in task_json.active_teams.items()
                          if c.active and t != "router"]

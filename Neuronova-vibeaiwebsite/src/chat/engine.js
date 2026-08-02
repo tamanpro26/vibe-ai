@@ -492,7 +492,7 @@ export async function continueEdge(history, partialText, token, mode = DEFAULT_M
   return { text: data.text, truncated: !!data.truncated }
 }
 
-export async function respondLive(prompt, sessionId) {
+export async function respondLive(prompt, sessionId, team = 'auto') {
   // Image requests are served browser-side even in LIVE mode: /api/prompt
   // returns prose, not pictures, so routing an image ask through it would
   // yield a description of an image rather than an image.
@@ -501,7 +501,7 @@ export async function respondLive(prompt, sessionId) {
   const res = await fetch(`${API_BASE}/api/prompt`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ prompt, session_id: sessionId }),
+    body: JSON.stringify({ prompt, session_id: sessionId, team }),
   })
   if (!res.ok) throw new Error(`API returned ${res.status}`)
   const data = await res.json()
@@ -533,7 +533,7 @@ export async function checkTeam() {
   }
 }
 
-export async function respondTeam(prompt, sessionId, token, systemPrompt = '') {
+export async function respondTeam(prompt, sessionId, token, systemPrompt = '', team = 'auto') {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
 
   const res = await fetch('/api/team', {
@@ -542,7 +542,7 @@ export async function respondTeam(prompt, sessionId, token, systemPrompt = '') {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ prompt, session_id: sessionId, systemPrompt }),
+    body: JSON.stringify({ prompt, session_id: sessionId, systemPrompt, team }),
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data?.error || `team proxy ${res.status}`)
@@ -570,7 +570,14 @@ const EXPLAIN = [
 
 const has = (text, hints) => hints.some((h) => text.includes(h))
 
-// Mirrors the real Manager/intent-router: classify first, then dispatch.
+// A coarse keyword approximation for the SIMULATED (last-resort, every real
+// tier unreachable) fallback only -- it does NOT mirror the real classifier.
+// The actual router (teams/router_team.py) is an LLM classifying into
+// debugging/vibe_coding/ui_design/animation/video_analysis/mixed with
+// needs_vision/needs_code/needs_design flags; matching that taxonomy here
+// would mean writing new canned reply templates for a path that only runs
+// when live/manager/omni/edge are ALL down, so it stays a 5-bucket
+// approximation on purpose.
 export function classify(text) {
   const t = text.toLowerCase()
   if (has(t, STRONG_CODE)) return 'code'

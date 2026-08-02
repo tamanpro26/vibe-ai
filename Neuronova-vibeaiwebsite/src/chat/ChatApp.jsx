@@ -286,7 +286,7 @@ export default function ChatApp() {
 
     if (engines.live) {
       try {
-        const reply = await respondLive(text, convId)
+        const reply = await respondLive(text, convId, team)
         if (stopRef.current) return
         streamReply(convId, reply)
         return
@@ -300,7 +300,7 @@ export default function ChatApp() {
     if (engines.manager) {
       try {
         const token = await getToken()
-        const reply = await respondTeam(text, convId, token, systemPromptRef.current)
+        const reply = await respondTeam(text, convId, token, systemPromptRef.current, team)
         if (stopRef.current) return
         streamReply(convId, reply)
         return

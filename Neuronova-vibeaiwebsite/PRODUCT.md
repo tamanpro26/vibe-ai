@@ -28,9 +28,10 @@ without needing to know which provider or model served any given turn.
 ## Positioning
 
 **A real multi-agent team, running entirely on free-tier LLMs.** Confirmed as
-the main product. Not a single model behind a chat box: a Manager plus
-specialist teams (brain, code, design, vision, router, leadership) with
-cross-provider failover, structured critique, and a verifier pass.
+the main product. Not a single model behind a chat box: a Manager plus 5
+specialist teams (brain, code, design, vision, router), each signed off by a
+per-team Leadership review pass, with cross-provider failover, structured
+critique, and a verifier pass.
 
 Physical hardware control (an ESP32 fire-alert system where the AI composes
 real alarm behaviour from sensor data) is confirmed as an **application** of

@@ -163,6 +163,7 @@ ws_mgr = ConnectionManager()
 class PromptRequest(BaseModel):
     prompt: str
     session_id: str | None = None
+    team: str | None = None  # "brain"|"code"|"vision"|"design" override, or None/"auto"
 
 
 class PromptResponse(BaseModel):
@@ -170,12 +171,19 @@ class PromptResponse(BaseModel):
     response: str
 
 
+# Validated here, not in the manager -- a bad value from the caller (e.g. the
+# website's own "auto" default, or a typo) should just mean "no override",
+# not an error the manager has to know how to reject.
+_FORCEABLE_TEAMS = {"brain", "code", "vision", "design"}
+
+
 @app.post("/api/prompt", response_model=PromptResponse, dependencies=[Depends(require_token)])
 async def handle_prompt(req: PromptRequest) -> PromptResponse:
     if not req.prompt.strip():
         raise HTTPException(400, "Prompt cannot be empty")
     sid = req.session_id or f"s_{uuid.uuid4().hex[:8]}"
-    response = await manager.handle_user_request(req.prompt)
+    forced_team = req.team if req.team in _FORCEABLE_TEAMS else None
+    response = await manager.handle_user_request(req.prompt, forced_team=forced_team)
     return PromptResponse(session_id=sid, response=response)
 
 

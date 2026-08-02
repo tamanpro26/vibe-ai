@@ -3443,6 +3443,42 @@ class TestSensorAlertThreshold:
         assert response.device_plan is None
 
 
+class TestPromptTeamOverride:
+    """/api/prompt's 'team' field (the website's 'Route to team' selector)
+    must be validated at the API boundary -- a bad value (the UI's own
+    'auto' default, or a typo from a direct caller) must become None, not an
+    error the manager has to know how to reject."""
+
+    def test_valid_team_is_forwarded(self, monkeypatch):
+        import asyncio
+        import api.server as server_mod
+
+        captured = {}
+
+        async def fake_handle(prompt, forced_team=None):
+            captured["forced_team"] = forced_team
+            return "ok"
+        monkeypatch.setattr(server_mod.manager, "handle_user_request", fake_handle)
+
+        asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(prompt="fix this", team="code")))
+        assert captured["forced_team"] == "code"
+
+    def test_auto_and_bad_values_become_none(self, monkeypatch):
+        import asyncio
+        import api.server as server_mod
+
+        captured = []
+
+        async def fake_handle(prompt, forced_team=None):
+            captured.append(forced_team)
+            return "ok"
+        monkeypatch.setattr(server_mod.manager, "handle_user_request", fake_handle)
+
+        for bad in ("auto", "leadership", "not-a-team", None):
+            asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(prompt="x", team=bad)))
+        assert captured == [None, None, None, None]
+
+
 class TestVibemindFsReadAuth:
     """#3 -- GET /api/fs/read had no auth despite read_text_file(path) taking
     any path with no allowlist and returning raw file content (.env, SSH
@@ -3540,6 +3576,76 @@ class TestSynthesisGracefulDegrade:
 
         result = asyncio.run(mgr.handle_user_request("do a real task", extra={"skip_fast_path": True}))
         assert "a real completed answer from the brain team" in result
+
+
+class TestTeamOverride:
+    """The website's 'Route to team' selector previously did nothing on any
+    real engine tier -- nothing threaded the pick past the UI. forced_team
+    must beat the refiner's own classification and must skip fast/creative
+    path, both of which bypass classification entirely and would otherwise
+    silently ignore the override."""
+
+    def test_forced_team_overrides_classifier_and_skips_fast_path(self, monkeypatch):
+        import asyncio
+        from manager.claude_manager import ClaudeManager
+        from core.imcp import TaskJSON, TeamActivation, Classification, TaskType, Complexity
+
+        mgr = ClaudeManager()
+
+        async def fake_refiner_run(*a, **kw):
+            return TaskJSON(
+                original_prompt="x", refined_prompt="x",
+                classification=Classification(primary_type=TaskType.VIBE_CODING, complexity=Complexity.SIMPLE),
+                active_teams={
+                    "brain": TeamActivation(active=True),
+                    "code": TeamActivation(active=False),
+                    "router": TeamActivation(active=True),
+                },
+            )
+        monkeypatch.setattr(mgr._refiner, "run", fake_refiner_run)
+
+        async def fail_fast_path(*a, **kw):
+            raise AssertionError("fast path must be skipped when a team is forced")
+        monkeypatch.setattr(mgr, "_try_fast_path", fail_fast_path)
+
+        captured = {}
+
+        async def fake_dispatch(session_id, task_json, extra, memory_ctx, search_ctx):
+            captured["active_teams"] = task_json.active_teams
+            return {"code": "the code team's answer"}
+        monkeypatch.setattr(mgr, "_dispatch", fake_dispatch)
+
+        async def fake_synthesise(*a, **kw):
+            return "final answer"
+        monkeypatch.setattr(mgr, "_synthesise", fake_synthesise)
+
+        async def fake_store(*a, **kw):
+            return None
+        monkeypatch.setattr(mgr, "_store_memory", fake_store)
+
+        async def fake_retrieve(*a, **kw):
+            return ""
+        monkeypatch.setattr(mgr, "_retrieve_memory", fake_retrieve)
+
+        async def fake_search(*a, **kw):
+            return ""
+        monkeypatch.setattr(mgr, "_fetch_search_context", fake_search)
+
+        result = asyncio.run(mgr.handle_user_request("fix this bug", forced_team="code"))
+
+        active = captured["active_teams"]
+        assert active["code"].active is True
+        assert active["brain"].active is False
+        assert active["router"].active is True   # override never touches router
+        assert result == "final answer"
+
+    def test_unforceable_value_is_ignored(self):
+        """'auto' (the UI's default) and any bad value from a direct API
+        caller must behave exactly like no override -- validated at the API
+        boundary (api/server.py), not trusted blindly by the manager."""
+        from manager.claude_manager import _FORCEABLE_TEAMS
+        assert "auto" not in _FORCEABLE_TEAMS
+        assert "router" not in _FORCEABLE_TEAMS  # router isn't a forceable content team
 
 
 class TestZaiToolCallsTokenFloor:
