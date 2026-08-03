@@ -657,6 +657,94 @@ export async function makeZip(files, slug) {
   return zip.generateAsync({ type: 'blob' })
 }
 
+/* ── Projects: the real autonomous agent, not a scaffold ───────────────────
+ * Posts to /api/project (api/project.js), which forwards to the backend's
+ * POST /api/agent -- core/agent_loop.py, the same loop evals/run_eval.py
+ * grades. It writes real files, runs real shell commands and passes a
+ * build/test gate before returning, so what comes back is a project that
+ * actually ran, not a template.
+ *
+ * Deliberately NOT falling back to the client-side generateFiles() scaffold
+ * on failure. Everywhere else in this app a degraded tier still answers the
+ * question, so falling through is right; here the whole promise is "the agent
+ * built and verified this", and silently handing over an unverified template
+ * under the same "project" label would be the one thing a build surface must
+ * never do. A failure is surfaced as a failure.
+ */
+export async function buildProject(task, token, taskType = 'coding') {
+  const res = await fetch('/api/project', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ task, taskType }),
+  })
+  const data = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(data?.error || `project build failed (${res.status})`)
+  if (!data?.files?.length) {
+    throw new Error('the agent finished but wrote no files')
+  }
+  return {
+    slug: slugify(task),
+    summary: data.summary || '',
+    files: data.files,
+    filesTruncated: !!data.filesTruncated,
+    commandsRun: data.commandsRun || [],
+    iterations: data.iterations || 0,
+    totalMs: data.totalMs || 0,
+  }
+}
+
+/** Whether the real agent backend is reachable. Projects has no simulated
+ *  tier, so this gates the surface instead of selecting a fallback. */
+export async function checkProjects() {
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 4000)
+    const res = await fetch('/api/project', { signal: ctrl.signal })
+    clearTimeout(t)
+    if (!res.ok) return false
+    const data = await res.json()
+    return !!data.ok
+  } catch {
+    return false
+  }
+}
+
+/* ── Registry: the real roster, never a local copy ─────────────────────────
+ * Reads GET /api/registry (api/registry.js -> backend MODEL_REGISTRY). On any
+ * failure this returns ok:false with an empty roster rather than falling back
+ * to a bundled list: a stale hardcoded roster that still LOOKS right is worse
+ * than an honest "unavailable", because the whole point of this surface is
+ * that the numbers are sourced from the running system.
+ */
+export async function fetchRegistry() {
+  try {
+    const res = await fetch('/api/registry')
+    if (!res.ok) return { ok: false, entries: [] }
+    const data = await res.json()
+    return data?.ok ? data : { ok: false, entries: [], reason: data?.reason }
+  } catch {
+    return { ok: false, entries: [] }
+  }
+}
+
+/** Build the zip and hand it to the browser as a download. */
+export async function downloadProject(project) {
+  const blob = await makeZip(project.files, project.slug)
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${project.slug}.zip`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // Revoking immediately can cancel the download in some browsers; one frame
+  // is enough for the click to be consumed.
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 const TEAM_LABEL = {
   auto: 'auto-routed',
   code: 'team.code',

@@ -16,9 +16,12 @@ const PANELS = [
   { id: 'appearance', label: 'Appearance' },
 ]
 
+/* Wording taken from direction 2A's own Appearance panel. The previous copy
+   ("Void black, signal cyan" / "Warm surfaces, generous radii") described the
+   palette that 2A replaced, so it had stopped matching what the toggle does. */
 const THEME_INFO = {
-  cockpit: { name: 'Cockpit', desc: 'Dense technical HUD. Void black, signal cyan, mono type.' },
-  studio: { name: 'Studio', desc: 'Soft premium. Warm surfaces, generous radii, editorial type.' },
+  cockpit: { name: 'Cockpit', desc: 'Dark ground, accent as line and glow.' },
+  studio: { name: 'Studio', desc: 'Paper ground, same accent, same rules.' },
 }
 
 function Field({ label, hint, children }) {

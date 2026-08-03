@@ -21,8 +21,15 @@ function NetworkCanvas() {
     const canvas = ref.current
     const ctx = canvas.getContext('2d')
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const CYAN = '#e8573d'
-    const AMBER = '#ffb020'
+    // Read from the token layer instead of hardcoding. Canvas can't consume CSS
+    // variables directly, and the previous literals silently kept painting the
+    // old red-orange accent after the palette moved to 2A's violet — a canvas
+    // is the one surface a retheme can't reach on its own.
+    const _css = getComputedStyle(document.documentElement)
+    const ACCENT = _css.getPropertyValue('--accent').trim() || '#9184d9'
+    const ACCENT_RGB = _css.getPropertyValue('--accent-rgb').trim() || '145, 132, 217'
+    const AMBER = _css.getPropertyValue('--warning').trim() || '#d9a03c'
+    const AMBER_RGB = '217, 160, 60'
     const LINK = 140
 
     let raf = 0
@@ -95,8 +102,8 @@ function NetworkCanvas() {
           const fade = 1 - d / LINK
           const dead = a.tripped > 0 || b.tripped > 0
           ctx.strokeStyle = dead
-            ? `rgba(255, 176, 32, ${0.1 * fade})`
-            : `rgba(232, 87, 61, ${0.13 * fade})`
+            ? `rgba(${AMBER_RGB}, ${0.1 * fade})`
+            : `rgba(${ACCENT_RGB}, ${0.13 * fade})`
           ctx.lineWidth = 1
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
@@ -114,13 +121,13 @@ function NetworkCanvas() {
         const y = a.y + (b.y - a.y) * s.t
         // Short comet tail reading back toward the source.
         const tail = Math.max(0, s.t - 0.16)
-        ctx.strokeStyle = 'rgba(232, 87, 61, 0.5)'
+        ctx.strokeStyle = `rgba(${ACCENT_RGB}, 0.5)`
         ctx.lineWidth = 1.4
         ctx.beginPath()
         ctx.moveTo(a.x + (b.x - a.x) * tail, a.y + (b.y - a.y) * tail)
         ctx.lineTo(x, y)
         ctx.stroke()
-        ctx.fillStyle = CYAN
+        ctx.fillStyle = ACCENT
         ctx.beginPath()
         ctx.arc(x, y, 1.9, 0, Math.PI * 2)
         ctx.fill()
@@ -128,7 +135,7 @@ function NetworkCanvas() {
 
       for (const n of nodes) {
         const open = n.tripped > 0
-        ctx.fillStyle = open ? AMBER : CYAN
+        ctx.fillStyle = open ? AMBER : ACCENT
         ctx.globalAlpha = open ? 0.9 : 0.6 + n.pulse * 0.4
         ctx.beginPath()
         ctx.arc(n.x, n.y, n.r + n.pulse * 1.6, 0, Math.PI * 2)

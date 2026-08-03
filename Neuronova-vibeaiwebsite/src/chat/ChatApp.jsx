@@ -14,10 +14,13 @@ import {
   checkEdge,
   continueOmni,
   continueEdge,
+  checkProjects,
   DEFAULT_MODE,
 } from './engine.js'
 import Sidebar from './Sidebar.jsx'
 import SettingsModal from './SettingsModal.jsx'
+import ProjectsPanel from './ProjectsPanel.jsx'
+import RegistryPanel from './RegistryPanel.jsx'
 import { applyAppearance, composeSystemPrompt, loadSettings } from './settings.js'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
@@ -82,6 +85,12 @@ export default function ChatApp() {
   const [streaming, setStreaming] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [projectsOpen, setProjectsOpen] = useState(false)
+  const [registryOpen, setRegistryOpen] = useState(false)
+  // Projects has no simulated tier (see engine.js::buildProject), so this
+  // gates the surface rather than selecting a fallback the way the chat
+  // engine cascade does.
+  const [projectsUp, setProjectsUp] = useState(false)
   const [attachments, setAttachments] = useState([])
   const [dragging, setDragging] = useState(false)
 
@@ -138,11 +147,12 @@ export default function ChatApp() {
   useEffect(() => {
     let alive = true
     const probe = async () => {
-      const [okLive, okManager, okOmni, okEdge] = await Promise.all([
+      const [okLive, okManager, okOmni, okEdge, okProjects] = await Promise.all([
         checkLive(),
         checkTeam(),
         checkOmni(),
         checkEdge(),
+        checkProjects(),
       ])
       engineRef.current = { live: okLive, manager: okManager, omni: okOmni, edge: okEdge }
       if (!alive) return
@@ -150,6 +160,7 @@ export default function ChatApp() {
       setManager(okManager)
       setOmni(okOmni)
       setEdge(okEdge)
+      setProjectsUp(okProjects)
     }
     probeRef.current = probe()
     const id = setInterval(() => {
@@ -529,7 +540,15 @@ export default function ChatApp() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenProjects={() => setProjectsOpen(true)}
+        onOpenRegistry={() => setRegistryOpen(true)}
       />
+      <ProjectsPanel
+        open={projectsOpen}
+        available={projectsUp}
+        onClose={() => setProjectsOpen(false)}
+      />
+      <RegistryPanel open={registryOpen} onClose={() => setRegistryOpen(false)} />
       <SettingsModal
         open={settingsOpen}
         onClose={() => {

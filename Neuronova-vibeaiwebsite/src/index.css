@@ -1,85 +1,107 @@
 /* ═══════════════════════════════════════════════════════════════════════════
- * VibeAI design tokens.
+ * VibeAI design tokens — direction 2A.
  *
- * Rewritten against a design audit of the running app (2026-07-31). The audit
- * measured computed values rather than reading source, which surfaced things
- * that were invisible from the code: 48 of 67 elements at 0 border-radius,
- * 56 of 67 at transition-duration 0s, mono on 17 elements of UI chrome, and a
- * mint-green neutral line colour on a blue-black surface with a red accent.
+ * Retargeted (2026-08-03) onto the approved direction "2A · Hybrid — Nocturne
+ * ground, Industry rigor" from the VibeAI Website Redesign Direction doc:
  *
- * The bar is explicitly Claude / ChatGPT / Perplexity / Raycast, executed
- * straight. Three rules carry most of it:
+ *     five surfaces · one accent · registration marks on structural frames only
+ *
+ * What changed from the previous (2026-07-31) token set: the ground moved from
+ * neutral near-black to a cool indigo, the accent from red-orange to violet,
+ * borders from white-alpha washes to solid lines, radii from generous to tight,
+ * and the type from Public Sans + Martian Mono to Inter + the platform mono
+ * stack. The structure did not change — the four-layer surface ramp, the one
+ * neutral border family, the fixed type steps and the alias block below all
+ * predate 2A and carry straight over.
+ *
+ * Rules that survive the retheme unchanged:
  *
  *   RESTRAINT   one accent used twice, one sans, one content column, one
  *               neutral family.
- *   PHYSICALITY soft edges, stacked layers, response within 140ms of touch.
+ *   PHYSICALITY stacked layers, response within 140ms of touch.
  *   AIR         the composer gets real internal padding and real room above.
+ *   HONEST      mono is for data that must align, never for chrome.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 :root,
 [data-theme='cockpit'] {
-  /* ── Surface: four layers, not two ──────────────────────────────────────
-   * Depth comes from stacked surfaces first, shadow second, border last.
-   * Border-first depth is what makes an interface read as a wireframe.
+  /* ── Surface: 2A's five layers ──────────────────────────────────────────
+   * Direction 2A ("Nocturne ground, Industry rigor") names five surfaces and
+   * one accent. Depth still comes from stacked surfaces first, shadow second,
+   * border last — but the ground moves from neutral near-black to 2A's cool
+   * indigo, which is what lets a single violet accent read as light on it
+   * rather than as a sticker.
    */
-  --bg-canvas: #0a0a0d;
-  --bg-surface: #111116;
-  --bg-raised: #17171e;
-  --bg-overlay: #1e1e27;
-  --bg-inset: #08080b;
+  --bg-canvas: #161826;
+  --bg-surface: #1b1d2c;
+  --bg-raised: #232532;
+  --bg-overlay: #2b2d3c;
+  --bg-inset: #101220;
 
   /* ── Border: ONE neutral family ─────────────────────────────────────────
-   * Previously mint green (rgba(122,176,154,...)) drawn across a blue-black
-   * surface with a red-orange accent — three unrelated hues in a system that
-   * needs one. White-alpha inherits the surface beneath it instead.
+   * 2A draws structural frames as solid lines, not white-alpha washes: the
+   * "Industry rigor" half of the direction depends on an edge that holds its
+   * value against every surface instead of dissolving into the lighter ones.
    */
-  --border-subtle: rgba(255, 255, 255, 0.055);
-  --border-default: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.15);
+  --border-subtle: #282a38;
+  --border-default: #32354a;
+  --border-strong: #3f424d;
 
-  --text-primary: #ececf1;
-  --text-secondary: #9e9eac;
-  --text-tertiary: #6b6b7a;
-  --text-disabled: #46464f;
+  --text-primary: #e9e9ed;
+  --text-secondary: #9397ab;
+  --text-tertiary: #75798c;
+  --text-disabled: #575b6d;
 
-  /* ── Accent, named honestly ─────────────────────────────────────────────
-   * The old name was --cyan holding #e0563f. A variable named cyan holding a
-   * red-orange makes every future reader — human or model — reason wrongly
-   * about the system.
+  /* ── Accent: one violet, used twice ─────────────────────────────────────
+   * 2A's --accent with its own darker ramp (acc7/acc8/acc9) for hovers,
+   * fills and washes.
    *
-   * RULE: filled accent appears at most twice per screen, and never as an
-   * outline. One saturated colour ringing seven unrelated objects collapses
-   * hierarchy; that is what reads as generated.
+   * RULE (carried over, unchanged): filled accent appears at most twice per
+   * screen and never as an outline. One saturated colour ringing seven
+   * unrelated objects collapses hierarchy; that is what reads as generated.
    */
-  --accent: #e8573d;
-  --accent-hover: #f2694f;
-  --accent-active: #d14a31;
-  --accent-subtle: rgba(232, 87, 61, 0.1);
-  --accent-border: rgba(232, 87, 61, 0.28);
-  --accent-glow: rgba(232, 87, 61, 0.22);
-  --on-accent: #fff6f3;
+  --accent: #9184d9;
+  --accent-hover: #a396e4;
+  --accent-active: #5d5294;
+  --accent-subtle: rgba(145, 132, 217, 0.1);
+  --accent-border: rgba(145, 132, 217, 0.3);
+  --accent-glow: rgba(145, 132, 217, 0.22);
+  /* Dark-on-violet: #9184d9 is a mid-luminance fill, so the canvas ink beats
+     white for contrast on any filled accent surface. */
+  --on-accent: #161826;
 
-  /* Agent identity — functional status (which specialist answered), muted to
-     sit with the accent rather than compete with it. */
-  --agent-manager: #e8573d;
-  --agent-code: #d9924f;
-  --agent-brain: #c4a94a;
-  --agent-vision: #9689c4;
-  --agent-design: #c47399;
-  --agent-router: #6493c4;
+  /* Agent identity — functional status (which specialist answered), tuned to
+     sit around the violet accent rather than compete with it. */
+  --agent-manager: #9184d9;
+  --agent-code: #6f9fd8;
+  --agent-brain: #7bc0b4;
+  --agent-vision: #c08bd0;
+  --agent-design: #d68fa8;
+  --agent-router: #8f97b8;
 
-  --success: #4faf7c;
+  --success: #63b98d;
   --warning: #d9a03c;
-  --danger: #d9556a;
+  --danger: #dd6377;
 
-  /* ── Type: one sans; mono only for code, counters, latency ──────────────
-   * Public Sans leads rather than Inter: Inter is the single most saturated
-   * face in this category, and the project's own design rules ban it. The
-   * audit's actual requirement — ONE sans, mono out of the chrome — is met
-   * either way, and Public Sans is already loaded so this costs nothing.
+  /* Status frames. A status block carries its state in the colour of its whole
+     1px frame, not in a thick slab down one edge — a coloured side-tab is a
+     decoration sitting on top of the structure rather than part of it, and it
+     contradicts 2A's own rule that the frame IS the structure. Mixed toward the
+     neutral border so the tint reads as a tone of the line, never as a second
+     accent competing with the violet. */
+  --warning-border: color-mix(in oklab, var(--warning) 42%, var(--border-default));
+  --danger-border: color-mix(in oklab, var(--danger) 42%, var(--border-default));
+
+  /* ── Type: one sans; mono only for technical data ───────────────────────
+   * 2A sets every surface in Inter and every piece of machine-generated data
+   * — model ids, slot names, latencies, circuit states, log lines — in the
+   * platform mono stack. Mono is doing its real job here (columns of data
+   * that must align) rather than dressing chrome up as "technical".
    */
-  --font-sans: 'Public Sans', system-ui, -apple-system, sans-serif;
-  --font-mono: 'Martian Mono', ui-monospace, monospace;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  /* The serif option in Settings › Appearance › Chat font. */
+  --font-serif: Georgia, 'Times New Roman', serif;
 
   /* Fixed steps. The previous scale derived every size from --text-base via
      calc(), which produced fractional computed values (9.828, 11.06, 12.446,
@@ -107,16 +129,22 @@
   --track-body: 0;
   --track-caps: 0.08em;
 
-  /* ── Radius: the highest-leverage change ────────────────────────────────
-   * Sharp corners + near-black + a saturated accent is the visual signature
-   * of a terminal template. Every premium AI surface uses generous radii.
+  /* ── Radius: 2A's tight scale ───────────────────────────────────────────
+   * 2A tops out at 14px and lives mostly at 2-8px. The earlier note here
+   * argued for generous radii because sharp corners plus near-black plus a
+   * saturated accent reads as a terminal template — that reasoning held for
+   * the near-black ground it was written against. 2A changes the premise:
+   * the ground is a cool indigo, the accent is a soft violet, and tight
+   * corners are the "Industry rigor" half of the direction doing its job.
+   * Radius is no longer the thing keeping this from reading as a terminal.
    */
-  --r-xs: 4px;
-  --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 20px;
-  --r-2xl: 28px;
+  --r-xs: 2px;
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+  --r-xl: 8px;
+  --r-2xl: 12px;
+  --r-panel: 14px;
   --r-full: 999px;
 
   --sp-1: 4px;
@@ -186,9 +214,9 @@
   --c-vision: var(--agent-vision);
   --c-design: var(--agent-design);
   --c-router: var(--agent-router);
-  --accent-rgb: 232, 87, 61;
-  --mint-rgb: 79, 175, 124;
-  --text-rgb: 236, 236, 241;
+  --accent-rgb: 145, 132, 217;
+  --mint-rgb: 99, 185, 141;
+  --text-rgb: 233, 233, 237;
 
   --font-display: var(--font-sans);
   --font-body: var(--font-sans);
@@ -242,47 +270,55 @@
  * every rule above are unchanged.
  */
 [data-theme='studio'] {
-  --bg-canvas: #f6f6f7;
+  /* 2A: "Paper ground, same accent, same rules." The violet darkens to hold
+     4.5:1 on paper — the dark theme's #9184d9 is a mid-luminance fill and
+     fails that on white — but it is the same hue, and every rule above is
+     unchanged. */
+  --bg-canvas: #f4f4f7;
   --bg-surface: #ffffff;
   --bg-raised: #ffffff;
   --bg-overlay: #ffffff;
-  --bg-inset: #f0f0f2;
+  --bg-inset: #eeeef2;
 
-  --border-subtle: rgba(16, 16, 22, 0.06);
-  --border-default: rgba(16, 16, 22, 0.1);
-  --border-strong: rgba(16, 16, 22, 0.16);
+  --border-subtle: #e5e5ec;
+  --border-default: #d8d8e2;
+  --border-strong: #c2c2d0;
 
-  --text-primary: #1a1a1f;
-  --text-secondary: #5c5c68;
-  --text-tertiary: #8a8a96;
-  --text-disabled: #b4b4bd;
+  --text-primary: #1a1a24;
+  --text-secondary: #5c5c70;
+  --text-tertiary: #8a8a9c;
+  --text-disabled: #b4b4c2;
 
-  --accent: #d1452b;
-  --accent-hover: #b93a23;
-  --accent-active: #a33220;
-  --accent-subtle: rgba(209, 69, 43, 0.08);
-  --accent-border: rgba(209, 69, 43, 0.26);
-  --accent-glow: rgba(209, 69, 43, 0.18);
+  --accent: #5a4bab;
+  --accent-hover: #4c3f93;
+  --accent-active: #423a6a;
+  --accent-subtle: rgba(90, 75, 171, 0.08);
+  --accent-border: rgba(90, 75, 171, 0.26);
+  --accent-glow: rgba(90, 75, 171, 0.18);
+  --on-accent: #ffffff;
 
-  --agent-manager: #d1452b;
-  --agent-code: #b45309;
-  --agent-brain: #8a6410;
-  --agent-vision: #6d4bb8;
+  --agent-manager: #5a4bab;
+  --agent-code: #2a5fa8;
+  --agent-brain: #1f7a6b;
+  --agent-vision: #8b3fa0;
   --agent-design: #a83a6d;
-  --agent-router: #2a5fa8;
+  --agent-router: #4a5478;
 
   --success: #2f7d55;
   --warning: #8a6410;
   --danger: #b03349;
+
+  --warning-border: color-mix(in oklab, var(--warning) 42%, var(--border-default));
+  --danger-border: color-mix(in oklab, var(--danger) 42%, var(--border-default));
 
   --e-1: 0 1px 2px rgba(16, 16, 22, 0.06);
   --e-2: 0 1px 2px rgba(16, 16, 22, 0.06), 0 4px 12px -2px rgba(16, 16, 22, 0.08);
   --e-3: 0 2px 4px rgba(16, 16, 22, 0.07), 0 12px 32px -6px rgba(16, 16, 22, 0.12);
   --e-4: 0 4px 8px rgba(16, 16, 22, 0.08), 0 24px 56px -10px rgba(16, 16, 22, 0.16);
 
-  --accent-rgb: 209, 69, 43;
+  --accent-rgb: 90, 75, 171;
   --mint-rgb: 47, 125, 85;
-  --text-rgb: 26, 26, 31;
+  --text-rgb: 26, 26, 36;
 }
 
 /* ── Appearance preferences ──────────────────────────────────────────── */
@@ -307,7 +343,7 @@
   --font-chat: var(--font-mono);
 }
 [data-chat-font='serif'] {
-  --font-chat: Georgia, 'Times New Roman', serif;
+  --font-chat: var(--font-serif);
 }
 
 [data-motion='off'] *,
