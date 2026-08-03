@@ -29,6 +29,24 @@
         ],
         "createdAt": "2026-07-29T08:00:18.593Z",
         "reason": "Ambient HUD-terminal background grid, deliberate cyan-scanline identity; user confirmed keep"
+      },
+      {
+        "rule": "overused-font",
+        "value": "Inter",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-08-03T00:00:00.000Z",
+        "reason": "Direction 2A (\"Nocturne ground, Industry rigor\") specifies Inter site-wide, read directly from the approved Claude Design project token spec, not a default; user confirmed intentional"
+      },
+      {
+        "rule": "single-font",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-08-03T00:00:00.000Z",
+        "reason": "2A carries hierarchy via weight/size/tracking on one family (Inter) plus mono for technical data, not a second display face; user confirmed intentional"
       }
     ]
   }
