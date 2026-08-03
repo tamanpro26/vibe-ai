@@ -13,7 +13,6 @@ export default function Sidebar({
   open,
   onClose,
   onOpenSettings,
-  onOpenProjects,
   onOpenRegistry,
 }) {
   const { user, logout } = useAuth()
@@ -65,10 +64,10 @@ export default function Sidebar({
           <button className="newchat-btn" onClick={onNew}>
             + New chat
           </button>
-          <button className="newproject-btn" onClick={onOpenProjects}>
-            {/* Distinct from "New chat" in kind, not just in label: this hands
-                the task to the autonomous coding agent, which writes files and
-                returns a downloadable project rather than a reply. */}
+          {/* A real link, not a modal trigger: Projects is its own page
+              (#/projects), reached the same way Chat and the landing page
+              are -- a navigation, not an overlay stacked on top of chat. */}
+          <a className="newproject-btn" href="#/projects">
             <svg viewBox="0 0 16 16" aria-hidden="true" className="newproject-icon">
               <path
                 d="M1.5 4.2A1.2 1.2 0 0 1 2.7 3h3.1l1.4 1.6h5.1a1.2 1.2 0 0 1 1.2 1.2v6.4a1.2 1.2 0 0 1-1.2 1.2H2.7a1.2 1.2 0 0 1-1.2-1.2Z"
@@ -80,7 +79,7 @@ export default function Sidebar({
               <path d="M8 7.6v3.6M6.2 9.4h3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
             New project
-          </button>
+          </a>
           <input
             className="sidebar-search"
             type="search"

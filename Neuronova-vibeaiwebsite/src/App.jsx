@@ -11,6 +11,7 @@ import Footer from './components/Footer.jsx'
 import { AuthProvider, useAuth } from './chat/auth.jsx'
 import AuthPage from './chat/AuthPage.jsx'
 import ChatApp from './chat/ChatApp.jsx'
+import ProjectsPage from './chat/ProjectsPage.jsx'
 import useLenis from './useLenis.js'
 import './App.css'
 import './chat/chat.css'
@@ -87,25 +88,25 @@ function Landing() {
   )
 }
 
-function ChatShell({ initialAuthMode }) {
+// Shared by every authed route (chat, projects): resolve the Clerk session
+// once, show the same page either way, and gate on sign-in identically.
+function Authed({ initialAuthMode, children }) {
   const { user, isLoaded } = useAuth()
   // Clerk resolves an existing session asynchronously; without this guard a
   // signed-in user would flash the login page for a frame on every reload.
   if (!isLoaded) return <div className="auth-loading" aria-hidden="true" />
-  // Once Clerk reports a signed-in user, this swaps to ChatApp on its own
-  // re-render -- the "redirect to chat" the nav buttons promise is just this
-  // same-component swap, not a separate navigation step.
-  return user ? <ChatApp /> : <AuthPage initialMode={initialAuthMode} />
+  return user ? children : <AuthPage initialMode={initialAuthMode} />
 }
 
 export default function App() {
   const hash = useHashRoute()
-  const isChat = hash.startsWith('#/chat')
+  const isProjects = hash.startsWith('#/projects')
+  const isChat = !isProjects && hash.startsWith('#/chat')
   const initialAuthMode = hash.startsWith('#/chat/signup') ? 'signup' : 'login'
 
-  return (
-    <AuthProvider>
-      {isChat ? <ChatShell initialAuthMode={initialAuthMode} /> : <Landing />}
-    </AuthProvider>
-  )
+  let page = <Landing />
+  if (isProjects) page = <Authed initialAuthMode={initialAuthMode}><ProjectsPage /></Authed>
+  else if (isChat) page = <Authed initialAuthMode={initialAuthMode}><ChatApp /></Authed>
+
+  return <AuthProvider>{page}</AuthProvider>
 }

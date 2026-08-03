@@ -2422,15 +2422,12 @@
   flex: none;
 }
 
-.proj-dialog {
+/* Projects is a full page now (#/projects), not a dialog -- content sits
+   directly in .chat-scroll like everything else on that shell, just capped
+   to a comfortable reading width instead of stretching edge to edge. */
+.proj-page {
   max-width: 720px;
-}
-
-/* Projects is a single pane, not the nav+pane split Settings uses. */
-.proj-pane {
-  width: 100%;
-  max-height: min(84vh, 860px);
-  overflow-y: auto;
+  margin: 0 auto;
 }
 
 .proj-lede {
