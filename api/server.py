@@ -508,6 +508,48 @@ async def health() -> dict:
         "frames_format": "v1",
     }
 
+@app.get("/api/registry")
+async def registry_listing() -> dict:
+    """The real model roster, for the web app's Registry surface.
+
+    Read straight off MODEL_REGISTRY rather than from a copied list in the
+    frontend: the site's registry/provider counts are claims about this
+    system, and a hand-maintained duplicate is exactly how they go stale. The
+    frontend previously carried its own hardcoded provider array for this.
+
+    Unauthenticated on purpose -- this is the same public capability inventory
+    the landing page already advertises (model ids, providers, roles, context
+    windows). It exposes no keys, no prompts and no user data, and gating it
+    would just mean the marketing numbers could not be sourced from the truth.
+    """
+    from config.models_config import MODEL_REGISTRY
+
+    entries = [
+        {
+            "model_id": m.model_id,
+            "provider": m.provider,
+            "api_model": m.api_model,
+            "team": m.team,
+            "role": m.role,
+            "context_window": m.context_window,
+            "capabilities": list(m.capabilities or []),
+        }
+        for m in MODEL_REGISTRY.values()
+    ]
+    providers = sorted({m["provider"] for m in entries})
+    return {
+        "entries": entries,
+        "count": len(entries),
+        # Distinct endpoints, not entry count: several entries deliberately
+        # point at the same upstream model under different roles, and
+        # reporting only the entry count overstates how many distinct models
+        # actually back the system.
+        "distinct_endpoints": len({(m["provider"], m["api_model"]) for m in entries}),
+        "providers": providers,
+        "provider_count": len(providers),
+    }
+
+
 @app.get("/api/bus/stats")
 async def bus_stats() -> dict:
     return bus.stats()
@@ -647,6 +689,16 @@ class AgentRequest(BaseModel):
     # the agent from inventing an unrelated theme for an existing project).
     context:    str = ""
     history:    list[dict] = Field(default_factory=list)
+    # When true, the response carries each written file's actual TEXT, not just
+    # its path. The web Projects surface needs this: AgentResult reports paths
+    # only, and a browser cannot read the server's disk, so without it there is
+    # nothing to put in a downloadable zip.
+    include_files: bool = False
+
+
+class ProjectFile(BaseModel):
+    path:    str
+    content: str
 
 
 class AgentResponse(BaseModel):
@@ -658,6 +710,58 @@ class AgentResponse(BaseModel):
     iterations:     int
     total_ms:       float
     workspace:      str
+    files:          list[ProjectFile] = Field(default_factory=list)
+    files_truncated: bool = False
+
+
+# Caps exist because this returns file bodies over HTTP to a browser. A runaway
+# agent that writes a 400 MB log, or a task that npm-installs before anyone can
+# stop it, must not become a 400 MB JSON response.
+_MAX_PROJECT_FILES = 60
+_MAX_PROJECT_BYTES = 2_000_000       # 2 MB of text in total
+_MAX_ONE_FILE_BYTES = 256_000        # skip any single file larger than this
+_SKIP_PROJECT_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv"}
+
+
+def _collect_project_files(workspace: str, paths: list[str]) -> tuple[list[dict], bool]:
+    """Read back the files an agent run wrote, for the downloadable zip.
+
+    Only reads paths the agent itself reported, and only when they resolve
+    INSIDE the run's own workspace -- the reported path is agent-controlled
+    text, so it is treated as untrusted input and containment-checked rather
+    than opened directly. Returns (files, truncated).
+    """
+    root = Path(workspace).resolve()
+    out: list[dict] = []
+    total = 0
+    truncated = False
+
+    for rel in dict.fromkeys(paths):          # dedupe, preserve order
+        if len(out) >= _MAX_PROJECT_FILES:
+            truncated = True
+            break
+        candidate = Path(rel)
+        target = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        # Containment: a reported path of "../../.env" or an absolute path
+        # elsewhere on disk must never be served.
+        if not target.is_relative_to(root) or not target.is_file():
+            continue
+        if _SKIP_PROJECT_DIRS.intersection(target.relative_to(root).parts):
+            continue
+        try:
+            if target.stat().st_size > _MAX_ONE_FILE_BYTES:
+                truncated = True
+                continue
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue                          # binary or unreadable: not zip content
+        total += len(text.encode("utf-8"))
+        if total > _MAX_PROJECT_BYTES:
+            truncated = True
+            break
+        out.append({"path": target.relative_to(root).as_posix(), "content": text})
+
+    return out, truncated
 
 
 @app.post("/api/agent", response_model=AgentResponse, dependencies=[Depends(require_token)])
@@ -688,6 +792,13 @@ async def run_agent(req: AgentRequest) -> dict:
         history=req.history,
     )
 
+    files: list[dict] = []
+    files_truncated = False
+    if req.include_files:
+        files, files_truncated = _collect_project_files(
+            result.workspace, result.files_created + result.files_edited
+        )
+
     return {
         # "ok" to match every other status-bearing route (/api/video,
         # /api/screenshot) -- found in code review (2026-07-13) that this
@@ -700,6 +811,8 @@ async def run_agent(req: AgentRequest) -> dict:
         "iterations":      result.iterations,
         "total_ms":        round(result.total_ms),
         "workspace":       result.workspace,
+        "files":           files,
+        "files_truncated": files_truncated,
     }
 
 

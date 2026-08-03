@@ -3443,6 +3443,37 @@ class TestSensorAlertThreshold:
         assert response.device_plan is None
 
 
+class TestScaffoldLoader:
+    """config/scaffold_loader.py is the vibe-loop optimization skill's only
+    rewritable surface. Its one job -- override when VIBE_SCAFFOLD_CONFIG names
+    a key, fall back to the caller's default otherwise -- must hold exactly, or
+    a loop iteration silently tests the wrong prompt."""
+
+    def test_missing_env_var_returns_default(self, monkeypatch):
+        monkeypatch.delenv("VIBE_SCAFFOLD_CONFIG", raising=False)
+        from config.scaffold_loader import get_prompt
+        assert get_prompt("ANYTHING", "the default text") == "the default text"
+
+    def test_override_file_wins_over_default(self, tmp_path, monkeypatch):
+        import json
+        from config.scaffold_loader import get_prompt, _load
+
+        cfg = tmp_path / "scaffold.json"
+        cfg.write_text(json.dumps({"FAST_SYSTEM": "overridden"}), encoding="utf-8")
+        monkeypatch.setenv("VIBE_SCAFFOLD_CONFIG", str(cfg))
+        _load.cache_clear()  # a prior test may have cached a different path's content
+
+        assert get_prompt("FAST_SYSTEM", "default") == "overridden"
+        # A key the override file doesn't mention still falls back cleanly.
+        assert get_prompt("CODE_SYSTEM", "default") == "default"
+
+    def test_missing_override_file_returns_default(self, tmp_path, monkeypatch):
+        from config.scaffold_loader import get_prompt, _load
+        monkeypatch.setenv("VIBE_SCAFFOLD_CONFIG", str(tmp_path / "does_not_exist.json"))
+        _load.cache_clear()
+        assert get_prompt("FAST_SYSTEM", "default") == "default"
+
+
 class TestPromptTeamOverride:
     """/api/prompt's 'team' field (the website's 'Route to team' selector)
     must be validated at the API boundary -- a bad value (the UI's own
@@ -3477,6 +3508,111 @@ class TestPromptTeamOverride:
         for bad in ("auto", "leadership", "not-a-team", None):
             asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(prompt="x", team=bad)))
         assert captured == [None, None, None, None]
+
+
+class TestProjectFileCollection:
+    """/api/agent's include_files reads agent-reported paths off disk and ships
+    their contents to a browser. The reported path is agent-controlled text, so
+    it is untrusted input: anything resolving outside the run's own workspace
+    must never be served, however it is spelled."""
+
+    def _ws(self, tmp_path):
+        ws = tmp_path / "workspace"
+        (ws / "app").mkdir(parents=True)
+        (ws / "app" / "main.py").write_text("print('hi')", encoding="utf-8")
+        (ws / "README.md").write_text("# project", encoding="utf-8")
+        return ws
+
+    def test_collects_reported_files_with_relative_posix_paths(self, tmp_path):
+        from api.server import _collect_project_files
+
+        ws = self._ws(tmp_path)
+        files, truncated = _collect_project_files(str(ws), ["app/main.py", "README.md"])
+
+        assert not truncated
+        assert [f["path"] for f in files] == ["app/main.py", "README.md"]
+        assert files[0]["content"] == "print('hi')"
+
+    def test_path_traversal_is_refused(self, tmp_path):
+        from api.server import _collect_project_files
+
+        ws = self._ws(tmp_path)
+        secret = tmp_path / "secret.env"
+        secret.write_text("API_KEY=hunter2", encoding="utf-8")
+
+        files, _ = _collect_project_files(
+            str(ws), ["../secret.env", str(secret), "app/../../secret.env"]
+        )
+        assert files == []
+
+    def test_duplicate_paths_are_collected_once(self, tmp_path):
+        from api.server import _collect_project_files
+
+        ws = self._ws(tmp_path)
+        files, _ = _collect_project_files(str(ws), ["README.md", "README.md"])
+        assert len(files) == 1
+
+    def test_skipped_dirs_and_missing_paths_are_ignored(self, tmp_path):
+        from api.server import _collect_project_files
+
+        ws = self._ws(tmp_path)
+        (ws / "node_modules" / "x").mkdir(parents=True)
+        (ws / "node_modules" / "x" / "index.js").write_text("junk", encoding="utf-8")
+
+        files, _ = _collect_project_files(
+            str(ws), ["node_modules/x/index.js", "does_not_exist.py", "README.md"]
+        )
+        assert [f["path"] for f in files] == ["README.md"]
+
+    def test_oversized_file_is_skipped_and_flagged(self, tmp_path, monkeypatch):
+        import api.server as server_mod
+
+        ws = self._ws(tmp_path)
+        monkeypatch.setattr(server_mod, "_MAX_ONE_FILE_BYTES", 4)
+
+        files, truncated = server_mod._collect_project_files(str(ws), ["README.md"])
+        assert files == []
+        assert truncated is True
+
+
+class TestRegistryListing:
+    """/api/registry is what the website's Registry surface reads. It must be
+    sourced from MODEL_REGISTRY itself, never a copy -- a hand-maintained
+    duplicate in the frontend is exactly how the site's own numbers go stale."""
+
+    def test_counts_match_the_live_registry(self):
+        import asyncio
+        from api.server import registry_listing
+        from config.models_config import MODEL_REGISTRY
+
+        data = asyncio.run(registry_listing())
+
+        assert data["count"] == len(MODEL_REGISTRY)
+        assert len(data["entries"]) == len(MODEL_REGISTRY)
+        # Distinct endpoints must be reported separately from slot count:
+        # several slots deliberately share one upstream model, so reporting
+        # only the slot count overstates how many real models back the system.
+        expected_endpoints = len({(m.provider, m.api_model) for m in MODEL_REGISTRY.values()})
+        assert data["distinct_endpoints"] == expected_endpoints
+        assert data["distinct_endpoints"] <= data["count"]
+        assert data["provider_count"] == len(data["providers"]) == len(set(data["providers"]))
+
+    def test_entries_expose_capability_fields_only(self):
+        """The route is deliberately unauthenticated, so the payload is pinned
+        to an exact field allowlist. ModelSpec also carries api_key_field,
+        extra_body and request_timeout_s; none of those belong in a public
+        capability listing, and this fails if a future field is added to the
+        spec and forwarded here without being considered."""
+        import asyncio
+        from api.server import registry_listing
+
+        data = asyncio.run(registry_listing())
+        allowed = {
+            "model_id", "provider", "api_model", "team", "role",
+            "context_window", "capabilities",
+        }
+        for entry in data["entries"]:
+            assert set(entry) == allowed
 
 
 class TestVibemindFsReadAuth:

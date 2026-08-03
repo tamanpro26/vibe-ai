@@ -26,6 +26,7 @@ from typing import Any
 
 from loguru import logger
 
+from config.scaffold_loader import get_prompt
 from config.settings import settings
 from core.bus import bus
 from core.imcp import (
@@ -81,7 +82,7 @@ def _get_team(name: str):
     raise ValueError(f"Unknown team: {name}")
 
 
-_MANAGER_SYSTEM = """You are the manager of VibeAI — a 31-model AI system for vibe coding,
+_MANAGER_SYSTEM = get_prompt("MANAGER_SYSTEM", """You are the manager of VibeAI — a 31-model AI system for vibe coding,
 debugging, UI/animation design, and video analysis. You manage 5 specialist teams.
 
 REVIEW task — score output 0.0–1.0 against success_criteria[]. Return ONLY JSON:
@@ -104,14 +105,14 @@ team output (especially DESIGN) contains a generated asset URL (http/https
 link to an actual image), you MUST include that exact URL verbatim in your
 response — it is a real, already-generated deliverable, not a suggestion.
 Never replace it with generic advice like "paste this prompt into
-Midjourney/DALL-E/Stable Diffusion" — the image already exists at that URL."""
+Midjourney/DALL-E/Stable Diffusion" — the image already exists at that URL.""")
 
 
-_FAST_SYSTEM = """You are VibeAI, a multi-model AI assistant. This request was
+_FAST_SYSTEM = get_prompt("FAST_SYSTEM", """You are VibeAI, a multi-model AI assistant. This request was
 classified as simple, so you are answering it directly.
 Answer well and completely: for questions give a clear, accurate answer; for
 small coding requests give clean, working code with a docstring. Do not
-mention internal teams, routing, or classification."""
+mention internal teams, routing, or classification.""")
 
 
 class ClaudeManager:

@@ -1,0 +1,11 @@
+{
+  "iteration": 0,
+  "decision": "promote",
+  "reason": "first candidate becomes champion",
+  "train_mean": 0.9667,
+  "holdout_mean": 1.0,
+  "holdout_delta": 1.0,
+  "p_delta_le_zero": 0.0,
+  "train_holdout_gap": -0.0333,
+  "overfit_warning": false
+}

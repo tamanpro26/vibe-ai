@@ -84,6 +84,48 @@ def test_best_of_n_skips_judge_when_one_candidate_executes():
     assert "def add" in result
 
 
+def test_extract_python_ignores_repl_transcript_fence():
+    """A debug answer routinely carries a SECOND fence showing usage as a bare
+    `>>>` transcript ("show the minimal failing case") alongside the real fix.
+    Concatenating every fence (the old behaviour) glued that onto the real
+    code -- `>>>` isn't valid top-level Python, so a correct fix was reported
+    as broken. Found live via vibe-loop: 5/21 real train answers hit exactly
+    this, all with otherwise-correct fixes."""
+    from teams.code import _extract_python
+
+    answer = (
+        "**Minimal failing case**\n\n"
+        "```python\n>>> factorial(0)\n1\n```\n\n"
+        "**Corrected code**\n\n"
+        "```python\ndef factorial(n):\n    if n <= 1:\n        return 1\n"
+        "    return n * factorial(n - 1)\n```\n\n"
+        "Now it works:\n\n"
+        "```python\n>>> factorial(0)\n1\n>>> factorial(5)\n120\n```\n"
+    )
+    code = _extract_python(answer)
+    compile(code, "<t>", "exec")  # must not raise -- old code raised SyntaxError here
+    assert "def factorial" in code
+    assert ">>>" not in code
+
+
+def test_extract_python_ignores_undefined_reference_demo_fence():
+    """The transcript case above is one shape of the same bug; this is the
+    other -- a plain (non `>>>`) usage demo fence that references a class
+    defined in a LATER fence, which reads as NameError once concatenated."""
+    from teams.code import _extract_python
+
+    answer = (
+        "```python\ninv = Inventory()\ninv.add('apple', 3)\n```\n\n"
+        "### Full corrected code\n\n"
+        "```python\nclass Inventory:\n    def __init__(self):\n        self.items = {}\n\n"
+        "    def add(self, name, qty):\n        self.items[name] = self.items.get(name, 0) + qty\n```\n"
+    )
+    code = _extract_python(answer)
+    ns = {}
+    exec(compile(code, "<t>", "exec"), ns)  # must not raise NameError
+    assert "class Inventory" in code
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

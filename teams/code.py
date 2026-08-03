@@ -26,6 +26,7 @@ from typing import Any
 
 from loguru import logger
 
+from config.scaffold_loader import get_prompt
 from core.confidence_cascade import run_cascade
 from core.imcp import TaskJSON, TaskType, Complexity
 from core.peer_consult import with_confidence_invite
@@ -72,8 +73,31 @@ def _cache_put(instruction: str, result: str) -> None:
 # ── Code analysis helpers ──────────────────────────────────────────────────────
 
 def _extract_python(text: str) -> str:
-    blocks = re.findall(r"```python\s*([\s\S]*?)```", text)
-    return "\n\n".join(b.strip() for b in blocks).strip()
+    """Pick the one fenced block that is the actual answer.
+
+    _DEBUG_SYSTEM asks the model to "show the minimal failing case" alongside
+    the fix, and _CODE_SYSTEM's own docstring convention often adds a doctest
+    Examples block -- both routinely put a second, illustrative ```python
+    fence in the same response (a bare `>>>` transcript, or a short before/
+    after snippet). Concatenating every fence (the previous behaviour) glues
+    that illustration onto the real code: a bare `>>>` line is not valid
+    top-level Python, and a demo fence that calls a class/function defined in
+    a LATER fence raises NameError -- both false failures on code that is
+    actually correct. Confirmed live via vibe-loop: 5 of 21 train tasks in one
+    baseline "failed" this way, all 5 passing once isolated to their real
+    fenced block.
+
+    Fix: drop fences that are bare `>>>` transcripts, then take the single
+    LARGEST remaining fence. The real corrected/complete code is reliably the
+    most substantial block; illustrative snippets are short by construction.
+    Falls back to the largest raw fence if every fence looks like a transcript
+    (better than returning nothing).
+    """
+    blocks = [b.strip() for b in re.findall(r"```python\s*([\s\S]*?)```", text)]
+    if not blocks:
+        return ""
+    real = [b for b in blocks if not re.match(r"^\s*>>>", b)] or blocks
+    return max(real, key=len)
 
 
 def _syntax_error(code: str) -> str | None:
@@ -104,20 +128,20 @@ def _needs_review(code: str) -> bool:
 
 # ── System prompts ─────────────────────────────────────────────────────────────
 
-_CODE_SYSTEM = """You are part of the Code team in VibeAI.
+_CODE_SYSTEM = get_prompt("CODE_SYSTEM", """You are part of the Code team in VibeAI.
 Write clean, production-ready code. Always include:
 - Proper error handling
 - Meaningful variable names
 - Comments for complex logic
-For debugging: identify the exact bug, explain why it occurs, provide the fix."""
+For debugging: identify the exact bug, explain why it occurs, provide the fix.""")
 
-_DEBUG_SYSTEM = """You are a debugging specialist in VibeAI.
+_DEBUG_SYSTEM = get_prompt("DEBUG_SYSTEM", """You are a debugging specialist in VibeAI.
 When given an error or bug:
 1. Identify the exact cause
 2. Show the minimal failing case
 3. Provide the exact fix
 4. Explain why the fix works
-Always provide the complete corrected code, not just the changed lines."""
+Always provide the complete corrected code, not just the changed lines.""")
 
 
 class CodeTeam(BaseTeam):

@@ -16,15 +16,16 @@ from typing import Any
 
 from loguru import logger
 
+from config.scaffold_loader import get_prompt
 from core.imcp import TaskJSON, Complexity
 from core.peer_consult import with_confidence_invite
 from teams.base_team import BaseTeam
 
 
-_BRAIN_SYSTEM = """You are part of the Brain team in VibeAI — a 31-model AI system.
+_BRAIN_SYSTEM = get_prompt("BRAIN_SYSTEM", """You are part of the Brain team in VibeAI — a 31-model AI system.
 Your role is strategic: break down complex tasks, plan execution order,
 identify dependencies, and verify that all success criteria will be met.
-Think step by step. Be specific about what each specialist team should do."""
+Think step by step. Be specific about what each specialist team should do.""")
 
 
 class BrainTeam(BaseTeam):

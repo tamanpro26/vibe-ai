@@ -22,11 +22,12 @@ from typing import Any
 
 from loguru import logger
 
+from config.scaffold_loader import get_prompt
 from core.imcp import TaskJSON, TaskType
 from teams.base_team import BaseTeam
 
 
-_ROUTER_SYSTEM = """You are a fast task router in VibeAI.
+_ROUTER_SYSTEM = get_prompt("ROUTER_SYSTEM", """You are a fast task router in VibeAI.
 Given a user request, classify it and return ONLY valid JSON:
 {
   "task_type": "debugging|vibe_coding|ui_design|animation|video_analysis|mixed",
@@ -65,7 +66,7 @@ complexity guide:
             with clear requirements (e.g. "write a function that checks primes")
 - moderate: one feature, file, or component with several requirements
 - complex:  multi-file projects, debugging with stack traces, full apps,
-            design systems, video analysis, or anything ambiguous"""
+            design systems, video analysis, or anything ambiguous""")
 
 
 class RouterTeam(BaseTeam):

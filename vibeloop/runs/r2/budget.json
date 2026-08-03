@@ -1,0 +1,13 @@
+{
+  "bugs": {},
+  "spend": [
+    {
+      "iteration": 1,
+      "calls": 0,
+      "tokens": 0,
+      "at": "2026-08-03T20:18:03"
+    }
+  ],
+  "halted": false,
+  "halt_reason": null
+}
