@@ -2,20 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import { useAuth } from './auth.jsx'
 import { loadChats, saveChats, newConversation, newId, titleFrom } from './store.js'
+import { dispatchEngineReply, continueOmni, continueEdge, DEFAULT_MODE } from './engine.js'
+import { useEngineProbe } from './useEngineProbe.js'
 import {
-  respond,
-  respondLive,
-  checkLive,
-  respondTeam,
-  checkTeam,
-  respondOmni,
-  checkOmni,
-  respondEdge,
-  checkEdge,
-  continueOmni,
-  continueEdge,
-  DEFAULT_MODE,
-} from './engine.js'
+  startRun,
+  cancelRun,
+  clearRun,
+  runningIds,
+  finishedRuns,
+  failedRuns,
+  subscribeRuns,
+} from './runRegistry.js'
 import Sidebar from './Sidebar.jsx'
 import SettingsModal from './SettingsModal.jsx'
 import RegistryPanel from './RegistryPanel.jsx'
@@ -80,7 +77,10 @@ export default function ChatApp() {
   const [activeId, setActiveId] = useState(() => loadChats(user.id)[0]?.id ?? null)
   const [team, setTeam] = useState('auto')
   const [mode, setMode] = useState(DEFAULT_MODE)
-  const [streaming, setStreaming] = useState(false)
+  // Which conversation is mid-typewriter, if any. Distinct from `running`
+  // (a request in flight) because the animation is purely local decoration
+  // replayed over an already-complete, already-saved string.
+  const [typingId, setTypingId] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [registryOpen, setRegistryOpen] = useState(false)
@@ -88,9 +88,10 @@ export default function ChatApp() {
   const [dragging, setDragging] = useState(false)
 
   // Composed personalization prompt. Held in a ref, not state, for the same
-  // reason engineRef exists below: dispatchReply is async and would otherwise
-  // capture a stale value from the render it started in, so a preference
-  // changed mid-conversation would not apply until some later re-render.
+  // reason useEngineProbe's engineRef exists: dispatchReply is async and
+  // would otherwise capture a stale value from the render it started in, so
+  // a preference changed mid-conversation would not apply until some later
+  // re-render.
   const systemPromptRef = useRef('')
 
   const refreshSettings = () => {
@@ -108,62 +109,29 @@ export default function ChatApp() {
     refreshSettings()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id])
-  const [live, setLive] = useState(false)
-  // Named distinctly from `team` (the routing selector above) -- this is
-  // whether the real Manager/Council is reachable via api/team.js, not
+  // `live`/`manager`/`omni`/`edge` here are whether each real engine tier is
+  // reachable -- distinct from `team` (the routing selector above), which is
   // which team a task routes to.
-  const [manager, setManager] = useState(false)
-  const [omni, setOmni] = useState(false)
-  const [edge, setEdge] = useState(false)
+  const probe = useEngineProbe()
+  const { live, manager, omni, edge } = probe
   const timerRef = useRef(null)
-  const stopRef = useRef(false)
   const dragDepth = useRef(0)
   const scrollRef = useRef(null)
-  // Mirrors live/manager/omni/edge state, updated synchronously (no waiting
-  // on a React re-render) so dispatchReply can always read the freshest
-  // known values -- see probeRef below for why this exists.
-  const engineRef = useRef({ live: false, manager: false, omni: false, edge: false })
-  // Holds the currently in-flight probe's promise. A message sent in the
-  // first couple seconds after page load can race ahead of the very first
-  // health-check probe (it's a real network round trip, not instant) --
-  // without this, dispatchReply would see the initial `false` defaults and
-  // fall straight to the simulated engine even though everything actually
-  // works, just a moment too early to know it yet. Reproduced live: sending
-  // "wassup" immediately on page load hit "[CB] no live engine reachable"
-  // despite every tier being confirmed working seconds later.
-  const probeRef = useRef(null)
-
-  // Probe all four engines; re-check so starting a local server (or the
-  // edge function / team proxy going live on deploy) upgrades the chat
-  // without a reload. Probed in parallel: a down server costs a full
-  // timeout, and serially that would quadruple the delay.
+  // Ids with a reply in flight. A conversation the user has navigated away
+  // from stays in here, which is what lets the sidebar show it still
+  // working instead of pretending it stopped.
+  const [running, setRunning] = useState([])
+  // Read from inside the registry subscription, which is registered once and
+  // would otherwise close over a stale activeId forever.
+  const activeIdRef = useRef(activeId)
   useEffect(() => {
-    let alive = true
-    const probe = async () => {
-      const [okLive, okManager, okOmni, okEdge] = await Promise.all([
-        checkLive(),
-        checkTeam(),
-        checkOmni(),
-        checkEdge(),
-      ])
-      engineRef.current = { live: okLive, manager: okManager, omni: okOmni, edge: okEdge }
-      if (!alive) return
-      setLive(okLive)
-      setManager(okManager)
-      setOmni(okOmni)
-      setEdge(okEdge)
-    }
-    probeRef.current = probe()
-    const id = setInterval(() => {
-      probeRef.current = probe()
-    }, 20000)
-    return () => {
-      alive = false
-      clearInterval(id)
-    }
-  }, [])
+    activeIdRef.current = activeId
+  }, [activeId])
 
   const active = chats.find((c) => c.id === activeId) || null
+  // Streaming means: a run is in flight for THIS conversation, or its reply
+  // is currently typing itself out on screen.
+  const streaming = running.includes(activeId) || typingId === activeId
 
   const persist = (next) => {
     setChats(next)
@@ -172,22 +140,60 @@ export default function ChatApp() {
 
   useEffect(() => () => clearInterval(timerRef.current), [])
 
+  /* Mirror the run registry into local state.
+   *
+   * The registry persists finished replies to storage on its own, so this
+   * subscription exists only so a MOUNTED ChatApp catches up -- including
+   * for a run it never started itself (one begun before the user visited
+   * the landing page and came back). Re-reading storage rather than
+   * trusting local state is the whole point: local state is exactly what
+   * was stale.
+   */
+  useEffect(() => {
+    const sync = () => {
+      setChats(loadChats(user.id))
+      setRunning(runningIds())
+      for (const [id, run] of finishedRuns()) {
+        // Already persisted by the registry. Animate only when the user is
+        // actually looking at that conversation; otherwise the text is
+        // simply there when they return.
+        if (id === activeIdRef.current) animateIn(id, run.reply)
+        clearRun(id)
+      }
+      for (const [id, run] of failedRuns()) {
+        console.error(`[chat] run ${id} failed:`, run.error)
+        clearRun(id)
+      }
+    }
+    sync() // catch up on mount, then stay subscribed
+    return subscribeRuns(sync)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.id])
+
   // pin scroll to bottom while messages grow / stream
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [chats, streaming])
 
-  const streamReply = (convId, reply) => {
-    setStreaming(true)
+  /* Type a finished reply out on screen.
+   *
+   * Purely cosmetic and purely local: the reply is already complete and
+   * already saved by the time this runs, so nothing here can lose it. If
+   * the user navigates away mid-animation the text simply appears in full
+   * next time -- which is why this no longer writes to storage at all.
+   */
+  const animateIn = (convId, reply) => {
+    clearInterval(timerRef.current)
+    setTypingId(convId)
     let i = 0
-    const full = reply.text
+    const full = reply.text || ''
     timerRef.current = setInterval(() => {
       i += 4 + Math.floor(Math.random() * 5)
       const done = i >= full.length
       const slice = done ? full : full.slice(0, i)
-      setChats((prev) => {
-        const next = prev.map((c) =>
+      setChats((prev) =>
+        prev.map((c) =>
           c.id === convId
             ? {
                 ...c,
@@ -197,41 +203,39 @@ export default function ChatApp() {
                         ...m,
                         content: slice,
                         project: done ? reply.project : null,
-                        // Attach the image job as soon as streaming STARTS, not
-                        // on completion: the render bay should open and begin
-                        // scanning while the text types, so the ~17s fetch is
-                        // already underway by the time the copy finishes.
+                        // Attach the image job as soon as typing STARTS: the
+                        // render bay should open and begin scanning while the
+                        // copy types, so the ~17s fetch is already underway
+                        // by the time the text finishes.
                         image: reply.image || null,
-                        // Sources land only when the answer completes: showing
-                        // citations beside half-typed prose reads as if the
-                        // claims are already sourced when they aren't yet.
+                        // Sources land only on completion: citations beside
+                        // half-typed prose read as if the claims are already
+                        // sourced when they aren't yet.
                         sources: done ? reply.sources || null : null,
-                        // Surfaced only once the full (possibly cut-off) text
-                        // has actually finished typing out, so the Continue
-                        // affordance can't appear mid-type and get confused
-                        // for part of the answer itself.
+                        // Same for the Continue affordance -- mid-type it
+                        // gets mistaken for part of the answer.
                         truncated: done ? !!reply.truncated : false,
                       }
                     : m,
                 ),
               }
             : c,
-        )
-        if (done) saveChats(user.id, next)
-        return next
-      })
+        ),
+      )
       if (done) {
         clearInterval(timerRef.current)
-        setStreaming(false)
+        setTypingId((cur) => (cur === convId ? null : cur))
       }
     }, 35)
   }
 
-  // Types out a continuation ONTO existing message content, rather than
-  // replacing it from empty like streamReply -- used after a truncated
-  // reply's Continue action returns more text.
+  // Types a continuation ONTO existing message content, rather than
+  // replacing it from empty like animateIn -- used after a truncated reply's
+  // Continue action returns more text. Saves on completion because, unlike
+  // animateIn, nothing has persisted this addition yet.
   const appendContinuation = (convId, messageId, baseText, addition, stillTruncated) => {
-    setStreaming(true)
+    clearInterval(timerRef.current)
+    setTypingId(convId)
     let i = 0
     timerRef.current = setInterval(() => {
       i += 4 + Math.floor(Math.random() * 5)
@@ -255,95 +259,61 @@ export default function ChatApp() {
       })
       if (done) {
         clearInterval(timerRef.current)
-        setStreaming(false)
+        setTypingId((cur) => (cur === convId ? null : cur))
       }
     }, 35)
   }
 
-  // Engine cascade, best-answer first:
-  //   1. VibeAI API  - the real Manager, direct (localhost:8000, dev only)
-  //   2. Team proxy  - the SAME real Manager, reached via our own
-  //                    /api/team on the public deploy (Render-hosted)
-  //   3. OmniRoute   - single-model fallback via the local gateway
-  //                    (localhost:20128)
-  //   4. Edge proxy  - single-model fallback via our own /api/chat (works
-  //                    anywhere, including the public deploy)
-  //   5. simulated   - canned templates, last resort
-  // Each failure falls through to the next, the same way the model registry's
-  // circuit breaker degrades across providers rather than erroring out.
-  const dispatchReply = async (convId, text, sent) => {
-    stopRef.current = false
-    const conv = chats.find((c) => c.id === convId)
+  /* Write a finished reply into its conversation, reading and writing
+     storage directly rather than component state.
+
+     This is what makes a reply survive the user navigating away: it runs
+     from the run registry, which outlives this component, so it must not
+     depend on `chats` (a stale closure by then) or on ChatApp being mounted
+     at all. Returns the updated list so the caller can refresh local state
+     when it IS still mounted. */
+  const persistReply = (convId, reply) => {
+    const next = loadChats(user.id).map((c) =>
+      c.id === convId
+        ? {
+            ...c,
+            updatedAt: Date.now(),
+            messages: c.messages.map((m, idx) =>
+              idx === c.messages.length - 1
+                ? {
+                    ...m,
+                    content: reply.text,
+                    project: reply.project || null,
+                    image: reply.image || null,
+                    sources: reply.sources || null,
+                    truncated: !!reply.truncated,
+                  }
+                : m,
+            ),
+          }
+        : c,
+    )
+    saveChats(user.id, next)
+    return next
+  }
+
+  // The fallback order itself (live -> manager -> omni -> edge -> simulated)
+  // lives in engine.js::dispatchEngineReply, shared with ProjectWorkspace.
+  // This wrapper only supplies ChatApp's own concerns: which conversation's
+  // history to send, and where the finished answer belongs.
+  const dispatchReply = (convId, text, sent, convForHistory) => {
     // Drop the just-appended user turn and the empty assistant placeholder;
     // the prompt is passed separately.
-    const history = (conv?.messages || []).slice(0, -2)
+    const history = (convForHistory?.messages || []).slice(0, -2)
+    const systemPrompt = systemPromptRef.current
 
-    setStreaming(true)
-
-    // Wait for any in-flight probe before trusting engineRef -- otherwise a
-    // message sent right after page load reads the initial `false`
-    // defaults instead of the real (still-resolving) availability.
-    if (probeRef.current) await probeRef.current
-    const engines = engineRef.current
-
-    if (engines.live) {
-      try {
-        const reply = await respondLive(text, convId, team)
-        if (stopRef.current) return
-        streamReply(convId, reply)
-        return
-      } catch (err) {
-        console.error('[engine:live] failed, falling through:', err)
-        setLive(false)                 // fall through to the team proxy
-        engineRef.current.live = false
-      }
-    }
-
-    if (engines.manager) {
-      try {
-        const token = await getToken()
-        const reply = await respondTeam(text, convId, token, systemPromptRef.current, team)
-        if (stopRef.current) return
-        streamReply(convId, reply)
-        return
-      } catch (err) {
-        console.error('[engine:manager] failed, falling through:', err)
-        setManager(false)              // fall through to OmniRoute
-        engineRef.current.manager = false
-      }
-    }
-
-    if (engines.omni) {
-      try {
-        const reply = await respondOmni(text, history, mode, systemPromptRef.current)
-        if (stopRef.current) return
-        streamReply(convId, reply)
-        return
-      } catch (err) {
-        console.error('[engine:omni] failed, falling through:', err)
-        setOmni(false)                 // fall through to the edge proxy
-        engineRef.current.omni = false
-      }
-    }
-
-    if (engines.edge) {
-      try {
-        const token = await getToken()
-        const reply = await respondEdge(text, history, token, mode, systemPromptRef.current)
-        if (stopRef.current) return
-        streamReply(convId, reply)
-        return
-      } catch (err) {
-        console.error('[engine:edge] failed, falling through:', err)
-        setEdge(false)                 // fall through to simulated
-        engineRef.current.edge = false
-      }
-    }
-
-    if (stopRef.current) return
-    const sim = respond(text, sent, team)
-    sim.text = `[CB] no live engine reachable - simulated response\n${sim.text}`
-    streamReply(convId, sim)
+    startRun(convId, {
+      dispatch: () =>
+        dispatchEngineReply({
+          text, history, convId, sent, team, mode, systemPrompt, getToken, probe,
+        }),
+      persist: (reply) => persistReply(convId, reply),
+    })
   }
 
   const handleSend = (text) => {
@@ -374,13 +344,17 @@ export default function ChatApp() {
     )
     persist(next)
     setAttachments([])
-    dispatchReply(convId, text, sent)
+    dispatchReply(convId, text, sent, next.find((c) => c.id === convId))
   }
 
+  // Explicit user stop only. Navigating away must never call this -- that
+  // was the original bug: leaving a conversation discarded a reply that had
+  // already come back successfully.
   const handleStop = () => {
-    stopRef.current = true
+    if (activeId) cancelRun(activeId)
     clearInterval(timerRef.current)
-    setStreaming(false)
+    setTypingId(null)
+    setRunning(runningIds())
     setChats((prev) => {
       saveChats(user.id, prev)
       return prev
@@ -429,7 +403,7 @@ export default function ChatApp() {
           : c,
       ),
     )
-    setStreaming(true)
+    setTypingId(convId)
     try {
       let result
       if (omni) {
@@ -438,12 +412,12 @@ export default function ChatApp() {
         const token = await getToken()
         result = await continueEdge(history, msg.content, token, mode)
       } else {
-        setStreaming(false)
+        setTypingId(null)
         return
       }
       appendContinuation(convId, messageId, msg.content, result.text, result.truncated)
     } catch {
-      setStreaming(false)
+      setTypingId(null)
       // Restore the affordance so the user can retry rather than silently
       // losing the option after one failed attempt.
       setChats((prev) =>
@@ -456,18 +430,34 @@ export default function ChatApp() {
     }
   }
 
-  const handleNew = () => {
-    if (streaming) handleStop()
-    setActiveId(null)
+  /* Leaving a conversation no longer cancels its reply.
+   *
+   * Both of these used to call handleStop(), which is what made the AI
+   * "stop working" the moment you switched conversations or started a new
+   * one: the request kept running, came back fine, and was then thrown
+   * away because a stop flag had been set. The run now lives in the
+   * registry, finishes on its own, and writes itself to storage -- so
+   * switching away and coming back shows the finished answer.
+   *
+   * Only the in-flight TYPEWRITER is stopped here, since it animates into
+   * a conversation that is about to leave the screen. Its text is already
+   * saved, so cutting it short loses nothing. */
+  const leaveConversation = () => {
+    clearInterval(timerRef.current)
+    setTypingId(null)
     setSidebarOpen(false)
   }
 
+  const handleNew = () => {
+    leaveConversation()
+    setActiveId(null)
+  }
+
   const handleSelect = (id) => {
-    if (streaming) handleStop()
+    leaveConversation()
     setActiveId(id)
     const c = chats.find((x) => x.id === id)
     if (c?.team) setTeam(c.team)
-    setSidebarOpen(false)
   }
 
   const handleRename = (id, title) =>
