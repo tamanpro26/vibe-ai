@@ -2424,116 +2424,19 @@
 
 /* Projects is a full page now (#/projects), not a dialog -- content sits
    directly in .chat-scroll like everything else on that shell, just capped
-   to a comfortable reading width instead of stretching edge to edge. */
+   to a comfortable reading width instead of stretching edge to edge. Used
+   by ProjectsListPage's grid and ProjectWorkspace's not-found state; the
+   workspace's own two-column layout (.proj-workspace-body) does not use
+   this, it wants the full width. */
 .proj-page {
-  max-width: 720px;
+  max-width: 880px;
   margin: 0 auto;
-}
-
-.proj-lede {
-  margin: 0 0 var(--sp-5);
-  max-width: 60ch;
-  font-size: var(--fs-label);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-}
-
-.proj-offline {
-  margin: 0 0 var(--sp-5);
-  padding: var(--sp-3) var(--sp-4);
-  font-size: var(--fs-caption);
-  line-height: var(--lh-body);
-  color: var(--text-secondary);
-  background: var(--bg-inset);
-  border: 1px solid var(--warning-border);
-  border-radius: var(--r-md);
 }
 
 .proj-textarea {
   resize: vertical;
   min-height: 76px;
   line-height: var(--lh-body);
-}
-
-.proj-examples {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin: var(--sp-3) 0 var(--sp-5);
-}
-
-.proj-example {
-  font-family: var(--font-sans);
-  font-size: var(--fs-caption);
-  line-height: var(--lh-snug);
-  text-align: left;
-  color: var(--text-tertiary);
-  background: transparent;
-  border: 1px dashed var(--border-subtle);
-  border-radius: var(--r-md);
-  padding: var(--sp-2) var(--sp-3);
-  cursor: pointer;
-  transition:
-    color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
-}
-
-.proj-example:hover:not(:disabled) {
-  color: var(--text-secondary);
-  border-color: var(--border-default);
-  border-style: solid;
-}
-
-.proj-types {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-5);
-}
-
-.proj-type {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: var(--sp-3);
-  text-align: left;
-  background: var(--bg-raised);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
-}
-
-.proj-type:hover:not(:disabled) {
-  border-color: var(--border-default);
-}
-
-/* Selection reads as a raised surface with a stronger edge rather than an
-   accent outline — 2A spends the accent on action, not on state. */
-.proj-type.is-active {
-  background: var(--bg-overlay);
-  border-color: var(--border-strong);
-}
-
-.proj-type-label {
-  font-family: var(--font-sans);
-  font-size: var(--fs-label);
-  font-weight: var(--fw-medium);
-  color: var(--text-primary);
-}
-
-.proj-type-hint {
-  font-size: var(--fs-micro);
-  line-height: var(--lh-snug);
-  color: var(--text-tertiary);
-}
-
-.proj-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
 }
 
 .proj-build {
@@ -2546,6 +2449,8 @@
   border-radius: var(--r-md);
   padding: var(--sp-3) var(--sp-5);
   cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
   transition: background var(--dur-fast) var(--ease-out);
 }
 
@@ -2553,45 +2458,9 @@
   background: var(--accent-hover);
 }
 
-.proj-build:disabled,
-.proj-type:disabled,
-.proj-example:disabled {
+.proj-build:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.proj-elapsed {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-family: var(--font-mono);
-  font-size: var(--fs-caption);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-.proj-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--r-full);
-  background: var(--accent);
-  animation: projPulse 1.4s ease-in-out infinite;
-}
-
-@keyframes projPulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .proj-dot {
-    animation: none;
-  }
 }
 
 .proj-note {
@@ -2613,80 +2482,9 @@
   border-radius: var(--r-md);
 }
 
-.proj-result {
-  margin-top: var(--sp-6);
-  padding-top: var(--sp-5);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.proj-result-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  margin-bottom: var(--sp-4);
-}
-
-.proj-h3 {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  font-weight: var(--fw-medium);
-  color: var(--text-primary);
-}
-
-.proj-download {
-  font-family: var(--font-sans);
-  font-size: var(--fs-caption);
-  font-weight: var(--fw-medium);
-  color: var(--text-primary);
-  background: var(--bg-raised);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-md);
-  padding: var(--sp-2) var(--sp-4);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out);
-}
-
-.proj-download:hover {
-  background: var(--bg-overlay);
-}
-
-.proj-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-5);
-  margin: 0 0 var(--sp-4);
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--bg-inset);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-}
-
-.proj-stats div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.proj-stats dt {
-  font-size: var(--fs-micro);
-  letter-spacing: var(--track-caps);
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-
-.proj-stats dd {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-label);
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
 .proj-files {
   list-style: none;
-  margin: 0 0 var(--sp-4);
+  margin: 0 0 var(--sp-2);
   padding: 0;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
@@ -2721,18 +2519,626 @@
   flex: none;
 }
 
-.proj-summary {
+/* ── Projects grid (ProjectsListPage) ──────────────────────────────────── */
+
+.proj-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-16) 0;
+}
+
+.proj-empty h1 {
   margin: 0;
-  max-width: 68ch;
+  font-size: var(--fs-h2);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+}
+
+.proj-empty p {
+  margin: 0 0 var(--sp-2);
+  max-width: 48ch;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+}
+
+.proj-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-4);
+}
+
+.proj-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  color: inherit;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.proj-card:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-default);
+}
+
+.proj-card-title {
+  margin: 0;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+}
+
+.proj-card-desc {
+  margin: 0;
   font-size: var(--fs-caption);
   line-height: var(--lh-body);
   color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.proj-card-meta {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: auto;
+  padding-top: var(--sp-2);
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+}
+
+/* ── Create-project dialog ─────────────────────────────────────────────── */
+
+.proj-create-dialog {
+  max-width: 480px;
+}
+
+.proj-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+}
+
+.proj-cancel {
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-5);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.proj-cancel:hover {
+  border-color: var(--border-default);
+}
+
+/* ── Project workspace (ProjectWorkspace) ──────────────────────────────── */
+
+.proj-not-found {
+  text-align: left;
+  padding-top: var(--sp-16);
+}
+
+.proj-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: var(--fs-title);
+  flex: none;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.proj-back:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.proj-title-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-title);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 4px var(--sp-2);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.proj-title-input:hover,
+.proj-title-input:focus {
+  border-color: var(--border-subtle);
+  outline: none;
+}
+
+.proj-workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.proj-chat-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.proj-chat-col .chat-scroll {
+  flex: 1;
+}
+
+.proj-chat-empty {
+  max-width: 60ch;
+  margin: var(--sp-10) auto 0;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-tertiary);
+}
+
+.proj-side {
+  width: 320px;
+  flex: none;
+  overflow-y: auto;
+  padding: var(--sp-5) var(--sp-5) var(--sp-8);
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.proj-side-section {
+  padding-bottom: var(--sp-5);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.proj-side-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.proj-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.proj-side-h3 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.proj-side-hint {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  color: var(--text-tertiary);
+}
+
+.proj-instructions {
+  resize: vertical;
+  min-height: 90px;
+  line-height: var(--lh-body);
+  font-size: var(--fs-caption);
+}
+
+.proj-download-link {
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.proj-download-link:hover {
+  color: var(--text-primary);
+}
+
+/* Auto-summarized project memory. Set on the inset surface so it reads as
+   something the system derived rather than something the user typed --
+   Instructions right below it is an editable field, and the two would be
+   easy to confuse if both looked like inputs. */
+.proj-memory {
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
   white-space: pre-wrap;
 }
 
-@media (max-width: 640px) {
-  .proj-types {
-    grid-template-columns: 1fr;
+.proj-add-file {
+  width: 100%;
+  margin-top: var(--sp-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--r-md);
+  padding: var(--sp-2);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.proj-add-file:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  border-style: solid;
+}
+
+.proj-file-row-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+/* Marks a file the user added, against the ones a build wrote. Quiet on
+   purpose: it's provenance, not a status worth the accent. */
+.proj-file-tag {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-xs);
+  padding: 0 4px;
+}
+
+.proj-file-remove {
+  font-size: var(--fs-label);
+  line-height: 1;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.proj-file-remove:hover {
+  color: var(--danger);
+}
+
+/* ── Grid header: title + search/sort/primary action ───────────────────── */
+
+.proj-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-8);
+  flex-wrap: wrap;
+}
+
+.proj-h1 {
+  margin: 0;
+  font-size: var(--fs-hero);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--track-hero);
+  color: var(--text-primary);
+}
+
+.proj-header-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.proj-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.proj-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.proj-icon-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.proj-search {
+  width: 220px;
+  height: 36px;
+}
+
+/* ── Card ──────────────────────────────────────────────────────────────── */
+
+.proj-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 168px;
+  padding: var(--sp-5);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-panel);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.proj-card:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-default);
+}
+
+/* Full-card click target sitting UNDER the star/menu controls, so the card
+   is one big target without nesting interactive elements inside a link. */
+.proj-card-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: transparent;
+  border: none;
+  border-radius: inherit;
+  cursor: pointer;
+}
+
+.proj-card-top {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  pointer-events: none;
+}
+
+.proj-card-tools {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  pointer-events: auto;
+}
+
+.proj-star,
+.proj-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  font-size: var(--fs-label);
+  line-height: 1;
+  color: var(--text-tertiary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.proj-star:hover,
+.proj-menu-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-inset);
+}
+
+.proj-star.is-on {
+  color: var(--accent);
+}
+
+.proj-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 3;
+  min-width: 140px;
+  padding: var(--sp-1);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-md);
+  box-shadow: var(--e-3);
+}
+
+.proj-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+}
+
+.proj-menu button:hover {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.proj-menu button.is-danger:hover {
+  color: var(--danger);
+}
+
+/* ── Project home: title, recents ──────────────────────────────────────── */
+
+.proj-home {
+  max-width: 720px;
+  margin: 0 auto;
+  padding-top: var(--sp-4);
+}
+
+.proj-home-desc {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+}
+
+.proj-recents-label {
+  margin-top: var(--sp-8);
+}
+
+.proj-recents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.proj-recents li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.proj-recent {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  color: inherit;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.proj-recent:hover {
+  background: var(--bg-raised);
+}
+
+.proj-recent-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+.proj-recent-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-label);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-recent-time {
+  flex: none;
+  font-size: var(--fs-micro);
+  color: var(--text-tertiary);
+}
+
+/* ── Composer toolbar (model/team pills inside the composer) ───────────── */
+
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.proj-model-pill .listbox-trigger {
+  font-size: var(--fs-micro);
+  padding: 4px var(--sp-2);
+  height: auto;
+}
+
+/* ── Files empty state ─────────────────────────────────────────────────── */
+
+.proj-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-6) var(--sp-4);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  text-align: center;
+  color: var(--text-tertiary);
+  background: var(--bg-inset);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.proj-dropzone:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-strong);
+}
+
+.proj-dropzone-art {
+  width: 64px;
+  height: 40px;
+  color: var(--text-disabled);
+}
+
+@media (max-width: 900px) {
+  .proj-side {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .proj-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .proj-search {
+    width: 100%;
   }
 }
 

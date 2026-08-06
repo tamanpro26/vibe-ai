@@ -549,6 +549,82 @@ export async function respondTeam(prompt, sessionId, token, systemPrompt = '', t
   return { text: data.text, project: null }
 }
 
+/* ── Engine cascade: one fallback order, every caller shares it ────────────
+ * Best-answer first:
+ *   1. VibeAI API  - the real Manager, direct (localhost:8000, dev only)
+ *   2. Team proxy  - the SAME real Manager, reached via our own /api/team on
+ *                    the public deploy (Render-hosted)
+ *   3. OmniRoute   - single-model fallback via the local gateway
+ *                    (localhost:20128)
+ *   4. Edge proxy  - single-model fallback via our own /api/chat (works
+ *                    anywhere, including the public deploy)
+ *   5. simulated   - canned templates, last resort
+ * Each failure falls through to the next, the same way the model registry's
+ * circuit breaker degrades across providers rather than erroring out.
+ *
+ * Deliberately conversation-agnostic: it takes a flat `history` array and a
+ * `probe` (from useEngineProbe.js) and returns a reply, with no opinion on
+ * where the caller stores it. ChatApp animates it into a chat-list entry;
+ * ProjectWorkspace's single persistent thread does the same into a flat
+ * messages array. The fallback order itself lives in exactly one place
+ * either way.
+ */
+export async function dispatchEngineReply({
+  text, history, convId, sent, team, mode, systemPrompt, getToken, probe,
+}) {
+  // Wait for any in-flight probe before trusting engineRef -- otherwise a
+  // message sent right after page load reads the initial `false` defaults
+  // instead of the real (still-resolving) availability.
+  if (probe.probeRef.current) await probe.probeRef.current
+  const engines = probe.engineRef.current
+
+  if (engines.live) {
+    try {
+      return await respondLive(text, convId, team)
+    } catch (err) {
+      console.error('[engine:live] failed, falling through:', err)
+      probe.setLive(false)
+      probe.engineRef.current.live = false
+    }
+  }
+
+  if (engines.manager) {
+    try {
+      const token = await getToken()
+      return await respondTeam(text, convId, token, systemPrompt, team)
+    } catch (err) {
+      console.error('[engine:manager] failed, falling through:', err)
+      probe.setManager(false)
+      probe.engineRef.current.manager = false
+    }
+  }
+
+  if (engines.omni) {
+    try {
+      return await respondOmni(text, history, mode, systemPrompt)
+    } catch (err) {
+      console.error('[engine:omni] failed, falling through:', err)
+      probe.setOmni(false)
+      probe.engineRef.current.omni = false
+    }
+  }
+
+  if (engines.edge) {
+    try {
+      const token = await getToken()
+      return await respondEdge(text, history, token, mode, systemPrompt)
+    } catch (err) {
+      console.error('[engine:edge] failed, falling through:', err)
+      probe.setEdge(false)
+      probe.engineRef.current.edge = false
+    }
+  }
+
+  const sim = respond(text, sent, team)
+  sim.text = `[CB] no live engine reachable - simulated response\n${sim.text}`
+  return sim
+}
+
 const STRONG_CODE = [
   'python', 'javascript', 'typescript', 'react', 'html', 'css', 'sql', 'api',
   'cli', 'script', 'function', 'class', 'bug', 'refactor', 'server',
@@ -588,7 +664,7 @@ export function classify(text) {
   return 'general'
 }
 
-function slugify(text) {
+export function slugify(text) {
   let slug = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   if (slug.length > 32) {
     slug = slug.slice(0, 32)
@@ -671,14 +747,18 @@ export async function makeZip(files, slug) {
  * under the same "project" label would be the one thing a build surface must
  * never do. A failure is surfaced as a failure.
  */
-export async function buildProject(task, token, taskType = 'coding') {
+export async function buildProject(task, token, taskType = 'coding', projectId = null) {
   const res = await fetch('/api/project', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ task, taskType }),
+    // projectId scopes the backend's workspace so repeated builds inside the
+    // same persistent project land in the same directory instead of every
+    // build on every project colliding in the backend's shared default
+    // workspace -- see api/project.js.
+    body: JSON.stringify({ task, taskType, projectId }),
   })
   const data = await res.json().catch(() => null)
   if (!res.ok) throw new Error(data?.error || `project build failed (${res.status})`)
@@ -743,6 +823,101 @@ export async function downloadProject(project) {
   // Revoking immediately can cancel the download in some browsers; one frame
   // is enough for the click to be consumed.
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/* ── Project memory ────────────────────────────────────────────────────────
+ * Rolling summary of what a project's conversation established, folded back
+ * into the system prompt so a long-running project doesn't have to re-explain
+ * itself every time the message history scrolls past the context window.
+ *
+ * Deliberately routed to a RAW completion (omni locally, /api/chat on the
+ * deploy) rather than through dispatchEngineReply: the manager/live tiers run
+ * the full multi-agent council, and spending a five-model pipeline on "write
+ * two bullet points about this chat" would cost more than the conversation it
+ * summarizes. `fast` mode for the same reason.
+ *
+ * Honest limitation: this needs the omni or edge tier. On a deployment where
+ * only the manager backend is reachable, memory silently stops updating --
+ * the caller treats a failure as "leave memory as it was", never as an error
+ * worth interrupting the user for, because a missing summary degrades quality
+ * slightly while a thrown error would break the send path entirely.
+ */
+const MEMORY_SYSTEM =
+  'You maintain a compact memory for a long-running project. Given the ' +
+  'existing memory and new conversation turns, return an UPDATED memory: a ' +
+  'short list of durable facts worth remembering across future chats — ' +
+  'decisions made, constraints, stack/tooling choices, naming, preferences, ' +
+  'and open threads.\n\n' +
+  'Rules:\n' +
+  '- Keep it under 200 words. Merge and compress; do not just append.\n' +
+  '- Facts only. No pleasantries, no meta-commentary, no "the user asked".\n' +
+  '- Drop anything already superseded by a later turn.\n' +
+  '- Omit one-off trivia and anything already obvious from the project name.\n' +
+  '- Output the memory itself as plain lines starting with "- ". Nothing else.\n' +
+  '- If there is nothing durable worth keeping, output exactly: NONE'
+
+async function completeRaw({ system, prompt, mode = 'fast', token, probe }) {
+  const engines = probe?.engineRef?.current || {}
+  const cfg = modeConfig(mode)
+
+  if (engines.omni) {
+    try {
+      const { text } = await omniComplete(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: prompt },
+        ],
+        { model: cfg.omniModel, maxTokens: cfg.maxTokens },
+      )
+      return text
+    } catch {
+      /* fall through to the edge proxy */
+    }
+  }
+
+  if (engines.edge) {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        mode,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data?.error || `edge proxy ${res.status}`)
+    return data.text
+  }
+
+  throw new Error('no raw-completion engine reachable')
+}
+
+/**
+ * Fold `newMessages` into `existingMemory`. Returns the updated memory string,
+ * or '' when the model judges there's nothing durable worth keeping.
+ */
+export async function summarizeMemory({ existingMemory, newMessages, token, probe }) {
+  const transcript = newMessages
+    .filter((m) => m.content?.trim())
+    .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 2000)}`)
+    .join('\n\n')
+  if (!transcript.trim()) return existingMemory || ''
+
+  const prompt =
+    `EXISTING MEMORY:\n${existingMemory || '(none yet)'}\n\n` +
+    `NEW TURNS:\n${transcript}\n\n` +
+    'Return the updated memory.'
+
+  const text = await completeRaw({ system: MEMORY_SYSTEM, prompt, mode: 'fast', token, probe })
+  const clean = (text || '').trim()
+  if (!clean || clean === 'NONE') return ''
+  return clean
 }
 
 const TEAM_LABEL = {

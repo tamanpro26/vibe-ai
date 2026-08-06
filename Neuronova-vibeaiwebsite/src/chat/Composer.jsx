@@ -7,6 +7,13 @@ export default function Composer({
   attachments,
   onAddFiles,
   onRemoveAttachment,
+  // Optional controls rendered inside the composer, between the + button and
+  // the send button (the reference puts its model selector here). Omitted by
+  // ChatApp, which keeps its team/mode selectors up in the page header, so
+  // this defaults to nothing and changes nothing for existing callers.
+  toolbar = null,
+  placeholder = 'Message VibeAI — code, research, writing, anything…',
+  hint = 'Enter to send · Shift+Enter for a new line · drag & drop files anywhere',
 }) {
   const [text, setText] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
@@ -98,10 +105,11 @@ export default function Composer({
           ref={taRef}
           rows={1}
           value={text}
-          placeholder="Message VibeAI — code, research, writing, anything…"
+          placeholder={placeholder}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
         />
+        {toolbar && <div className="composer-toolbar">{toolbar}</div>}
         {streaming ? (
           <button className="send-btn stop" onClick={onStop} aria-label="Stop generating">
             ◼
@@ -117,9 +125,7 @@ export default function Composer({
           </button>
         )}
       </div>
-      <p className="composer-hint">
-        Enter to send · Shift+Enter for a new line · drag &amp; drop files anywhere
-      </p>
+      <p className="composer-hint">{hint}</p>
       <input
         ref={fileRef}
         type="file"

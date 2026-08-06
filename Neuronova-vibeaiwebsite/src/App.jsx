@@ -11,7 +11,8 @@ import Footer from './components/Footer.jsx'
 import { AuthProvider, useAuth } from './chat/auth.jsx'
 import AuthPage from './chat/AuthPage.jsx'
 import ChatApp from './chat/ChatApp.jsx'
-import ProjectsPage from './chat/ProjectsPage.jsx'
+import ProjectsListPage from './chat/ProjectsListPage.jsx'
+import ProjectWorkspace from './chat/ProjectWorkspace.jsx'
 import useLenis from './useLenis.js'
 import './App.css'
 import './chat/chat.css'
@@ -100,13 +101,35 @@ function Authed({ initialAuthMode, children }) {
 
 export default function App() {
   const hash = useHashRoute()
-  const isProjects = hash.startsWith('#/projects')
-  const isChat = !isProjects && hash.startsWith('#/chat')
+  // Three project routes, matched longest-first so an earlier pattern can't
+  // swallow a later segment:
+  //   #/projects              -> the grid
+  //   #/projects/<id>         -> that project's home (composer + Recents)
+  //   #/projects/<id>/c/<cid> -> one chat inside that project
+  const projectChatMatch = hash.match(/^#\/projects\/([^/]+)\/c\/([^/]+)/)
+  const projectMatch = !projectChatMatch && hash.match(/^#\/projects\/([^/]+)/)
+  const isProjects = !projectChatMatch && !projectMatch && hash.startsWith('#/projects')
+  const isChat = !projectChatMatch && !projectMatch && !isProjects && hash.startsWith('#/chat')
   const initialAuthMode = hash.startsWith('#/chat/signup') ? 'signup' : 'login'
 
   let page = <Landing />
-  if (isProjects) page = <Authed initialAuthMode={initialAuthMode}><ProjectsPage /></Authed>
-  else if (isChat) page = <Authed initialAuthMode={initialAuthMode}><ChatApp /></Authed>
+  if (projectChatMatch) {
+    page = (
+      <Authed initialAuthMode={initialAuthMode}>
+        <ProjectWorkspace projectId={projectChatMatch[1]} chatId={projectChatMatch[2]} />
+      </Authed>
+    )
+  } else if (projectMatch) {
+    page = (
+      <Authed initialAuthMode={initialAuthMode}>
+        <ProjectWorkspace projectId={projectMatch[1]} chatId={null} />
+      </Authed>
+    )
+  } else if (isProjects) {
+    page = <Authed initialAuthMode={initialAuthMode}><ProjectsListPage /></Authed>
+  } else if (isChat) {
+    page = <Authed initialAuthMode={initialAuthMode}><ChatApp /></Authed>
+  }
 
   return <AuthProvider>{page}</AuthProvider>
 }

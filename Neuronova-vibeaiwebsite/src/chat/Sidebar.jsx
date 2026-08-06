@@ -66,7 +66,10 @@ export default function Sidebar({
           </button>
           {/* A real link, not a modal trigger: Projects is its own page
               (#/projects), reached the same way Chat and the landing page
-              are -- a navigation, not an overlay stacked on top of chat. */}
+              are -- a navigation, not an overlay stacked on top of chat.
+              Leads to the grid; creation happens there via its own "New
+              project" button, matching the reference (claude.ai puts
+              creation on the grid page, not the sidebar). */}
           <a className="newproject-btn" href="#/projects">
             <svg viewBox="0 0 16 16" aria-hidden="true" className="newproject-icon">
               <path
@@ -78,7 +81,7 @@ export default function Sidebar({
               />
               <path d="M8 7.6v3.6M6.2 9.4h3.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
-            New project
+            Projects
           </a>
           <input
             className="sidebar-search"

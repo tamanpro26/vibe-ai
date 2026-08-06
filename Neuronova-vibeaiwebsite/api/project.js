@@ -32,6 +32,16 @@ const VIBE_API_TOKEN = process.env.VIBE_API_TOKEN || ''
 // Mirrors the backend's own AgentRequest.task_type values.
 const TASK_TYPES = new Set(['coding', 'reasoning', 'creative'])
 
+// projectId becomes a path segment in the backend's workspace directory
+// (AgentRequest.workspace, api/server.py). It's client-supplied, so it's
+// validated here, not trusted -- our own projectStore.js only ever generates
+// crypto.randomUUID() values, but this endpoint is reachable by anyone with a
+// valid Clerk session, and an unvalidated value becoming part of a filesystem
+// path server-side is a path-traversal risk (`../../etc`). Anything that
+// doesn't look like a UUID is dropped rather than forwarded -- degrading to
+// the shared default workspace is safe, forwarding an unchecked path is not.
+const PROJECT_ID_RE = /^[a-zA-Z0-9-]{1,64}$/
+
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     if (!VIBE_BACKEND_URL) {
@@ -76,6 +86,9 @@ export default async function handler(req, res) {
   // reaching the agent loop.
   const taskType = TASK_TYPES.has(req.body?.taskType) ? req.body.taskType : 'coding'
 
+  const projectId = typeof req.body?.projectId === 'string' ? req.body.projectId : ''
+  const workspace = PROJECT_ID_RE.test(projectId) ? `projects/${projectId}` : undefined
+
   try {
     const upstream = await fetch(`${VIBE_BACKEND_URL}/api/agent`, {
       method: 'POST',
@@ -83,7 +96,7 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${VIBE_API_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ task, task_type: taskType, include_files: true }),
+      body: JSON.stringify({ task, task_type: taskType, include_files: true, workspace }),
     })
     const data = await upstream.json()
     if (!upstream.ok) {
