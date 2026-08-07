@@ -117,7 +117,7 @@ export default function ChatApp() {
   const active = chats.find((c) => c.id === activeId) || null
   // Streaming means: a run is in flight for THIS conversation, or its reply
   // is currently typing itself out on screen.
-  const streaming = running.includes(activeId) || typingId === activeId
+  const streaming = activeId !== null && (running.includes(activeId) || typingId === activeId)
 
   const persist = (next) => {
     setChats(next)
