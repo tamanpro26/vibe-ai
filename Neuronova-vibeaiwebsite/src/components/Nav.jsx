@@ -1,12 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+
+const SECTION_LINKS = [
+  ['Why', '#problem'],
+  ['Resilience', '#resilience'],
+  ['Council', '#council'],
+  ['Agent', '#agent'],
+  ['Product', '#ecosystem'],
+  ['Proof', '#engineering'],
+  ['Control', '#security'],
+]
 
 export default function Nav() {
   const [scrolled, setScrolled] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuButtonRef = useRef(null)
+  const menuRef = useRef(null)
 
-  // Lenis (useLenis.js) still drives the real document scroll position, so
-  // a plain native 'scroll' listener sees it -- no need to hook Lenis's own
-  // event. rAF-gated so this can't fire more than once per frame regardless
-  // of how many scroll events land in between.
+  // Native scrolling keeps anchors, keyboard navigation, and browser history
+  // predictable. rAF-gating prevents more than one state update per frame.
   useEffect(() => {
     let ticking = false
     const onScroll = () => {
@@ -22,6 +33,34 @@ export default function Nav() {
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
 
+  useEffect(() => {
+    if (!menuOpen) return undefined
+
+    const firstLink = menuRef.current?.querySelector('a')
+    firstLink?.focus()
+
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      menuButtonRef.current?.focus()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [menuOpen])
+
+  const closeMenu = () => setMenuOpen(false)
+
+  const followSectionLink = (href) => {
+    closeMenu()
+    requestAnimationFrame(() => {
+      const destination = document.querySelector(href)
+      if (!destination) return
+      destination.setAttribute('tabindex', '-1')
+      destination.focus({ preventScroll: true })
+      destination.addEventListener('blur', () => destination.removeAttribute('tabindex'), { once: true })
+    })
+  }
+
   return (
     <header className={`nav${scrolled ? ' is-scrolled' : ''}`}>
       <a className="nav-brand" href="#top">
@@ -34,13 +73,7 @@ export default function Nav() {
         VIBE<span className="nav-brand-accent">AI</span>
       </a>
       <nav className="nav-links" aria-label="Sections">
-        <a href="#problem">Why</a>
-        <a href="#resilience">Resilience</a>
-        <a href="#council">Council</a>
-        <a href="#agent">Agent</a>
-        <a href="#teams">Teams</a>
-        <a href="#engineering">Numbers</a>
-        <a href="#contact">Contact</a>
+        {SECTION_LINKS.map(([label, href]) => <a href={href} key={href}>{label}</a>)}
       </nav>
       <div className="nav-auth">
         <a className="nav-login" href="#/chat/login">
@@ -50,7 +83,30 @@ export default function Nav() {
           <span className="status-dot" aria-hidden="true" />
           Sign up
         </a>
+        <button
+          className="nav-menu-button"
+          type="button"
+          aria-label={menuOpen ? 'Close section menu' : 'Open section menu'}
+          aria-expanded={menuOpen}
+          aria-controls="mobile-section-menu"
+          onClick={() => setMenuOpen((open) => !open)}
+          ref={menuButtonRef}
+        >
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+        </button>
       </div>
+      {menuOpen && (
+        <nav className="nav-mobile-menu" id="mobile-section-menu" aria-label="Mobile sections" ref={menuRef}>
+          <span className="nav-mobile-kicker">Explore the system</span>
+          {SECTION_LINKS.map(([label, href], index) => (
+            <a href={href} key={href} onClick={() => followSectionLink(href)}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              {label}
+            </a>
+          ))}
+        </nav>
+      )}
     </header>
   )
 }

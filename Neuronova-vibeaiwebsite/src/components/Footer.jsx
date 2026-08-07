@@ -4,12 +4,12 @@ export default function Footer() {
       <div className="container">
         <div className="footer-main" data-reveal>
           <p className="eyebrow">
-            <span className="eyebrow-n">07</span> / CONTACT
+            <span className="eyebrow-n">09</span> / OPEN THE WORKSPACE
           </p>
-          <h2 className="footer-title">Talk to the system itself.</h2>
+          <h2 className="footer-title">Give the system real work.</h2>
           <div className="cta-row">
             <a className="cta-primary" href="#/chat">
-              Open VibeAI Chat
+              Open the AI workspace
             </a>
             <a className="cta-secondary" href="mailto:tamanpro26@gmail.com">
               tamanpro26@gmail.com

@@ -8,8 +8,19 @@ export const PROVIDERS = [
   { name: 'Z.AI', color: '#ff5da2' },
   { name: 'Pollinations', color: '#ffd23f' },
   { name: 'Ollama', color: '#9ad1ff' },
+  { name: 'OmniRoute', color: '#b3a8ff', optional: true },
   { name: 'Anthropic', color: '#ff7a59', optional: true },
 ]
+
+// Static public proof is kept in one place so the hero and engineering
+// section cannot silently drift apart. Re-verify these values against the
+// registry and pytest collection before updating them.
+export const WEBSITE_METRICS = {
+  registrySlots: 39,
+  providerRoutes: 11,
+  collectedTests: 502,
+  defaultBoundary: 'LOCAL',
+}
 
 export const COUNCIL_STAGES = [
   {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react'
-import { OPS_LINES } from '../data.js'
+import { motion, useInView, useReducedMotion, useScroll, useTransform } from 'motion/react'
+import { OPS_LINES, WEBSITE_METRICS } from '../data.js'
 import CountUp from './CountUp.jsx'
 
 /**
@@ -275,11 +275,15 @@ function NetworkCanvas() {
 
 function OpsLog() {
   const [count, setCount] = useState(3)
+  const ref = useRef(null)
+  const isInView = useInView(ref, { amount: 0.15 })
+  const reduced = useReducedMotion()
 
   useEffect(() => {
+    if (!isInView || reduced) return undefined
     const id = setInterval(() => setCount((c) => c + 1), 1700)
     return () => clearInterval(id)
-  }, [])
+  }, [isInView, reduced])
 
   const visible = []
   const shown = Math.min(7, count)
@@ -288,10 +292,10 @@ function OpsLog() {
   }
 
   return (
-    <div className="ops-log" data-reveal style={{ transitionDelay: '0.35s' }}>
+    <div className="ops-log" data-reveal style={{ transitionDelay: '0.35s' }} ref={ref}>
       <div className="ops-log-head">
         <span className="ops-log-title">ORCHESTRATOR FEED</span>
-        <span className="ops-log-note">simulated. Real API binds to localhost by design.</span>
+        <span className="ops-log-note">illustrative trace · real API is localhost-first</span>
       </div>
       <div className="ops-log-body">
         {visible.map((line, i) => (
@@ -308,10 +312,10 @@ function OpsLog() {
 }
 
 const STATS = [
-  { n: '38', label: 'model registry entries' },
-  { n: '10', label: 'free-tier providers' },
-  { n: '475', label: 'offline automated tests' },
-  { n: '$0', label: 'paid API keys required' },
+  { n: WEBSITE_METRICS.registrySlots, label: 'model registry slots' },
+  { n: WEBSITE_METRICS.providerRoutes, label: 'provider routes' },
+  { n: WEBSITE_METRICS.collectedTests, label: 'collected tests' },
+  { n: WEBSITE_METRICS.defaultBoundary, label: 'default API boundary' },
 ]
 
 /* The page's one focal moment: the wordmark assembles per character rather
@@ -323,36 +327,37 @@ const STATS = [
  * readers announce it letter by letter ("V, I, B, E..."), and search engines
  * and copy/paste see fragments.
  */
-function AssemblingWordmark({ reduced }) {
-  const chars = [
-    ...'VIBE'.split('').map((c) => ({ c, accent: false })),
-    ...'AI'.split('').map((c) => ({ c, accent: true })),
-  ]
-
+function AssemblingHeadline({ reduced }) {
   if (reduced) {
     return (
-      <h1 className="hero-title" data-reveal style={{ transitionDelay: '0.08s' }}>
-        VIBE<span className="hero-title-accent">AI</span>
+      <h1 className="hero-title" data-reveal>
+        Complex work, <span className="hero-title-accent">orchestrated</span> across models.
       </h1>
     )
   }
 
+  const lines = [
+    { text: 'Complex work,', accent: false },
+    { text: 'orchestrated', accent: true },
+    { text: 'across models.', accent: false },
+  ]
+
   return (
-    <h1 className="hero-title" aria-label="VibeAI">
-      {chars.map(({ c, accent }, i) => (
+    <h1 className="hero-title" aria-label="Complex work, orchestrated across models.">
+      {lines.map(({ text, accent }, i) => (
         <motion.span
-          key={i}
+          key={text}
           aria-hidden="true"
-          className={accent ? 'hero-title-accent hero-char' : 'hero-char'}
-          initial={{ opacity: 0, y: '0.32em', filter: 'blur(14px)' }}
+          className={accent ? 'hero-title-line hero-title-accent' : 'hero-title-line'}
+          initial={{ opacity: 0, y: '0.38em', filter: 'blur(12px)' }}
           animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
           transition={{
-            duration: 0.85,
-            delay: 0.12 + i * 0.06,
+            duration: 0.8,
+            delay: 0.08 + i * 0.1,
             ease: [0.16, 1, 0.3, 1],
           }}
         >
-          {c}
+          {text}{i < lines.length - 1 ? ' ' : ''}
         </motion.span>
       ))}
     </h1>
@@ -390,23 +395,23 @@ export default function Hero() {
         style={reduced ? undefined : { y: contentY, opacity: contentOpacity }}
       >
         <p className="hero-eyebrow" data-reveal>
-          SOLO-BUILT ENGINEERING PROJECT · PYTHON
+          VIBEAI / MULTI-PROVIDER ORCHESTRATION ENGINE
         </p>
-        <AssemblingWordmark reduced={reduced} />
+        <AssemblingHeadline reduced={reduced} />
         <p className="hero-tagline" data-reveal style={{ transitionDelay: '0.16s' }}>
-          Multi-Provider Multi-Agent Orchestration Core
+          Plan · Route · Execute · Critique · Verify
         </p>
         <p className="hero-sub" data-reveal style={{ transitionDelay: '0.24s' }}>
-          An autonomous coding agent and multi-model reasoning pipeline built entirely on
-          free-tier LLMs, with automatic cross-provider failover, structured critique, and a
-          verifier battery that checks its own work before calling anything done.
+          VibeAI coordinates models, tools, memory, search, and coding workflows—then checks the
+          result before it reports the work complete. It is free-first, local-first, and able to
+          fail over to another provider when a route fails.
         </p>
         <div className="cta-row" data-reveal style={{ transitionDelay: '0.28s' }}>
           <a className="cta-primary" href="#/chat">
-            Open VibeAI Chat
+            Open the AI workspace
           </a>
           <a className="cta-secondary" href="#problem">
-            See how it works
+            Trace a request
           </a>
         </div>
         <div className="hero-stats" data-reveal style={{ transitionDelay: '0.3s' }}>

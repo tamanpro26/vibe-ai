@@ -1,11 +1,11 @@
 import SectionHeader from './SectionHeader.jsx'
-import { PROVIDERS } from '../data.js'
+import { PROVIDERS, WEBSITE_METRICS } from '../data.js'
 import CountUp from './CountUp.jsx'
 
 const NUMBERS = [
-  { n: '475', label: 'automated tests', note: 'all offline and deterministic. Engineered, not demoed.' },
-  { n: '38', label: 'model registry entries', note: 'model × provider × role slots for redundancy' },
-  { n: '10', label: 'free-tier providers', note: 'no single quota can stop the system' },
+  { n: WEBSITE_METRICS.collectedTests, label: 'collected tests', note: 'offline-first verification across core orchestration paths' },
+  { n: WEBSITE_METRICS.registrySlots, label: 'model registry slots', note: 'model × provider × role slots for redundancy' },
+  { n: WEBSITE_METRICS.providerRoutes, label: 'provider routes', note: 'cloud, gateway, and local paths in the current registry' },
   { n: '2', label: 'interfaces', note: 'Rich terminal UI + FastAPI REST/WebSocket server' },
 ]
 
@@ -15,9 +15,10 @@ export default function Engineering() {
   return (
     <section className="section section-alt" id="engineering">
       <div className="container">
-        <SectionHeader index="06" label="ENGINEERING" title="Tested, not just demoed.">
-          The claim isn't "it works on my machine". It's 475 deterministic tests that run with
-          the network unplugged.
+        <SectionHeader index="07" label="ENGINEERING" title="Tested, not just demoed.">
+          The current repository collects {WEBSITE_METRICS.collectedTests} tests, with core
+          verification designed to run offline rather than depending on a healthy provider
+          during every check.
         </SectionHeader>
         <div className="num-grid">
           {NUMBERS.map((x, i) => (

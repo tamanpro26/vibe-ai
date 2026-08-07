@@ -70,8 +70,9 @@ Confirmed from the shipped code:
 - **Attachments:** file drag-and-drop into the composer.
 - **Persistence:** conversations in localStorage, per user (~5MB origin
   limit is a real ceiling for future artifact storage).
-- **Constraint — free tier only:** no paid provider keys. This is a defining
-  product constraint, not a temporary state.
+- **Constraint — free-first default:** the automatic cascade is designed to
+  operate without paid provider keys. Optional premium and manually selected
+  routes exist in the registry, but are not required for the standard path.
 - **Constraint — Manager backend is stateless per call:** it generates a
   fresh session internally and retains nothing, so any per-user or
   per-project context must be re-sent on every request.
@@ -85,12 +86,12 @@ Confirmed from the shipped code:
 
 ## Evidence on Hand
 
-Real, verified figures already used on the landing page:
+Figures verified against the current repository on 2026-08-06:
 
-- 38 model registry entries
-- 10 free-tier providers
-- 475 passing automated tests
-- $0 paid API keys required
+- 39 model registry slots
+- 11 provider identifiers (including local/gateway and optional routes)
+- 502 automated tests collected by pytest
+- no paid API key required for the standard free-first path
 
 Also real: a working ESP32 fire-alert build where the AI composes alarm
 rhythms from live sensor readings (`hardware/CIRCUIT.md`).

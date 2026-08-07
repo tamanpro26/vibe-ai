@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useInView, useReducedMotion } from 'motion/react'
 import SectionHeader from './SectionHeader.jsx'
 import { PROVIDERS } from '../data.js'
 
@@ -15,16 +16,20 @@ const SCRIPT = [
 
 export default function Failover() {
   const [step, setStep] = useState(0)
+  const sectionRef = useRef(null)
+  const isInView = useInView(sectionRef, { amount: 0.15 })
+  const reduced = useReducedMotion()
 
   useEffect(() => {
+    if (!isInView || reduced) return undefined
     const id = setInterval(() => setStep((s) => (s + 1) % SCRIPT.length), 2100)
     return () => clearInterval(id)
-  }, [])
+  }, [isInView, reduced])
 
   const { active, tripped, msg } = SCRIPT[step]
 
   return (
-    <section className="section section-alt" id="resilience">
+    <section className="section section-alt" id="resilience" ref={sectionRef}>
       <div className="container">
         <SectionHeader index="02" label="RESILIENCE" title="No single point of failure.">
           A circuit breaker tracks rate limits and outages per provider. When one trips, the

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Component, lazy, Suspense, useEffect, useState } from 'react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
 import Problem from './components/Problem.jsx'
@@ -6,16 +6,45 @@ import Failover from './components/Failover.jsx'
 import Council from './components/Council.jsx'
 import AgentLoop from './components/AgentLoop.jsx'
 import Teams from './components/Teams.jsx'
+import Ecosystem from './components/Ecosystem.jsx'
 import Engineering from './components/Engineering.jsx'
+import Security from './components/Security.jsx'
 import Footer from './components/Footer.jsx'
-import { AuthProvider, useAuth } from './chat/auth.jsx'
-import AuthPage from './chat/AuthPage.jsx'
-import ChatApp from './chat/ChatApp.jsx'
-import ProjectsListPage from './chat/ProjectsListPage.jsx'
-import ProjectWorkspace from './chat/ProjectWorkspace.jsx'
-import useLenis from './useLenis.js'
 import './App.css'
-import './chat/chat.css'
+
+// The public page is the first experience for most visitors. Clerk, JSZip,
+// the chat engine, project workspace, and their 3,000+ lines of CSS are only
+// useful after a product route is opened, so keep them behind one route-level
+// boundary instead of charging every landing-page visit for the full app.
+const ProductRoutes = lazy(() => import('./chat/ProductRoutes.jsx'))
+
+class ProductRouteBoundary extends Component {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+
+    return (
+      <main className="route-loading route-error" role="alert">
+        <span className="route-loading-mark" aria-hidden="true" />
+        <h1>The workspace could not load.</h1>
+        <p>A network interruption or a newer deployment may have replaced this route.</p>
+        <div className="route-error-actions">
+          <button type="button" className="cta-primary" onClick={() => window.location.reload()}>
+            Reload workspace
+          </button>
+          <a className="cta-secondary" href="#/">
+            Back to site
+          </a>
+        </div>
+      </main>
+    )
+  }
+}
 
 function useHashRoute() {
   const [hash, setHash] = useState(window.location.hash)
@@ -68,7 +97,6 @@ function useSpotlight() {
 
 function Landing() {
   useReveal()
-  useLenis()
   useSpotlight()
 
   return (
@@ -82,54 +110,33 @@ function Landing() {
         <Council />
         <AgentLoop />
         <Teams />
+        <Ecosystem />
         <Engineering />
+        <Security />
       </main>
       <Footer />
     </div>
   )
 }
 
-// Shared by every authed route (chat, projects): resolve the Clerk session
-// once, show the same page either way, and gate on sign-in identically.
-function Authed({ initialAuthMode, children }) {
-  const { user, isLoaded } = useAuth()
-  // Clerk resolves an existing session asynchronously; without this guard a
-  // signed-in user would flash the login page for a frame on every reload.
-  if (!isLoaded) return <div className="auth-loading" aria-hidden="true" />
-  return user ? children : <AuthPage initialMode={initialAuthMode} />
-}
-
 export default function App() {
   const hash = useHashRoute()
-  // Three project routes, matched longest-first so an earlier pattern can't
-  // swallow a later segment:
-  //   #/projects              -> the grid
-  //   #/projects/<id>         -> that project's home (composer + Recents)
-  //   #/projects/<id>/c/<cid> -> one chat inside that project
-  const projectChatMatch = hash.match(/^#\/projects\/([^/]+)\/c\/([^/]+)/)
-  const projectMatch = !projectChatMatch && hash.match(/^#\/projects\/([^/]+)/)
-  const isProjects = !projectChatMatch && !projectMatch && hash.startsWith('#/projects')
-  const isChat = !projectChatMatch && !projectMatch && !isProjects && hash.startsWith('#/chat')
-  const initialAuthMode = hash.startsWith('#/chat/signup') ? 'signup' : 'login'
+  const isProductRoute = hash.startsWith('#/chat') || hash.startsWith('#/projects')
 
-  let page = <Landing />
-  if (projectChatMatch) {
-    page = (
-      <Authed initialAuthMode={initialAuthMode}>
-        <ProjectWorkspace projectId={projectChatMatch[1]} chatId={projectChatMatch[2]} />
-      </Authed>
-    )
-  } else if (projectMatch) {
-    page = (
-      <Authed initialAuthMode={initialAuthMode}>
-        <ProjectWorkspace projectId={projectMatch[1]} chatId={null} />
-      </Authed>
-    )
-  } else if (isProjects) {
-    page = <Authed initialAuthMode={initialAuthMode}><ProjectsListPage /></Authed>
-  } else if (isChat) {
-    page = <Authed initialAuthMode={initialAuthMode}><ChatApp /></Authed>
-  }
+  if (!isProductRoute) return <Landing />
 
-  return <AuthProvider>{page}</AuthProvider>
+  return (
+    <ProductRouteBoundary>
+      <Suspense
+      fallback={
+        <main className="route-loading" aria-busy="true" aria-live="polite">
+          <span className="route-loading-mark" aria-hidden="true" />
+          <p>Opening the VibeAI workspace…</p>
+        </main>
+      }
+    >
+        <ProductRoutes hash={hash} />
+      </Suspense>
+    </ProductRouteBoundary>
+  )
 }

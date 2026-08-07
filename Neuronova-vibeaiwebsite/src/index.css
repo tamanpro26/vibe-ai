@@ -98,7 +98,7 @@
    * platform mono stack. Mono is doing its real job here (columns of data
    * that must align) rather than dressing chrome up as "technical".
    */
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   /* The serif option in Settings › Appearance › Chat font. */
   --font-serif: Georgia, 'Times New Roman', serif;

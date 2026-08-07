@@ -1,17 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useInView, useReducedMotion } from 'motion/react'
 import SectionHeader from './SectionHeader.jsx'
 import { COUNCIL_STAGES } from '../data.js'
 
 export default function Council() {
   const [active, setActive] = useState(0)
+  const sectionRef = useRef(null)
+  const isInView = useInView(sectionRef, { amount: 0.15 })
+  const reduced = useReducedMotion()
 
   useEffect(() => {
+    if (!isInView || reduced) return undefined
     const id = setInterval(() => setActive((a) => (a + 1) % COUNCIL_STAGES.length), 2400)
     return () => clearInterval(id)
-  }, [])
+  }, [isInView, reduced])
 
   return (
-    <section className="section" id="council">
+    <section className="section" id="council" ref={sectionRef}>
       <div className="container">
         <SectionHeader index="03" label="REASONING" title="Five stages. Many models. One answer.">
           The Free Manager Council never trusts a single model's first attempt. Each answer runs a

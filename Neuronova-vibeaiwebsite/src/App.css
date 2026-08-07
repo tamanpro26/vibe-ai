@@ -94,6 +94,11 @@ main,
   gap: 18px;
 }
 
+.nav-menu-button,
+.nav-mobile-menu {
+  display: none;
+}
+
 .nav-login {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -195,13 +200,14 @@ main,
 }
 
 .hero-title {
-  font-size: clamp(64px, 13vw, 160px);
+  max-width: 1000px;
+  font-size: clamp(52px, 7.4vw, 104px);
   font-weight: 700;
   /* Was +2px: at 160px that reads visibly loose. See --track-hero. */
   letter-spacing: var(--track-hero);
   /* Display type set this large also wants tighter leading than the 1.2-1.4
      that suits body copy, or the lines drift apart into separate objects. */
-  line-height: 0.92;
+  line-height: 0.94;
   color: var(--text);
   text-shadow: 0 0 60px rgba(var(--accent-rgb), 0.25);
 }
@@ -211,10 +217,8 @@ main,
   text-shadow: 0 0 30px rgba(var(--accent-rgb), 0.65);
 }
 
-/* inline-block so the per-character reveal can transform y/filter -- a plain
-   inline span ignores transforms. */
-.hero-char {
-  display: inline-block;
+.hero-title-line {
+  display: block;
   will-change: transform, opacity, filter;
 }
 
@@ -228,10 +232,56 @@ main,
 }
 
 .hero-sub {
-  max-width: 680px;
+  max-width: 720px;
   color: var(--text-dim);
   font-size: 17px;
   margin-bottom: 44px;
+}
+
+.cta-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 42px;
+}
+
+.cta-primary,
+.cta-secondary {
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 11px 20px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+}
+
+.cta-primary {
+  color: var(--on-accent);
+  background: var(--cyan);
+  box-shadow: 0 8px 30px -12px rgba(var(--accent-rgb), 0.7);
+}
+
+.cta-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 10px 34px -10px rgba(var(--accent-rgb), 0.85);
+}
+
+.cta-secondary {
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-inset) 78%, transparent);
+}
+
+.cta-secondary:hover {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: rgba(var(--accent-rgb), 0.06);
 }
 
 .hero-stats {
@@ -986,9 +1036,234 @@ main,
 
 /* ── responsive ─────────────────────────────────────── */
 
+/* ── ecosystem ──────────────────────────────────────── */
+
+.ecosystem-list {
+  border-top: 1px solid var(--line);
+}
+
+.ecosystem-row {
+  display: grid;
+  grid-template-columns: 42px minmax(160px, 0.7fr) minmax(280px, 1.5fr) minmax(150px, 0.7fr);
+  align-items: center;
+  gap: 24px;
+  min-height: 118px;
+  padding: 22px 18px;
+  border-bottom: 1px solid var(--line);
+  transition: background var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
+}
+
+.ecosystem-row:hover,
+.ecosystem-row.is-featured {
+  background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.09), transparent 72%);
+}
+
+.ecosystem-row.is-featured {
+  border-bottom-color: var(--accent-border);
+}
+
+.ecosystem-id,
+.ecosystem-type,
+.ecosystem-row code {
+  font-family: var(--font-mono);
+}
+
+.ecosystem-id {
+  color: var(--cyan);
+  font-size: 11px;
+}
+
+.ecosystem-name-block {
+  display: grid;
+  gap: 6px;
+}
+
+.ecosystem-type {
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+}
+
+.ecosystem-name-block h3 {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.ecosystem-row p {
+  color: var(--text-dim);
+  font-size: 14.5px;
+}
+
+.ecosystem-row code {
+  justify-self: end;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-align: right;
+}
+
+/* ── security ───────────────────────────────────────── */
+
+.security-section {
+  background:
+    linear-gradient(120deg, color-mix(in srgb, var(--warning) 5%, transparent), transparent 48%),
+    var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.security-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(420px, 1.45fr);
+  gap: 54px;
+  align-items: start;
+}
+
+.security-principle {
+  position: sticky;
+  top: 92px;
+  display: grid;
+  gap: 15px;
+  padding: 28px;
+  background: var(--bg2);
+  border: 1px solid var(--warning-border);
+  border-radius: 4px;
+}
+
+.security-signal {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--warning) 52%, transparent);
+}
+
+.security-principle > p {
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.security-principle strong {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.24;
+}
+
+.security-principle > span:last-child {
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.security-controls {
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.security-controls li {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 18px;
+  padding: 26px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.security-controls li > span {
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.security-controls h3 {
+  margin-bottom: 7px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 18px;
+}
+
+.security-controls p {
+  color: var(--text-dim);
+  font-size: 14.5px;
+}
+
 @media (max-width: 960px) {
   .nav-links {
     display: none;
+  }
+
+  .nav-menu-button {
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .nav-menu-button span {
+    width: 16px;
+    height: 1px;
+    background: currentColor;
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+
+  .nav-menu-button[aria-expanded='true'] span:first-child {
+    transform: translateY(3.5px) rotate(45deg);
+  }
+
+  .nav-menu-button[aria-expanded='true'] span:last-child {
+    transform: translateY(-3.5px) rotate(-45deg);
+  }
+
+  .nav-mobile-menu {
+    position: absolute;
+    top: calc(100% + 1px);
+    left: 16px;
+    right: 16px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 18px;
+    background: color-mix(in srgb, var(--bg-overlay) 96%, var(--bg-inset));
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .nav-mobile-kicker {
+    grid-column: 1 / -1;
+    margin-bottom: 10px;
+    color: var(--text-faint);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  .nav-mobile-menu a {
+    min-height: 46px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--line-soft);
+    font-size: 14px;
+  }
+
+  .nav-mobile-menu a span {
+    color: var(--cyan);
+    font-family: var(--font-mono);
+    font-size: 10px;
   }
 
   .failover-grid {
@@ -1012,9 +1287,22 @@ main,
   }
 
   .problem-grid,
-  .eng-cols {
+  .eng-cols,
+  .security-layout {
     grid-template-columns: 1fr;
     gap: 34px;
+  }
+
+  .ecosystem-row {
+    grid-template-columns: 34px minmax(150px, 0.7fr) minmax(280px, 1.3fr);
+  }
+
+  .ecosystem-row code {
+    display: none;
+  }
+
+  .security-principle {
+    position: static;
   }
 
   .ceo-card {
@@ -1025,6 +1313,68 @@ main,
 }
 
 @media (max-width: 620px) {
+  .nav {
+    gap: 12px;
+    padding-inline: 16px;
+  }
+
+  .nav.is-scrolled {
+    padding-inline: 16px;
+  }
+
+  .nav-auth {
+    gap: 8px;
+  }
+
+  .nav-login {
+    display: none;
+  }
+
+  .nav-signup {
+    min-height: 40px;
+    padding-inline: 10px;
+  }
+
+  .hero {
+    padding-top: 118px;
+  }
+
+  .hero-title {
+    font-size: clamp(44px, 13vw, 58px);
+    line-height: 0.98;
+  }
+
+  .hero-eyebrow {
+    max-width: 300px;
+    font-size: 10px;
+    letter-spacing: 2.6px;
+  }
+
+  .hero-tagline {
+    max-width: 320px;
+    letter-spacing: 2.4px;
+    line-height: 1.7;
+  }
+
+  .hero-sub {
+    font-size: 16px;
+  }
+
+  .cta-row {
+    width: 100%;
+  }
+
+  .hero .cta-primary,
+  .hero .cta-secondary {
+    flex: 1 1 100%;
+  }
+
+  .nav-mobile-menu {
+    grid-template-columns: 1fr;
+    max-height: calc(100vh - 84px);
+    overflow-y: auto;
+  }
+
   .section {
     padding: 80px 0;
   }
@@ -1069,6 +1419,85 @@ main,
     flex-direction: column;
     text-align: center;
   }
+
+  .ecosystem-row {
+    grid-template-columns: 30px 1fr;
+    gap: 10px 14px;
+    padding: 20px 8px;
+  }
+
+  .ecosystem-row p {
+    grid-column: 2;
+  }
+
+  .security-principle {
+    padding: 22px;
+  }
+
+  .security-controls li {
+    grid-template-columns: 30px 1fr;
+    gap: 12px;
+  }
+}
+
+/* Route-level loading feedback stays in the public bundle so it appears while
+   the authenticated application and Clerk are still downloading. */
+.route-loading {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 18px;
+  color: var(--text-dim);
+  background: var(--bg-canvas);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 1.4px;
+}
+
+.route-loading-mark {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--accent-border);
+  transform: rotate(45deg);
+  box-shadow: inset 0 0 14px var(--accent-subtle), 0 0 24px var(--accent-glow);
+  animation: route-pulse 1.2s var(--ease-out) infinite alternate;
+}
+
+.route-error {
+  padding-inline: 24px;
+  text-align: center;
+}
+
+.route-error h1 {
+  margin: 4px 0 0;
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: clamp(1.6rem, 4vw, 2.6rem);
+  letter-spacing: normal;
+}
+
+.route-error p {
+  max-width: 560px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  letter-spacing: normal;
+}
+
+.route-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.route-error-actions button {
+  font: inherit;
+}
+
+@keyframes route-pulse {
+  to { opacity: 0.45; transform: rotate(135deg) scale(0.78); }
 }
 
 /* ── spotlight cards ─────────────────────────────────────

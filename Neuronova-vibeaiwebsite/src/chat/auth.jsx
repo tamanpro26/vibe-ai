@@ -52,4 +52,7 @@ export function AuthProvider({ children }) {
   )
 }
 
+// This module intentionally exports the provider and its paired hook: they
+// share one private context and form a single public auth boundary.
+// oxlint-disable-next-line react/only-export-components
 export const useAuth = () => useContext(AuthCtx)

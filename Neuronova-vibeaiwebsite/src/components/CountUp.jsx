@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInView, animate, useReducedMotion } from 'motion/react'
 
 /*
@@ -14,7 +14,9 @@ export default function CountUp({ value }) {
   const ref = useRef(null)
   const isInView = useInView(ref, { once: true, margin: '-10% 0px' })
   const reduced = useReducedMotion()
-  const match = String(value).match(/^(\D*)(\d+)(\D*)$/)
+  // Keep the parsed wrapper stable across animation renders. Recreating the
+  // match array on each onUpdate used to restart the effect repeatedly.
+  const match = useMemo(() => String(value).match(/^(\D*)(\d+)(\D*)$/), [value])
   const [display, setDisplay] = useState(reduced || !match ? value : `${match[1]}0${match[3]}`)
 
   useEffect(() => {
