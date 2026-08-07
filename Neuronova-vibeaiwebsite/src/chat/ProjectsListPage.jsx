@@ -66,7 +66,7 @@ function CreateProjectModal({ open, onClose, onCreate }) {
           transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
         >
           <motion.div
-            className="set-dialog proj-create-dialog"
+            className="set-dialog is-single proj-create-dialog"
             role="dialog"
             aria-modal="true"
             aria-label="Create a project"

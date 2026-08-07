@@ -2125,6 +2125,25 @@
   outline: none;
 }
 
+/* Single-pane dialogs: Create project, Registry.
+ *
+ * .set-dialog above is a two-column grid (210px nav + content) because
+ * Settings has an index rail. A dialog WITHOUT a .set-nav has only one
+ * child, so that child lands in the 210px nav column and the whole dialog
+ * renders as a squeezed strip with its buttons clipped off the edge -- which
+ * is exactly what shipped. Both single-pane dialogs opt out here rather than
+ * each re-declaring the grid, so a third one can't reintroduce the bug.
+ *
+ * Height goes auto for the same reason: the fixed 620px was sized for
+ * Settings' scrolling sections and leaves a short form floating in dead
+ * space.
+ */
+.set-dialog.is-single {
+  grid-template-columns: 1fr;
+  height: auto;
+  max-height: 90vh;
+}
+
 /* The index tabs, on the bound edge. */
 .set-nav {
   position: relative;
@@ -2599,7 +2618,27 @@
 /* ── Create-project dialog ─────────────────────────────────────────────── */
 
 .proj-create-dialog {
-  max-width: 480px;
+  width: min(560px, 100%);
+}
+
+/* These two are real questions put to the user, not the tiny caps field
+   markers Settings uses for its dense preference rows -- and at caps with
+   0.04em tracking they wrapped to two shouting lines in a narrow dialog. */
+.proj-create-dialog .set-field-label {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-primary);
+  margin-bottom: var(--sp-2);
+}
+
+.proj-create-dialog .set-pane {
+  padding: var(--sp-6);
+}
+
+.proj-create-dialog .set-input {
+  width: 100%;
 }
 
 .proj-create-actions {

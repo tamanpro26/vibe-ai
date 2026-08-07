@@ -53,11 +53,11 @@ export default function RegistryPanel({ open, onClose }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  const entries = data?.entries || []
+  const entries = data?.entries
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return entries.filter((e) => {
+    return (entries || []).filter((e) => {
       if (provider !== 'all' && e.provider !== provider) return false
       if (!q) return true
       return (
@@ -88,7 +88,7 @@ export default function RegistryPanel({ open, onClose }) {
           transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
         >
           <motion.div
-            className="set-dialog reg-dialog"
+            className="set-dialog is-single reg-dialog"
             role="dialog"
             aria-modal="true"
             aria-label="Model and team registry"
