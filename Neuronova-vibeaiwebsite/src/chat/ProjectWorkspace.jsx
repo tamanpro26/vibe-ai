@@ -90,6 +90,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
   const [streaming, setStreaming] = useState(false)
   const [attachments, setAttachments] = useState([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [projectDetailsOpen, setProjectDetailsOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [registryOpen, setRegistryOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -614,6 +615,16 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         <div className="chat-top-right">
           <button
             type="button"
+            className="proj-details-toggle"
+            aria-label="Toggle project details"
+            aria-controls="project-details"
+            aria-expanded={projectDetailsOpen}
+            onClick={() => setProjectDetailsOpen((open) => !open)}
+          >
+            Details
+          </button>
+          <button
+            type="button"
             className={`proj-star${project.starred ? ' is-on' : ''}`}
             aria-label={project.starred ? 'Unstar project' : 'Star project'}
             aria-pressed={!!project.starred}
@@ -709,7 +720,15 @@ export default function ProjectWorkspace({ projectId, chatId }) {
           />
         </div>
 
-        <aside className="proj-side">
+        {projectDetailsOpen && (
+          <button
+            type="button"
+            className="proj-side-scrim"
+            aria-label="Close project details"
+            onClick={() => setProjectDetailsOpen(false)}
+          />
+        )}
+        <aside id="project-details" className={`proj-side${projectDetailsOpen ? ' is-open' : ''}`}>
           <section className="proj-side-section">
             <div className="proj-side-head">
               <h3 className="proj-side-h3">Memory</h3>
