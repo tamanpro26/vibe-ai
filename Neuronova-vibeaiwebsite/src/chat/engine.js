@@ -492,7 +492,7 @@ export async function continueEdge(history, partialText, token, mode = DEFAULT_M
   return { text: data.text, truncated: !!data.truncated }
 }
 
-export async function respondLive(prompt, sessionId, team = 'auto') {
+export async function respondLive(prompt, sessionId, team = 'auto', mode = DEFAULT_MODE, imageB64 = '') {
   // Image requests are served browser-side even in LIVE mode: /api/prompt
   // returns prose, not pictures, so routing an image ask through it would
   // yield a description of an image rather than an image.
@@ -501,7 +501,16 @@ export async function respondLive(prompt, sessionId, team = 'auto') {
   const res = await fetch(`${API_BASE}/api/prompt`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ prompt, session_id: sessionId, team }),
+    // Same /api/prompt the manager proxy calls, so it carries an attached
+    // image too -- otherwise local dev would answer blind against a backend
+    // that supports vision perfectly well.
+    body: JSON.stringify({
+      prompt,
+      session_id: sessionId,
+      team,
+      reasoning_mode: mode,
+      image_b64: imageB64 || undefined,
+    }),
   })
   if (!res.ok) throw new Error(`API returned ${res.status}`)
   const data = await res.json()
@@ -533,7 +542,9 @@ export async function checkTeam() {
   }
 }
 
-export async function respondTeam(prompt, sessionId, token, systemPrompt = '', team = 'auto') {
+export async function respondTeam(
+  prompt, sessionId, token, systemPrompt = '', team = 'auto', mode = DEFAULT_MODE, imageB64 = '',
+) {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
 
   const res = await fetch('/api/team', {
@@ -542,11 +553,128 @@ export async function respondTeam(prompt, sessionId, token, systemPrompt = '', t
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ prompt, session_id: sessionId, systemPrompt, team }),
+    body: JSON.stringify({
+      prompt,
+      session_id: sessionId,
+      systemPrompt,
+      team,
+      reasoning_mode: mode,
+      // The only route to the vision team from a browser. See api/team.js.
+      image_b64: imageB64 || undefined,
+    }),
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data?.error || `team proxy ${res.status}`)
   return { text: data.text, project: null }
+}
+
+/* ── Attachments: read the actual bytes ────────────────────────────────────
+ * ChatApp used to keep only {name, size}, so nothing about an attached file
+ * ever reached a model. These read real content in the browser:
+ *   image/*  -> base64, sent as image_b64 for the vision team
+ *   text     -> inlined into the prompt as context
+ *   video    -> flagged unsupported (see below), never silently ignored
+ *
+ * Video is deliberately NOT base64'd into the prompt. The vision team wants
+ * a server-side video_path or a pre-extracted .frames directory (it samples
+ * frames), and real videos blow past Vercel's ~4.5MB body limit anyway.
+ * Routing video properly means POSTing the file to the backend's /api/video,
+ * which is a separate upload path -- until that exists, saying so beats
+ * pretending.
+ */
+const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024 // ~3.4MB base64, under the proxy cap
+const MAX_TEXT_BYTES = 128 * 1024
+const TEXT_RE = /\.(txt|md|markdown|json|ya?ml|csv|tsv|log|ini|toml|cfg|conf|xml|html?|css|scss|jsx?|tsx?|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|bash|zsh|sql|env|gitignore|dockerfile)$/i
+
+export async function readAttachments(fileList) {
+  const out = []
+  for (const file of Array.from(fileList)) {
+    const name = file.webkitRelativePath || file.name
+    const base = { name, size: file.size, type: file.type || '' }
+
+    if (file.type.startsWith('image/')) {
+      if (file.size > MAX_IMAGE_BYTES) {
+        out.push({ ...base, kind: 'image', error: `too large (max ${MAX_IMAGE_BYTES / 1024 / 1024}MB)` })
+        continue
+      }
+      try {
+        // Strip the "data:image/png;base64," prefix -- the backend and the
+        // vision models want bare base64.
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader()
+          fr.onload = () => resolve(fr.result)
+          fr.onerror = () => reject(fr.error)
+          fr.readAsDataURL(file)
+        })
+        out.push({ ...base, kind: 'image', b64: String(dataUrl).split(',')[1] || '' })
+      } catch {
+        out.push({ ...base, kind: 'image', error: 'unreadable' })
+      }
+      continue
+    }
+
+    if (file.type.startsWith('video/')) {
+      out.push({ ...base, kind: 'video' })
+      continue
+    }
+
+    if (TEXT_RE.test(name) || file.type.startsWith('text/')) {
+      if (file.size > MAX_TEXT_BYTES) {
+        out.push({ ...base, kind: 'text', error: `too large (max ${MAX_TEXT_BYTES / 1024}KB)` })
+        continue
+      }
+      try {
+        out.push({ ...base, kind: 'text', content: await file.text() })
+      } catch {
+        out.push({ ...base, kind: 'text', error: 'unreadable' })
+      }
+      continue
+    }
+
+    out.push({ ...base, kind: 'other' })
+  }
+  return out
+}
+
+/**
+ * Strip an attachment down to what's safe to KEEP in chat history.
+ *
+ * The payloads are for one request, not for storage. A single 2.5MB image
+ * becomes ~3.4MB of base64, and chat history lives in localStorage, which
+ * gives roughly 5MB for the whole origin -- persisting one would evict the
+ * user's entire history (and every project) to save a picture they can
+ * already see. Keeps only what the message bubble renders.
+ */
+export const stripAttachmentPayloads = (attachments = []) =>
+  (attachments || []).map(({ name, size, kind, type, error }) => ({
+    name, size, kind, type, error,
+  }))
+
+/** Split read attachments into what each transport can actually carry. */
+export function packAttachments(attachments = []) {
+  let imageB64 = ''
+  const textParts = []
+  const unsupported = []
+
+  for (const a of attachments || []) {
+    if (a.kind === 'image' && a.b64 && !imageB64) {
+      // One image per turn: the vision path takes a single image_b64, and
+      // silently dropping the 2nd..nth would be worse than saying so.
+      imageB64 = a.b64
+    } else if (a.kind === 'image' && a.b64) {
+      unsupported.push(`a second image (${a.name}; only one image per message is sent)`)
+    } else if (a.kind === 'text' && a.content) {
+      textParts.push(`[Attached file: ${a.name}]\n${a.content}`)
+    } else if (a.kind === 'video') {
+      unsupported.push(`a video (${a.name})`)
+    } else if (a.error) {
+      unsupported.push(`${a.name} (${a.error})`)
+    } else if (a.kind === 'other') {
+      unsupported.push(`${a.name} (unsupported file type)`)
+    }
+  }
+
+  return { imageB64, textContext: textParts.join('\n\n'), unsupported }
 }
 
 /* ── Engine cascade: one fallback order, every caller shares it ────────────
@@ -578,9 +706,41 @@ export async function dispatchEngineReply({
   if (probe.probeRef.current) await probe.probeRef.current
   const engines = probe.engineRef.current
 
+  /* Attachments are unpacked ONCE here rather than inside each tier, so
+     every tier benefits: text files get inlined as context for all of them,
+     and anything unreadable is declared rather than silently dropped. Only
+     the manager tier can carry an image (it reaches the vision team); the
+     single-model tiers get told an image was attached instead of pretending
+     none was.
+
+     Before this, `sent` was passed in and used ONLY by the simulated
+     fallback -- every real tier ignored attachments entirely, which is why
+     uploading a file and asking about it produced an answer about nothing. */
+  const { imageB64, textContext, unsupported } = packAttachments(sent)
+  let prompt = text
+  if (textContext) prompt = `${textContext}\n\n---\n${text}`
+  const cannotCarryImage = imageB64
+    ? ['an image (this engine tier cannot see images)']
+    : []
+
+  // Only the manager tier reaches the vision team, so it is the one tier
+  // that receives the image itself; the rest are told an image exists.
+  const withNotes = (base, notes) =>
+    notes.length
+      ? `[The user attached ${notes.join(', ')}. Say so plainly instead of ` +
+        `guessing at the contents.]
+
+${base}`
+      : base
+
+  const managerPrompt = withNotes(prompt, unsupported)
+  const blindPrompt = withNotes(prompt, [...unsupported, ...cannotCarryImage])
+
   if (engines.live) {
     try {
-      return await respondLive(text, convId, team)
+      // Live hits the same /api/prompt as the manager proxy, so it carries
+      // the image too -- it is not a blind tier.
+      return await respondLive(managerPrompt, convId, team, mode, imageB64)
     } catch (err) {
       console.error('[engine:live] failed, falling through:', err)
       probe.setLive(false)
@@ -591,7 +751,7 @@ export async function dispatchEngineReply({
   if (engines.manager) {
     try {
       const token = await getToken()
-      return await respondTeam(text, convId, token, systemPrompt, team)
+      return await respondTeam(managerPrompt, convId, token, systemPrompt, team, mode, imageB64)
     } catch (err) {
       console.error('[engine:manager] failed, falling through:', err)
       probe.setManager(false)
@@ -601,7 +761,7 @@ export async function dispatchEngineReply({
 
   if (engines.omni) {
     try {
-      return await respondOmni(text, history, mode, systemPrompt)
+      return await respondOmni(blindPrompt, history, mode, systemPrompt)
     } catch (err) {
       console.error('[engine:omni] failed, falling through:', err)
       probe.setOmni(false)
@@ -612,7 +772,7 @@ export async function dispatchEngineReply({
   if (engines.edge) {
     try {
       const token = await getToken()
-      return await respondEdge(text, history, token, mode, systemPrompt)
+      return await respondEdge(blindPrompt, history, token, mode, systemPrompt)
     } catch (err) {
       console.error('[engine:edge] failed, falling through:', err)
       probe.setEdge(false)

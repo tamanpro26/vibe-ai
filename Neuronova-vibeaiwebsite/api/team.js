@@ -84,6 +84,27 @@ export default async function handler(req, res) {
     return
   }
 
+  /*
+   * Image passthrough — the only route by which a browser can reach the
+   * vision team. The backend's own media detection scans the prompt for a
+   * filename and checks the SERVER's disk, which can never match a file
+   * sitting on the user's machine, so the bytes have to travel explicitly.
+   *
+   * Capped at 3.5MB of base64. Vercel rejects a serverless request body
+   * over ~4.5MB with a 413 that surfaces as an opaque network failure, so
+   * this returns a specific, actionable error just under that line instead
+   * of letting the platform fail the request anonymously. Base64 is ~4/3
+   * the size of the raw file, so 3.5MB here is roughly a 2.6MB image.
+   */
+  const MAX_IMAGE_B64 = 3.5 * 1024 * 1024
+  const imageB64 = typeof req.body?.image_b64 === 'string' ? req.body.image_b64 : ''
+  if (imageB64.length > MAX_IMAGE_B64) {
+    res.status(413).json({
+      error: `Image too large to send (${(imageB64.length / 1024 / 1024).toFixed(1)}MB encoded, limit ${(MAX_IMAGE_B64 / 1024 / 1024).toFixed(1)}MB). Try a smaller or more compressed image.`,
+    })
+    return
+  }
+
   try {
     const upstream = await fetch(`${VIBE_BACKEND_URL}/api/prompt`, {
       method: 'POST',
@@ -95,6 +116,8 @@ export default async function handler(req, res) {
         prompt,
         session_id: typeof req.body?.session_id === 'string' ? req.body.session_id : undefined,
         team: typeof req.body?.team === 'string' ? req.body.team : undefined,
+        reasoning_mode: typeof req.body?.reasoning_mode === 'string' ? req.body.reasoning_mode : undefined,
+        image_b64: imageB64 || undefined,
       }),
     })
     const data = await upstream.json()

@@ -3474,6 +3474,163 @@ class TestScaffoldLoader:
         assert get_prompt("FAST_SYSTEM", "default") == "default"
 
 
+class TestPromptMediaReachesVisionTeam:
+    """/api/prompt must forward media as `extra`.
+
+    The vision team, and _dispatch's force-activation of it, were both fully
+    built and working -- but nothing ever populated `extra` from a web
+    request, so an uploaded image or video got a text-only answer from a
+    model that could not see it. The backend's own _detect_media() cannot
+    close this gap: it scans the prompt for a filename and checks the
+    SERVER's disk, which never matches a file on the user's machine.
+    """
+
+    def _capture(self, monkeypatch):
+        import api.server as server_mod
+
+        seen = {}
+
+        async def fake_handle(prompt, **kwargs):
+            seen["prompt"] = prompt
+            seen.update(kwargs)
+            return "ok"
+
+        monkeypatch.setattr(server_mod.manager, "handle_user_request", fake_handle)
+        return server_mod, seen
+
+    def test_image_is_forwarded_as_extra(self, monkeypatch):
+        import asyncio
+
+        server_mod, seen = self._capture(monkeypatch)
+        asyncio.run(server_mod.handle_prompt(
+            server_mod.PromptRequest(prompt="what is this?", image_b64="QUJD")
+        ))
+        assert seen["extra"] == {"image_b64": "QUJD"}
+
+    def test_video_and_frames_paths_forwarded(self, monkeypatch):
+        import asyncio
+
+        server_mod, seen = self._capture(monkeypatch)
+        asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(
+            prompt="describe it", video_path="/srv/a.mp4", frames_path="/srv/a.frames",
+        )))
+        assert seen["extra"] == {"video_path": "/srv/a.mp4", "frames_path": "/srv/a.frames"}
+
+    def test_no_media_sends_no_extra(self, monkeypatch):
+        """A plain text turn must NOT pass an empty extra: a non-empty extra
+        deliberately bypasses the fast path, so sending {} would push every
+        ordinary message through the full pipeline."""
+        import asyncio
+
+        server_mod, seen = self._capture(monkeypatch)
+        asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(prompt="hello")))
+        assert "extra" not in seen
+
+    def test_media_combines_with_team_and_mode(self, monkeypatch):
+        import asyncio
+
+        server_mod, seen = self._capture(monkeypatch)
+        asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(
+            prompt="x", image_b64="QQ", team="vision", reasoning_mode="deep",
+        )))
+        assert seen["extra"] == {"image_b64": "QQ"}
+        assert seen["forced_team"] == "vision"
+        assert seen["reasoning_mode"] == "deep"
+
+    def test_media_bypasses_the_fast_path(self):
+        """The guard that makes this work: a media request must never reach
+        _try_fast_path, which answers with a single text model that cannot
+        see. Asserted against the manager's real source rather than mocked,
+        since this is the line that makes the whole feature correct."""
+        import inspect
+        from manager.claude_manager import ClaudeManager
+
+        src = inspect.getsource(ClaudeManager.handle_user_request)
+        fast_path_guard = [
+            line for line in src.splitlines()
+            if "_try_fast_path" in line or ("if not extra" in line and "forced_team" in line)
+        ]
+        assert any("not extra" in line for line in fast_path_guard), (
+            "handle_user_request must gate the fast path on `not extra`"
+        )
+
+
+class TestMediaKeepsOriginalPrompt:
+    """A text-only refiner must not rewrite a prompt about media it can't see.
+
+    Observed live: "Describe this image. What shape and what colour is it?"
+    came back from the refiner as "Please provide the image you would like me
+    to describe" -- a model's REPLY captured as the refined prompt, because
+    every refiner stage is text-only and the image is invisible to it. That
+    string then became the vision team's instruction and the web-search
+    query, so the one team that CAN see the image was told to ask for it.
+    """
+
+    def _manager(self, monkeypatch, refined):
+        import asyncio
+        from core.imcp import TaskJSON, TeamActivation, Classification, TaskType, Complexity
+        from manager.claude_manager import ClaudeManager
+
+        mgr = ClaudeManager()
+        seen = {}
+
+        async def fake_refiner(prompt, sid=""):
+            return TaskJSON(
+                original_prompt=prompt,
+                refined_prompt=refined,
+                classification=Classification(
+                    primary_type=TaskType.VIBE_CODING, complexity=Complexity.MODERATE
+                ),
+                active_teams={"vision": TeamActivation(active=True)},
+            )
+
+        async def fake_dispatch(sid, task_json, extra, mem, search):
+            seen["refined"] = task_json.refined_prompt
+            return {"vision": "ok"}
+
+        async def blank(*a, **kw):
+            return ""
+
+        async def no_fast(*a, **kw):
+            return None
+
+        async def synth(*a, **kw):
+            return "done"
+
+        monkeypatch.setattr(mgr._refiner, "run", fake_refiner)
+        monkeypatch.setattr(mgr, "_dispatch", fake_dispatch)
+        monkeypatch.setattr(mgr, "_retrieve_memory", blank)
+        monkeypatch.setattr(mgr, "_fetch_search_context", blank)
+        monkeypatch.setattr(mgr, "_synthesise", synth)
+        monkeypatch.setattr(mgr, "_store_memory", blank)
+        monkeypatch.setattr(mgr, "_try_fast_path", no_fast)
+        return mgr, seen, asyncio
+
+    def test_media_request_keeps_the_users_wording(self, monkeypatch):
+        prompt = "Describe this image. What shape and what colour is it?"
+        mgr, seen, asyncio = self._manager(
+            monkeypatch, "Please provide the image you would like me to describe"
+        )
+        asyncio.run(mgr.handle_user_request(prompt, extra={"image_b64": "QUJD"}))
+        assert seen["refined"] == prompt
+
+    def test_text_request_still_uses_the_refiner(self, monkeypatch):
+        """The fix must be scoped to media -- refinement is valuable for
+        ordinary text prompts and has to keep working."""
+        import sys, types
+
+        # The creative engine returns before _dispatch for creative prompts;
+        # neutralise it so this reaches the pipeline being tested.
+        stub = types.ModuleType("tools.creative_engine")
+        stub.creative_engine = None
+        stub.is_creative_task = lambda p: False
+        monkeypatch.setitem(sys.modules, "tools.creative_engine", stub)
+
+        mgr, seen, asyncio = self._manager(monkeypatch, "REFINED VERSION")
+        asyncio.run(mgr.handle_user_request("refactor the database schema"))
+        assert seen["refined"] == "REFINED VERSION"
+
+
 class TestPromptTeamOverride:
     """/api/prompt's 'team' field (the website's 'Route to team' selector)
     must be validated at the API boundary -- a bad value (the UI's own
@@ -3508,6 +3665,27 @@ class TestPromptTeamOverride:
         for bad in ("auto", "leadership", "not-a-team", None):
             asyncio.run(server_mod.handle_prompt(server_mod.PromptRequest(prompt="x", team=bad)))
         assert captured == [None, None, None, None]
+
+    def test_reasoning_mode_is_forwarded_to_manager(self, monkeypatch):
+        import asyncio
+        import api.server as server_mod
+
+        captured = {}
+
+        async def fake_handle(prompt, forced_team=None, reasoning_mode=None):
+            captured["forced_team"] = forced_team
+            captured["reasoning_mode"] = reasoning_mode
+            return "ok"
+
+        monkeypatch.setattr(server_mod.manager, "handle_user_request", fake_handle)
+
+        asyncio.run(
+            server_mod.handle_prompt(
+                server_mod.PromptRequest(prompt="reason about this", reasoning_mode="deep")
+            )
+        )
+
+        assert captured == {"forced_team": None, "reasoning_mode": "deep"}
 
 
 class TestProjectFileCollection:
@@ -3782,6 +3960,51 @@ class TestTeamOverride:
         from manager.claude_manager import _FORCEABLE_TEAMS
         assert "auto" not in _FORCEABLE_TEAMS
         assert "router" not in _FORCEABLE_TEAMS  # router isn't a forceable content team
+
+
+class TestWebsiteReasoningModes:
+    """Website modes are orchestration levels, not single-model aliases."""
+
+    def test_reasoning_mode_skips_single_model_fast_path(self, monkeypatch):
+        import asyncio
+        from manager.claude_manager import ClaudeManager
+        from core.imcp import TaskJSON, Classification, Complexity, TaskType
+
+        mgr = ClaudeManager()
+
+        async def fail_fast_path(*args, **kwargs):
+            raise AssertionError("website reasoning modes must not use the single-model fast path")
+
+        async def fake_refiner_run(*args, **kwargs):
+            return TaskJSON(
+                original_prompt="x",
+                refined_prompt="x",
+                classification=Classification(primary_type=TaskType.VIBE_CODING, complexity=Complexity.SIMPLE),
+            )
+
+        async def fake_dispatch(*args, **kwargs):
+            return {"brain": "orchestrated answer"}
+
+        async def fake_synthesise(*args, **kwargs):
+            return "final orchestrated answer"
+
+        async def no_context(*args, **kwargs):
+            return ""
+
+        async def no_store(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(mgr, "_try_fast_path", fail_fast_path)
+        monkeypatch.setattr(mgr._refiner, "run", fake_refiner_run)
+        monkeypatch.setattr(mgr, "_dispatch", fake_dispatch)
+        monkeypatch.setattr(mgr, "_synthesise", fake_synthesise)
+        monkeypatch.setattr(mgr, "_retrieve_memory", no_context)
+        monkeypatch.setattr(mgr, "_fetch_search_context", no_context)
+        monkeypatch.setattr(mgr, "_store_memory", no_store)
+
+        result = asyncio.run(mgr.handle_user_request("solve this", reasoning_mode="fast"))
+
+        assert result == "final orchestrated answer"
 
 
 class TestZaiToolCallsTokenFloor:

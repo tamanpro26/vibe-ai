@@ -1079,13 +1079,14 @@
   max-width: var(--col-content);
   margin: 0 auto;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--sp-2);
-  min-height: 56px;
+  min-height: 122px;
   background: var(--bg-overlay);
   border: 1px solid var(--border-default);
   border-radius: var(--r-xl);
-  padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+  padding: var(--sp-4);
   box-shadow: var(--e-3);
   transition:
     border-color var(--dur-fast) var(--ease-out),
@@ -1155,6 +1156,8 @@
 }
 
 .composer textarea {
+  width: 100%;
+  box-sizing: border-box;
   flex: 1;
   resize: none;
   background: none;
@@ -1166,28 +1169,38 @@
   line-height: var(--lh-snug);
   max-height: 200px;
   /* Real air, not 7px. */
-  padding: var(--sp-2) 0;
+  padding: var(--sp-2) 0 var(--sp-4);
 }
 
 .composer textarea::placeholder {
   color: var(--text-faint);
 }
 
+.composer-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
 /* One of the two places filled accent is allowed on this screen. Circular and
    solid: the primary action should be the single most obvious target here. */
 .send-btn {
-  width: 36px;
+  min-width: 72px;
   height: 36px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--fs-lg);
+  margin-left: auto;
+  padding: 0 var(--sp-4);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
   font-weight: var(--fw-semi);
   color: var(--on-accent);
   background: var(--accent);
   border: none;
-  border-radius: var(--r-full);
+  border-radius: var(--r-md);
   cursor: pointer;
 }
 
@@ -1220,6 +1233,76 @@
   font-family: var(--font-sans);
   font-size: var(--fs-2);
   color: var(--text-faint);
+}
+
+/* The greeting is the only welcome object. It gives the user a calm entry
+   point while the composer remains the obvious next action. */
+.empty-state {
+  max-width: 760px;
+  padding-top: clamp(64px, 15vh, 180px);
+  text-align: center;
+}
+
+.empty-state h1 {
+  margin-bottom: var(--sp-2);
+  font-family: var(--font-display);
+  font-weight: var(--fw-medium);
+}
+
+.empty-kicker {
+  display: block;
+  margin-bottom: var(--sp-4);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.empty-state > p {
+  margin-inline: auto;
+  margin-bottom: 0;
+}
+
+.composer-toolbar {
+  min-width: 0;
+}
+
+.composer-team-select .listbox-trigger {
+  min-width: 132px;
+  height: 30px;
+  font-size: var(--fs-caption);
+}
+
+.composer-mode-switch {
+  height: 30px;
+}
+
+.composer-mode-switch .mode-btn {
+  height: 24px;
+  padding-inline: 8px;
+  font-size: var(--fs-micro);
+}
+
+@media (max-width: 640px) {
+  .composer-wrap {
+    padding-inline: var(--sp-3);
+  }
+
+  .composer-controls {
+    flex-wrap: wrap;
+  }
+
+  .composer-toolbar {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    padding-top: var(--sp-1);
+  }
+
+  .send-btn {
+    min-width: 62px;
+  }
 }
 
 /* ── drag & drop overlay ────────────────────────────── */

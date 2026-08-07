@@ -41,6 +41,15 @@ from tools.manager_fallback import fallback_chain, BACKUP_MANAGER_SYSTEM
 
 _FORCEABLE_TEAMS = ("brain", "code", "vision", "design")
 
+# Website reasoning levels are orchestration preferences, not model aliases.
+# Their presence enters the Manager's normal refiner -> specialist-team ->
+# synthesis pipeline instead of the single-model simple-request fast path.
+_REASONING_MODE_GUIDANCE = {
+    "fast": "Work through VibeAI's orchestration pipeline, but keep the task focused and the final answer concise.",
+    "balanced": "Use VibeAI's standard multi-agent plan, specialist work, critique, and synthesis for a dependable answer.",
+    "deep": "Use VibeAI's most deliberate orchestration. Examine assumptions, route to the needed specialists, critique the result, and surface meaningful trade-offs.",
+}
+
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".frames"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _MEDIA_RE   = re.compile(
@@ -174,9 +183,11 @@ class ClaudeManager:
         user_prompt: str,
         extra: dict[str, Any] | None = None,
         forced_team: str | None = None,
+        reasoning_mode: str | None = None,
     ) -> str:
         session_id = f"s_{uuid.uuid4().hex[:8]}"
         extra      = extra or {}
+        reasoning_guidance = _REASONING_MODE_GUIDANCE.get(reasoning_mode or "")
         from core.collab_viz import emit as viz
         viz("stage", "User request received")
 
@@ -200,7 +211,7 @@ class ClaudeManager:
         # override (e.g. the website's "Route to team" selector) must skip
         # them -- otherwise the user's pick would be silently ignored exactly
         # the way it was before this was wired up.
-        if not extra and forced_team is None:
+        if not extra and forced_team is None and reasoning_guidance is None:
             try:
                 from tools.creative_engine import creative_engine, is_creative_task
                 if is_creative_task(user_prompt):
@@ -211,7 +222,7 @@ class ClaudeManager:
                 logger.warning(f"[manager] creative engine failed ({str(exc)[:60]}) — pipeline")
 
         # 0b. Fast path — simple text-only requests skip the heavy pipeline
-        if not extra and forced_team is None:
+        if not extra and forced_team is None and reasoning_guidance is None:
             viz("stage", "Manager triaging request (fast path check)…")
             fast = await self._try_fast_path(user_prompt)
             if fast is not None:
@@ -219,11 +230,18 @@ class ClaudeManager:
                 return fast
 
         # 1a. Prompt Enhancer — strengthen prompt before the Prompt Refiner sees it
-        enhanced_prompt = user_prompt
+        pipeline_prompt = user_prompt
+        if reasoning_guidance:
+            pipeline_prompt = (
+                f"{user_prompt}\n\n"
+                f"[VibeAI reasoning level: {reasoning_mode}]\n{reasoning_guidance}"
+            )
+
+        enhanced_prompt = pipeline_prompt
         try:
             from teams.prompt_enhancer import prompt_enhancer
             viz("stage", "Prompt Enhancer strengthening the request (3 models in parallel)…")
-            enhanced_prompt = await prompt_enhancer.enhance(user_prompt)
+            enhanced_prompt = await prompt_enhancer.enhance(pipeline_prompt)
         except Exception as exc:
             logger.warning(f"[manager] prompt enhancer failed ({str(exc)[:60]}) — using original")
 
@@ -245,6 +263,27 @@ class ClaudeManager:
                     task_json.active_teams[team_key] = activation
                 activation.active = (team_key == forced_team)
             logger.info(f"[manager] team override: forcing '{forced_team}'")
+
+        # Media requests keep the user's ORIGINAL wording.
+        #
+        # Every prompt-refiner stage is a text-only model, so when the ask is
+        # about an attachment it cannot see, refinement doesn't sharpen the
+        # prompt -- it corrupts it. Observed live: "Describe this image. What
+        # shape and what colour is it?" came back refined as "Please provide
+        # the image you would like me to describe", a model's REPLY captured
+        # as the refined prompt. That string then became the vision team's
+        # instruction and the web-search query, so the one team that CAN see
+        # the image was told to ask for it.
+        #
+        # The refiner's other output (classification, team activation) is
+        # still useful and is kept; only the rewritten prompt is discarded.
+        if extra and task_json.original_prompt:
+            if task_json.refined_prompt != task_json.original_prompt:
+                logger.info(
+                    "[manager] media attached — keeping the original prompt "
+                    "over the text-only refiner's rewrite"
+                )
+            task_json.refined_prompt = task_json.original_prompt
 
         await state.save_session(session_id, task_json)
         _active_teams = [t.upper() for t, c in task_json.active_teams.items()

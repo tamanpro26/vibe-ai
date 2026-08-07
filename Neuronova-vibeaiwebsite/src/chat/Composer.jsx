@@ -7,34 +7,29 @@ export default function Composer({
   attachments,
   onAddFiles,
   onRemoveAttachment,
-  // Optional controls rendered inside the composer, between the + button and
-  // the send button (the reference puts its model selector here). Omitted by
-  // ChatApp, which keeps its team/mode selectors up in the page header, so
-  // this defaults to nothing and changes nothing for existing callers.
   toolbar = null,
-  placeholder = 'Message VibeAI — code, research, writing, anything…',
-  hint = 'Enter to send · Shift+Enter for a new line · drag & drop files anywhere',
+  placeholder = 'Message VibeAI - code, research, writing, anything',
+  hint = 'Enter to send | Shift+Enter for a new line | drag and drop files anywhere',
 }) {
   const [text, setText] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const taRef = useRef(null)
+  const formRef = useRef(null)
   const fileRef = useRef(null)
   const folderRef = useRef(null)
   const menuRef = useRef(null)
 
-  // autosize textarea
   useEffect(() => {
-    const ta = taRef.current
-    if (!ta) return
-    ta.style.height = 'auto'
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`
+    const textarea = taRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
   }, [text])
 
-  // close plus-menu on outside click
   useEffect(() => {
-    if (!menuOpen) return
-    const close = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+    if (!menuOpen) return undefined
+    const close = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setMenuOpen(false)
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
@@ -43,14 +38,24 @@ export default function Composer({
   const send = () => {
     const trimmed = text.trim()
     if (!trimmed || streaming) return
-    onSend(trimmed)
-    setText('')
+    try {
+      const accepted = onSend(trimmed)
+      if (accepted !== false) setText('')
+    } catch (error) {
+      // A synchronous persistence error must keep the user's draft intact.
+      console.error('[composer] could not start message:', error)
+    }
   }
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      send()
+  const onSubmit = (event) => {
+    event.preventDefault()
+    send()
+  }
+
+  const onKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault()
+      formRef.current?.requestSubmit()
     }
   }
 
@@ -58,82 +63,82 @@ export default function Composer({
     <div className="composer-wrap">
       {attachments.length > 0 && (
         <div className="composer-attachments">
-          {attachments.map((a, i) => (
-            <span className="attach-chip" key={`${a.name}${i}`}>
-              📎 {a.name}
-              <button aria-label={`Remove ${a.name}`} onClick={() => onRemoveAttachment(i)}>
-                ×
+          {attachments.map((attachment, index) => (
+            <span className="attach-chip" key={`${attachment.name}${index}`}>
+              {attachment.name}
+              <button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => onRemoveAttachment(index)}>
+                x
               </button>
             </span>
           ))}
         </div>
       )}
-      <div className="composer">
-        <div className="composer-plus" ref={menuRef}>
-          <button
-            className="plus-btn"
-            aria-label="Add files or folders"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            +
-          </button>
-          {menuOpen && (
-            <div className="plus-menu" role="menu">
-              <button
-                role="menuitem"
-                onClick={() => {
-                  fileRef.current?.click()
-                  setMenuOpen(false)
-                }}
-              >
-                📄 Upload files
-              </button>
-              <button
-                role="menuitem"
-                onClick={() => {
-                  folderRef.current?.click()
-                  setMenuOpen(false)
-                }}
-              >
-                📁 Upload folder
-              </button>
-            </div>
-          )}
-        </div>
+      <form className="composer" ref={formRef} onSubmit={onSubmit}>
         <textarea
           ref={taRef}
           rows={1}
           value={text}
           placeholder={placeholder}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
         />
-        {toolbar && <div className="composer-toolbar">{toolbar}</div>}
-        {streaming ? (
-          <button className="send-btn stop" onClick={onStop} aria-label="Stop generating">
-            ◼
-          </button>
-        ) : (
-          <button
-            className="send-btn"
-            onClick={send}
-            disabled={!text.trim()}
-            aria-label="Send message"
-          >
-            ↑
-          </button>
-        )}
-      </div>
+        <div className="composer-controls">
+          <div className="composer-plus" ref={menuRef}>
+            <button
+              type="button"
+              className="plus-btn"
+              aria-label="Add files or folders"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              +
+            </button>
+            {menuOpen && (
+              <div className="plus-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    fileRef.current?.click()
+                    setMenuOpen(false)
+                  }}
+                >
+                  Upload files
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    folderRef.current?.click()
+                    setMenuOpen(false)
+                  }}
+                >
+                  Upload folder
+                </button>
+              </div>
+            )}
+          </div>
+          {toolbar && <div className="composer-toolbar">{toolbar}</div>}
+          {streaming ? (
+            <button type="button" className="send-btn stop" onClick={onStop} aria-label="Stop generating">
+              Stop
+            </button>
+          ) : (
+            <button type="submit" className="send-btn" disabled={!text.trim()} aria-label="Send message">
+              Send
+            </button>
+          )}
+        </div>
+      </form>
       <p className="composer-hint">{hint}</p>
       <input
         ref={fileRef}
         type="file"
         multiple
         hidden
-        onChange={(e) => {
-          onAddFiles(e.target.files)
-          e.target.value = ''
+        onChange={(event) => {
+          onAddFiles(event.target.files)
+          event.target.value = ''
         }}
       />
       <input
@@ -142,9 +147,9 @@ export default function Composer({
         webkitdirectory=""
         multiple
         hidden
-        onChange={(e) => {
-          onAddFiles(e.target.files)
-          e.target.value = ''
+        onChange={(event) => {
+          onAddFiles(event.target.files)
+          event.target.value = ''
         }}
       />
     </div>

@@ -21,7 +21,7 @@ import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect, WebSocketException, HTTPException,
@@ -164,6 +164,20 @@ class PromptRequest(BaseModel):
     prompt: str
     session_id: str | None = None
     team: str | None = None  # "brain"|"code"|"vision"|"design" override, or None/"auto"
+    reasoning_mode: Literal["fast", "balanced", "deep"] | None = None
+    # Base64 image (no data: prefix) sent alongside the prompt. This is the
+    # ONLY way a browser can reach the vision team: _detect_media() scans the
+    # prompt for a filename and checks whether it exists on the SERVER's
+    # disk, which is a CLI assumption -- from a browser the file is on the
+    # user's machine, so that check always failed and vision was never
+    # activated. Passing the bytes directly is what closes that gap.
+    image_b64: str | None = None
+    # Server-side path to a video or pre-extracted .frames directory. Only
+    # useful to callers that already put a file on this machine (the CLI, the
+    # VS Code extension); a browser should POST /api/video instead, which
+    # accepts a real upload and runs the frames pipeline.
+    video_path: str | None = None
+    frames_path: str | None = None
 
 
 class PromptResponse(BaseModel):
@@ -183,7 +197,29 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
         raise HTTPException(400, "Prompt cannot be empty")
     sid = req.session_id or f"s_{uuid.uuid4().hex[:8]}"
     forced_team = req.team if req.team in _FORCEABLE_TEAMS else None
-    response = await manager.handle_user_request(req.prompt, forced_team=forced_team)
+    manager_args = {"forced_team": forced_team}
+    if req.reasoning_mode:
+        manager_args["reasoning_mode"] = req.reasoning_mode
+
+    # Media travels as `extra`, which is what _dispatch() checks to
+    # force-activate the vision team (claude_manager.py). Without this the
+    # team exists, works, and is simply never invoked from the web -- the
+    # actual reason an uploaded image or video got a text-only answer.
+    #
+    # A non-empty extra also deliberately bypasses the fast path: that path
+    # answers with a single text model that cannot see, so letting a media
+    # request reach it would confidently describe nothing.
+    extra: dict[str, Any] = {}
+    if req.image_b64:
+        extra["image_b64"] = req.image_b64
+    if req.video_path:
+        extra["video_path"] = req.video_path
+    if req.frames_path:
+        extra["frames_path"] = req.frames_path
+    if extra:
+        manager_args["extra"] = extra
+
+    response = await manager.handle_user_request(req.prompt, **manager_args)
     return PromptResponse(session_id=sid, response=response)
 
 

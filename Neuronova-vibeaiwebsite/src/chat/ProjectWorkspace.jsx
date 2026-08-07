@@ -16,6 +16,8 @@ import {
   buildProject,
   downloadProject,
   summarizeMemory,
+  readAttachments,
+  stripAttachmentPayloads,
   slugify,
   checkProjects,
   DEFAULT_MODE,
@@ -292,7 +294,15 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     if (streaming || !project) return
     const sent = attachments
     const turn = [
-      { id: newId(), role: 'user', content: text, attachments: sent, ts: Date.now() },
+      {
+        id: newId(),
+        role: 'user',
+        content: text,
+        // Metadata only: the base64/text payloads are for THIS request,
+        // never for storage -- see stripAttachmentPayloads.
+        attachments: stripAttachmentPayloads(sent),
+        ts: Date.now(),
+      },
       { id: newId(), role: 'assistant', content: '', ts: Date.now() },
     ]
 
@@ -487,12 +497,15 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     if (chatId === cid) window.location.hash = `#/projects/${project.id}`
   }
 
-  const addFiles = (fileList) => {
-    const mapped = Array.from(fileList).map((f) => ({
-      name: f.webkitRelativePath || f.name,
-      size: f.size,
-    }))
-    setAttachments((a) => [...a, ...mapped].slice(0, 20))
+  /* Same real-bytes read as ChatApp: metadata alone never reached a model,
+     so an attached image or document produced an answer about nothing. */
+  const addFiles = async (fileList) => {
+    try {
+      const read = await readAttachments(fileList)
+      setAttachments((a) => [...a, ...read].slice(0, 20))
+    } catch (err) {
+      console.error('[project] could not read attachments:', err)
+    }
   }
 
   const onDragEnter = (e) => {

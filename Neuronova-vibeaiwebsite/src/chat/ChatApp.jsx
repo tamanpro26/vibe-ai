@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
 import { useAuth } from './auth.jsx'
 import { loadChats, saveChats, newConversation, newId, titleFrom } from './store.js'
-import { dispatchEngineReply, continueOmni, continueEdge, DEFAULT_MODE } from './engine.js'
+import {
+  dispatchEngineReply,
+  continueOmni,
+  continueEdge,
+  readAttachments,
+  stripAttachmentPayloads,
+  DEFAULT_MODE,
+} from './engine.js'
 import { useEngineProbe } from './useEngineProbe.js'
 import {
   startRun,
@@ -30,36 +37,9 @@ const TEAMS = [
 ]
 
 const MODES = [
-  { value: 'fast', label: 'Fast', title: 'Quick answers, smaller model. Best for simple asks.' },
-  { value: 'balanced', label: 'Balanced', title: 'Default: solid quality without added latency.' },
-  { value: 'deep', label: 'Deep', title: 'Slower, reasons through the problem first. Best for hard questions.' },
-]
-
-const SUGGESTIONS = [
-  /* SVG paths, not emoji. Emoji render differently per OS, cannot be coloured
-     or sized precisely, and always read as a placeholder nobody replaced.
-     Each card also carries a second descriptor line so it is a real object
-     rather than a label in a box. */
-  {
-    icon: 'M8 6 L4 12 L8 18 M16 6 L20 12 L16 18',
-    text: 'Build a Python CLI that renames files in bulk',
-    meta: 'Code team · returns a runnable zip',
-  },
-  {
-    icon: 'M11 4 a7 7 0 1 0 0 14 a7 7 0 1 0 0 -14 M16.5 16.5 L21 21',
-    text: 'Research the best free-tier LLM providers right now',
-    meta: 'Brain team · cites live sources',
-  },
-  {
-    icon: 'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10',
-    text: 'Write a LinkedIn post about a solo-built AI project',
-    meta: 'Brain team · drafts and revises',
-  },
-  {
-    icon: 'M12 4 a4 4 0 0 0 -4 4 a3 3 0 0 0 0 6 a4 4 0 0 0 8 0 a3 3 0 0 0 0 -6 a4 4 0 0 0 -4 -4 Z M12 4 L12 18',
-    text: 'Explain how a 5-stage reasoning council beats one model',
-    meta: 'Council · shows each stage',
-  },
+  { value: 'fast', label: 'Quick', title: 'Uses VibeAI orchestration with a focused, concise final answer.' },
+  { value: 'balanced', label: 'Balanced', title: 'Uses VibeAI orchestration with its standard planning, specialist, and review flow.' },
+  { value: 'deep', label: 'Deep', title: 'Uses VibeAI orchestration with more deliberate analysis and critique.' },
 ]
 
 /* One shared entrance for everything that mounts: 8px rise, opacity resolving
@@ -68,6 +48,12 @@ const SUGGESTIONS = [
 const RISE = {
   hidden: { opacity: 0, y: 8 },
   shown: { opacity: 1, y: 0, transition: { duration: 0.36, ease: [0.22, 0.85, 0.28, 1] } },
+}
+
+function welcomeGreeting(name) {
+  const hour = new Date().getHours()
+  const time = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+  return `${time}, ${name}.`
 }
 
 export default function ChatApp() {
@@ -162,6 +148,8 @@ export default function ChatApp() {
       }
       for (const [id, run] of failedRuns()) {
         console.error(`[chat] run ${id} failed:`, run.error)
+        const next = persistFailure(id)
+        if (id === activeIdRef.current) setChats(next)
         clearRun(id)
       }
     }
@@ -297,6 +285,28 @@ export default function ChatApp() {
     return next
   }
 
+  const persistFailure = (convId) => {
+    const next = loadChats(user.id).map((conversation) =>
+      conversation.id === convId
+        ? {
+            ...conversation,
+            updatedAt: Date.now(),
+            messages: conversation.messages.map((message, index) =>
+              index === conversation.messages.length - 1 && message.role === 'assistant'
+                ? {
+                    ...message,
+                    content: 'I could not complete that request. Check your connection and try again.',
+                    isError: true,
+                  }
+                : message,
+            ),
+          }
+        : conversation,
+    )
+    saveChats(user.id, next)
+    return next
+  }
+
   // The fallback order itself (live -> manager -> omni -> edge -> simulated)
   // lives in engine.js::dispatchEngineReply, shared with ProjectWorkspace.
   // This wrapper only supplies ChatApp's own concerns: which conversation's
@@ -317,7 +327,7 @@ export default function ChatApp() {
   }
 
   const handleSend = (text) => {
-    if (streaming) return
+    if (streaming) return false
     let convId = activeId
     let next = chats
     if (!active) {
@@ -336,15 +346,29 @@ export default function ChatApp() {
             updatedAt: Date.now(),
             messages: [
               ...c.messages,
-              { id: newId(), role: 'user', content: text, attachments: sent, ts: Date.now() },
+              {
+        id: newId(),
+        role: 'user',
+        content: text,
+        // Metadata only: the base64/text payloads are for THIS request,
+        // never for storage -- see stripAttachmentPayloads.
+        attachments: stripAttachmentPayloads(sent),
+        ts: Date.now(),
+      },
               { id: newId(), role: 'assistant', content: '', ts: Date.now() },
             ],
           }
         : c,
     )
-    persist(next)
+    try {
+      persist(next)
+    } catch (error) {
+      console.error('[chat] could not save the new message:', error)
+      return false
+    }
     setAttachments([])
     dispatchReply(convId, text, sent, next.find((c) => c.id === convId))
+    return true
   }
 
   // Explicit user stop only. Navigating away must never call this -- that
@@ -469,12 +493,21 @@ export default function ChatApp() {
     if (activeId === id) setActiveId(next[0]?.id ?? null)
   }
 
-  const addFiles = (fileList) => {
-    const mapped = Array.from(fileList).map((f) => ({
-      name: f.webkitRelativePath || f.name,
-      size: f.size,
-    }))
-    setAttachments((a) => [...a, ...mapped].slice(0, 20))
+  /* Read the files for real.
+   *
+   * This used to keep only {name, size} -- the bytes were dropped on pickup
+   * and no tier ever transmitted anything, so attaching an image or a
+   * document and asking about it produced an answer about nothing.
+   * readAttachments (engine.js) base64s images for the vision team, reads
+   * text files as content, and marks anything it cannot handle so the model
+   * is told rather than left to guess. */
+  const addFiles = async (fileList) => {
+    try {
+      const read = await readAttachments(fileList)
+      setAttachments((a) => [...a, ...read].slice(0, 20))
+    } catch (err) {
+      console.error('[chat] could not read attachments:', err)
+    }
   }
 
   // drag & drop with depth counter so child enter/leave doesn't flicker
@@ -497,6 +530,34 @@ export default function ChatApp() {
     setDragging(false)
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files)
   }
+
+  const displayName = user?.firstName?.trim() || 'there'
+  const composerToolbar = (
+    <>
+      <ListboxSelect
+        className="composer-team-select"
+        options={TEAMS}
+        value={team}
+        aria-label="Route to team"
+        onChange={setTeam}
+      />
+      <div className="mode-switch composer-mode-switch" role="radiogroup" aria-label="VibeAI reasoning level">
+        {MODES.map((reasoningMode) => (
+          <button
+            key={reasoningMode.value}
+            type="button"
+            role="radio"
+            aria-checked={mode === reasoningMode.value}
+            title={reasoningMode.title}
+            className={`mode-btn${mode === reasoningMode.value ? ' is-active' : ''}`}
+            onClick={() => setMode(reasoningMode.value)}
+          >
+            {reasoningMode.label}
+          </button>
+        ))}
+      </div>
+    </>
+  )
 
   return (
     <div
@@ -544,28 +605,6 @@ export default function ChatApp() {
           </button>
           <span className="chat-title">{active?.title || 'New chat'}</span>
           <div className="chat-top-right">
-            <ListboxSelect
-              className="team-select"
-              options={TEAMS}
-              value={team}
-              aria-label="Route to team"
-              onChange={setTeam}
-            />
-            <div className="mode-switch" role="radiogroup" aria-label="Reasoning mode">
-              {MODES.map((mo) => (
-                <button
-                  key={mo.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={mode === mo.value}
-                  title={mo.title}
-                  className={`mode-btn${mode === mo.value ? ' is-active' : ''}`}
-                  onClick={() => setMode(mo.value)}
-                >
-                  {mo.label}
-                </button>
-              ))}
-            </div>
             <span className={`engine-badge${live || manager || omni || edge ? ' is-live' : ''}`}>
               {live
                 ? 'LIVE ENGINE'
@@ -595,39 +634,14 @@ export default function ChatApp() {
                 shown: { transition: { staggerChildren: reduceMotion ? 0 : 0.06 } },
               }}
             >
-              <motion.h1 variants={RISE}>How can VibeAI help?</motion.h1>
+              <motion.h1 variants={RISE}>{welcomeGreeting(displayName)}</motion.h1>
+              <motion.span className="empty-kicker" variants={RISE}>
+                VibeAI Council is ready when you are.
+              </motion.span>
               <motion.p variants={RISE}>
                 Any task routes to a specialist team — search, research, writing, reasoning.
                 Coding tasks come back as a runnable project with a downloadable zip.
               </motion.p>
-              <div className="suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <motion.button
-                    className="suggestion"
-                    key={s.text}
-                    variants={RISE}
-                    whileHover={reduceMotion ? undefined : { y: -2 }}
-                    whileTap={reduceMotion ? undefined : { y: 0 }}
-                    transition={{ duration: 0.14, ease: [0.22, 0.85, 0.28, 1] }}
-                    onClick={() => handleSend(s.text)}
-                  >
-                    <svg className="suggestion-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path
-                        d={s.icon}
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                    <span className="suggestion-body">
-                      <span className="suggestion-text">{s.text}</span>
-                      <span className="suggestion-meta">{s.meta}</span>
-                    </span>
-                  </motion.button>
-                ))}
-              </div>
             </motion.div>
           ) : (
             <div className="msg-list">
@@ -655,6 +669,7 @@ export default function ChatApp() {
           attachments={attachments}
           onAddFiles={addFiles}
           onRemoveAttachment={(i) => setAttachments((list) => list.filter((_, j) => j !== i))}
+          toolbar={composerToolbar}
         />
       </main>
     </div>
