@@ -1274,6 +1274,17 @@
   font-size: var(--fs-caption);
 }
 
+/* The route selector sits in the bottom composer. The generic listbox opens
+   downward, which puts every option below chat-main's clipped viewport. This
+   instance opens into the available conversation space instead. */
+.composer-team-select .listbox-panel {
+  top: auto;
+  bottom: calc(100% + var(--sp-2));
+  max-height: min(320px, max(88px, calc(100dvh - 220px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .composer-mode-switch {
   height: 30px;
 }
