@@ -1,6 +1,7 @@
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
+import PlatformShowcase from './components/PlatformShowcase.jsx'
 import Problem from './components/Problem.jsx'
 import Failover from './components/Failover.jsx'
 import Council from './components/Council.jsx'
@@ -105,6 +106,7 @@ function Landing() {
       <Nav />
       <main>
         <Hero />
+        <PlatformShowcase />
         <Problem />
         <Failover />
         <Council />

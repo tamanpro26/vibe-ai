@@ -5,7 +5,7 @@ const SECTION_LINKS = [
   ['Resilience', '#resilience'],
   ['Council', '#council'],
   ['Agent', '#agent'],
-  ['Product', '#ecosystem'],
+  ['Platform', '#platform'],
   ['Proof', '#engineering'],
   ['Control', '#security'],
 ]
