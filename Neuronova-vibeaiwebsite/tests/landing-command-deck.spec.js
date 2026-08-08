@@ -33,16 +33,23 @@ const test = base.extend({
 })
 
 test.describe('Landing composition @composition', () => {
-  test('renders the current landing and exposes its workspace entry point', async ({ page }) => {
+  test('presents one Command Deck with coordinated specialists and verification', async ({ page }) => {
     await page.goto('/')
 
+    const heading = page.getByRole('heading', { level: 1 })
+    const workspaceLink = page.getByRole('link', { name: 'Open the AI workspace' }).first()
+    const commandDeck = page.locator('#command-deck')
+
+    await expect(heading).toBeVisible()
+    await expect(heading).toContainText(/complex work/i)
+    await expect(workspaceLink).toBeVisible()
+    await expect(workspaceLink).toHaveAttribute('href', '#/chat')
+    await expect(commandDeck).toHaveCount(1)
+    await expect(commandDeck).toContainText(/specialist agents/i)
+    await expect(commandDeck).toContainText(/verified/i)
     await expect(
-      page.getByRole('heading', {
-        level: 1,
-        name: 'Complex work, orchestrated across models.',
-      }),
-    ).toBeVisible()
-    await expect(page.getByRole('link', { name: 'Open the AI workspace' }).first()).toBeVisible()
+      page.getByRole('heading', { name: 'See the work before you trust the answer.' }),
+    ).toHaveCount(0)
   })
 
   test('keeps the workspace CTA behind the existing hash-route boundary', async ({ page }) => {
