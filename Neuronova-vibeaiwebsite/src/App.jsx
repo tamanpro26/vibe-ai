@@ -1,7 +1,9 @@
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
+import LandingSoundControl from './components/LandingSoundControl.jsx'
 import PlatformShowcase from './components/PlatformShowcase.jsx'
+import SignalTheater from './components/SignalTheater.jsx'
 import Problem from './components/Problem.jsx'
 import Failover from './components/Failover.jsx'
 import Council from './components/Council.jsx'
@@ -12,6 +14,7 @@ import Engineering from './components/Engineering.jsx'
 import Security from './components/Security.jsx'
 import Footer from './components/Footer.jsx'
 import './App.css'
+import './landing-motion.css'
 
 // The public page is the first experience for most visitors. Clerk, JSZip,
 // the chat engine, project workspace, and their 3,000+ lines of CSS are only
@@ -103,9 +106,11 @@ function Landing() {
   return (
     <div className="app">
       <div className="bg-grid" aria-hidden="true" />
+      <div className="landing-scanfield" aria-hidden="true" />
       <Nav />
       <main>
         <Hero />
+        <SignalTheater />
         <PlatformShowcase />
         <Problem />
         <Failover />
@@ -117,6 +122,7 @@ function Landing() {
         <Security />
       </main>
       <Footer />
+      <LandingSoundControl />
     </div>
   )
 }
