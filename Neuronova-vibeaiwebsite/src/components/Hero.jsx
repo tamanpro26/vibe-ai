@@ -1,8 +1,10 @@
 import OrchestrationTrace from './OrchestrationTrace.jsx'
+import CinematicField from './CinematicField.jsx'
 
-export default function Hero({ motionMode }) {
+export default function Hero({ motionMode, cinematicReady }) {
   return (
     <section className="cd-hero" id="top" aria-labelledby="command-deck-title">
+      <CinematicField motionMode={motionMode} cinematicReady={cinematicReady} />
       <div className="cd-hero-glow" aria-hidden="true" />
       <div className="container cd-hero-layout">
         <div className="cd-hero-copy">

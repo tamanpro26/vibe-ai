@@ -1,10 +1,12 @@
-import { Component, lazy, Suspense, useEffect, useState } from 'react'
+import { Component, lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { MotionConfig } from 'motion/react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
 import LandingSoundControl from './components/LandingSoundControl.jsx'
 import { LandingSoundProvider } from './components/LandingSoundContext.jsx'
+import CinematicIntro from './components/CinematicIntro.jsx'
 import useLandingMotionPreference from './components/useLandingMotionPreference.js'
+import useCinematicScroll from './components/useCinematicScroll.js'
 import PlatformShowcase from './components/PlatformShowcase.jsx'
 import Problem from './components/Problem.jsx'
 import Failover from './components/Failover.jsx'
@@ -18,6 +20,7 @@ import Footer from './components/Footer.jsx'
 import './App.css'
 import './landing-motion.css'
 import './command-deck.css'
+import './cinematic.css'
 
 // The public page is the first experience for most visitors. Clerk, JSZip,
 // the chat engine, project workspace, and their 3,000+ lines of CSS are only
@@ -109,8 +112,11 @@ function useSpotlight(motionMode) {
 
 function Landing() {
   const motionMode = useLandingMotionPreference()
+  const [cinematicReady, setCinematicReady] = useState(false)
+  const finishCinematicIntro = useCallback(() => setCinematicReady(true), [])
   useReveal(motionMode)
   useSpotlight(motionMode)
+  useCinematicScroll(motionMode, cinematicReady)
 
   return (
     <LandingSoundProvider>
@@ -122,9 +128,11 @@ function Landing() {
         >
           <div className="bg-grid" aria-hidden="true" />
           <div className="landing-scanfield" aria-hidden="true" />
+          <CinematicIntro motionMode={motionMode} onFinished={finishCinematicIntro} />
+          <div className="cinematic-progress" aria-hidden="true"><span /></div>
           <Nav />
           <main>
-            <Hero motionMode={motionMode} />
+            <Hero motionMode={motionMode} cinematicReady={cinematicReady} />
             <PlatformShowcase motionMode={motionMode} />
             <Problem />
             <Failover motionMode={motionMode} />

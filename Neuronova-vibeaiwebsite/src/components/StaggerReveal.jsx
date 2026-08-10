@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 
 /*
  * Word-by-word clip reveal for one key claim line, not body copy generally.
@@ -68,12 +68,14 @@ export default function StaggerReveal({ text, className }) {
       {words.map(({ w, tag: t }, i) => {
         const Wrap = t || 'span'
         return (
-          <span className="stagger-mask" key={i}>
-            <span className="stagger-word" style={{ transitionDelay: `${i * 0.028}s` }}>
-              <Wrap>{w}</Wrap>
-              {i < words.length - 1 ? ' ' : ''}
+          <Fragment key={`${w}-${i}`}>
+            <span className="stagger-mask">
+              <span className="stagger-word" style={{ transitionDelay: `${i * 0.028}s` }}>
+                <Wrap>{w}</Wrap>
+              </span>
             </span>
-          </span>
+            {i < words.length - 1 ? ' ' : null}
+          </Fragment>
         )
       })}
     </p>

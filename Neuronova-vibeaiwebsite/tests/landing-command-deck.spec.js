@@ -112,6 +112,76 @@ test.describe('Landing composition @composition', () => {
     ).toHaveCount(0)
   })
 
+  test('keeps the premise claim readable after its word reveal', async ({ page }) => {
+    await page.goto('/#problem')
+
+    await expect(page.locator('#problem .problem-big')).toHaveText(
+      "A workflow tied to one model inherits that model's limits. " +
+        'Rate limit, outage, context mismatch, or weak first draft—the whole task feels it.',
+      { useInnerText: true },
+    )
+  })
+
+  test('offers a skippable cinematic intro and progressive hero field', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-08-10T12:00:00Z') })
+    await page.goto('/')
+
+    const intro = page.getByRole('dialog', { name: 'VibeAI introduction' })
+    const field = page.locator('.cinematic-field')
+
+    await expect(intro).toBeVisible()
+    await intro.getByRole('button', { name: 'Skip introduction' }).click()
+    await expect(intro).toHaveCount(0)
+    await expect(field).toBeVisible()
+    await expect(field.locator('canvas')).toHaveCount(1)
+
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+
+    await page.reload()
+    await expect(page.getByRole('dialog', { name: 'VibeAI introduction' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  })
+
+  test('dismisses the cinematic intro automatically', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-08-10T12:00:00Z') })
+    await page.goto('/')
+
+    const intro = page.getByRole('dialog', { name: 'VibeAI introduction' })
+    await expect(intro).toBeVisible()
+    await page.clock.runFor(3200)
+    await expect(intro).toHaveCount(0)
+  })
+
+  test('keeps the CSS field when the optional Three.js runtime fails', async ({ page }) => {
+    await page.route(/createCinematicThreeField.*\.js/, (route) => route.fulfill({
+      contentType: 'application/javascript',
+      body: 'throw new Error("Simulated WebGL module failure")',
+    }))
+    await page.goto('/')
+
+    const intro = page.getByRole('dialog', { name: 'VibeAI introduction' })
+    await intro.getByRole('button', { name: 'Skip introduction' }).click()
+
+    await expect(page.locator('.cinematic-field')).toBeVisible()
+    await expect(page.locator('.cinematic-field canvas')).toHaveCount(0)
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  })
+
+  test('disposes and restores the Three.js field across the phone breakpoint', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/')
+    await page.getByRole('dialog', { name: 'VibeAI introduction' })
+      .getByRole('button', { name: 'Skip introduction' })
+      .click()
+    await expect(page.locator('.cinematic-field canvas')).toHaveCount(1)
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(page.locator('.cinematic-field canvas')).toHaveCount(0)
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await expect(page.locator('.cinematic-field canvas')).toHaveCount(1)
+  })
+
   test('keeps the workspace CTA behind the existing hash-route boundary', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('link', { name: 'Open the AI workspace' }).first().click()
@@ -239,6 +309,9 @@ test.describe('Responsive Command Deck @responsive', () => {
       await expect(page.getByRole('button', { name: 'Start trace' })).toBeVisible()
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
       expect(overflow).toBeLessThanOrEqual(1)
+      if (viewport.name === 'phone') {
+        await expect(page.locator('.cinematic-field canvas')).toHaveCount(0)
+      }
     })
   }
 })
@@ -250,6 +323,8 @@ test.describe('Landing motion preferences @motion', () => {
 
     await expect(page.locator('.command-deck-landing')).toHaveAttribute('data-effective-motion', 'reduced')
     await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
+    await expect(page.getByRole('dialog', { name: 'VibeAI introduction' })).toHaveCount(0)
+    await expect(page.locator('.cinematic-field canvas')).toHaveCount(0)
     await expect(page.locator('#command-deck [aria-current="step"]')).toContainText('Verification')
   })
 
