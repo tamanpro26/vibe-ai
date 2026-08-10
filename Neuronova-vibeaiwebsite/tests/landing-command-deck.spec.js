@@ -1,8 +1,6 @@
 import { expect, test as base } from '@playwright/test'
 
 const FUTURE_GROUPS = [
-  ['Responsive Command Deck @responsive', 'phone and tablet composition'],
-  ['Landing motion preferences @motion', 'reduced and disabled motion modes'],
   ['Landing sound consent @sound', 'opt-in sound cues and failure states'],
   ['Landing accessibility @a11y', 'axe and keyboard coverage'],
 ]
@@ -148,6 +146,65 @@ test.describe('Command Deck trace @trace', () => {
     await page.goto('/')
     await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'idle')
     await expect(page.locator('#command-deck [aria-current="step"]')).toHaveCount(0)
+  })
+})
+
+test.describe('Responsive Command Deck @responsive', () => {
+  for (const viewport of [
+    { name: 'tablet', width: 820, height: 1180 },
+    { name: 'phone', width: 390, height: 844 },
+  ]) {
+    test(`${viewport.name} keeps the deck and primary action in frame`, async ({ page }) => {
+      await page.setViewportSize(viewport)
+      await page.goto('/')
+
+      await expect(page.locator('#command-deck')).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Open the AI workspace' }).first()).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Start trace' })).toBeVisible()
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+      expect(overflow).toBeLessThanOrEqual(1)
+    })
+  }
+})
+
+test.describe('Landing motion preferences @motion', () => {
+  test('honors the operating-system reduced-motion preference with a static complete trace', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/')
+
+    await expect(page.locator('.command-deck-landing')).toHaveAttribute('data-effective-motion', 'reduced')
+    await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
+    await expect(page.locator('#command-deck [aria-current="step"]')).toContainText('Verification')
+  })
+
+  for (const preference of ['reduced', 'off']) {
+    test(`honors the root ${preference} preference without autoplay`, async ({ page }) => {
+      await page.goto('/')
+      await page.evaluate((value) => {
+        document.documentElement.dataset.motion = value
+      }, preference)
+
+      await expect(page.locator('.command-deck-landing')).toHaveAttribute(
+        'data-effective-motion',
+        preference,
+      )
+      await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
+      await expect(page.getByRole('button', { name: 'Replay trace' })).toBeDisabled()
+    })
+  }
+
+  test('cancels a live trace when motion is reduced', async ({ page }) => {
+    await page.goto('/')
+    const deck = page.locator('#command-deck')
+    await deck.getByRole('button', { name: 'Start trace' }).click()
+    await expect(deck).toHaveAttribute('data-run-status', 'running')
+
+    await page.evaluate(() => {
+      document.documentElement.dataset.motion = 'reduced'
+    })
+
+    await expect(deck).toHaveAttribute('data-run-status', 'complete')
+    await expect(page.locator('.command-deck-landing')).toHaveAttribute('data-effective-motion', 'reduced')
   })
 })
 

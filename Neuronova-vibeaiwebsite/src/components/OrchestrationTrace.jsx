@@ -39,7 +39,7 @@ const SPECIALIST_ROLES = [
 
 const STAGE_DELAY = 1200
 
-export default function OrchestrationTrace() {
+export default function OrchestrationTrace({ motionMode = 'full' }) {
   const [runStatus, setRunStatus] = useState('idle')
   const [activeStage, setActiveStage] = useState(null)
   const generationRef = useRef(0)
@@ -68,6 +68,14 @@ export default function OrchestrationTrace() {
     },
     [],
   )
+
+  useEffect(() => {
+    if (motionMode === 'full') return
+    generationRef.current += 1
+    window.clearTimeout(timerRef.current)
+    setActiveStage(TRACE_STAGES.length - 1)
+    setRunStatus('complete')
+  }, [motionMode])
 
   const begin = () => {
     generationRef.current += 1
@@ -129,7 +137,9 @@ export default function OrchestrationTrace() {
       </div>
 
       <div className="cd-deck-controls">
-        <button type="button" onClick={control.action}>{control.label}</button>
+        <button type="button" onClick={control.action} disabled={motionMode !== 'full'}>
+          {control.label}
+        </button>
         <span>{runStatus === 'idle' ? 'Visitor controlled' : `Run status / ${runStatus}`}</span>
       </div>
 

@@ -1,6 +1,6 @@
 import OrchestrationTrace from './OrchestrationTrace.jsx'
 
-export default function Hero() {
+export default function Hero({ motionMode }) {
   return (
     <section className="cd-hero" id="top" aria-labelledby="command-deck-title">
       <div className="cd-hero-glow" aria-hidden="true" />
@@ -33,7 +33,7 @@ export default function Hero() {
           </ul>
         </div>
 
-        <OrchestrationTrace />
+        <OrchestrationTrace motionMode={motionMode} />
       </div>
     </section>
   )

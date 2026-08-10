@@ -1,7 +1,9 @@
 import { Component, lazy, Suspense, useEffect, useState } from 'react'
+import { MotionConfig } from 'motion/react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
 import LandingSoundControl from './components/LandingSoundControl.jsx'
+import useLandingMotionPreference from './components/useLandingMotionPreference.js'
 import PlatformShowcase from './components/PlatformShowcase.jsx'
 import Problem from './components/Problem.jsx'
 import Failover from './components/Failover.jsx'
@@ -60,9 +62,13 @@ function useHashRoute() {
   return hash
 }
 
-function useReveal() {
+function useReveal(motionMode) {
   useEffect(() => {
     const els = document.querySelectorAll('[data-reveal]')
+    if (motionMode !== 'full') {
+      els.forEach((el) => el.classList.add('is-in'))
+      return undefined
+    }
     const io = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
@@ -76,7 +82,7 @@ function useReveal() {
     )
     els.forEach((el) => io.observe(el))
     return () => io.disconnect()
-  }, [])
+  }, [motionMode])
 }
 
 // Cursor-follow glow on `.spotlight-card` elements (team/CEO/stat cards):
@@ -85,8 +91,9 @@ function useReveal() {
 // re-bind on every render. The glow itself is CSS (opacity on :hover) --
 // this only ever writes the pointer's position, so it's inert whenever
 // the pointer isn't over a card.
-function useSpotlight() {
+function useSpotlight(motionMode) {
   useEffect(() => {
+    if (motionMode !== 'full') return undefined
     function handleMove(e) {
       const card = e.target.closest?.('.spotlight-card')
       if (!card) return
@@ -96,33 +103,36 @@ function useSpotlight() {
     }
     window.addEventListener('mousemove', handleMove, { passive: true })
     return () => window.removeEventListener('mousemove', handleMove)
-  }, [])
+  }, [motionMode])
 }
 
 function Landing() {
-  useReveal()
-  useSpotlight()
+  const motionMode = useLandingMotionPreference()
+  useReveal(motionMode)
+  useSpotlight(motionMode)
 
   return (
-    <div className="app command-deck-landing">
-      <div className="bg-grid" aria-hidden="true" />
-      <div className="landing-scanfield" aria-hidden="true" />
-      <Nav />
-      <main>
-        <Hero />
-        <PlatformShowcase />
-        <Problem />
-        <Failover />
-        <Council />
-        <AgentLoop />
-        <Teams />
-        <Ecosystem />
-        <Engineering />
-        <Security />
-      </main>
-      <Footer />
-      <LandingSoundControl />
-    </div>
+    <MotionConfig reducedMotion={motionMode === 'full' ? 'never' : 'always'}>
+      <div className="app command-deck-landing" data-effective-motion={motionMode}>
+        <div className="bg-grid" aria-hidden="true" />
+        <div className="landing-scanfield" aria-hidden="true" />
+        <Nav />
+        <main>
+          <Hero motionMode={motionMode} />
+          <PlatformShowcase />
+          <Problem />
+          <Failover />
+          <Council />
+          <AgentLoop />
+          <Teams />
+          <Ecosystem />
+          <Engineering />
+          <Security />
+        </main>
+        <Footer />
+        <LandingSoundControl />
+      </div>
+    </MotionConfig>
   )
 }
 
