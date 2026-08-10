@@ -131,8 +131,7 @@
   gap: 12px;
 }
 
-.command-deck-landing .cd-hero-actions a:focus-visible,
-.command-deck-landing .cd-deck:focus-visible {
+.command-deck-landing .cd-hero-actions a:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
 }
@@ -376,8 +375,7 @@
   font-size: 9px;
 }
 
-.command-deck-landing .cd-agent > span:nth-child(2),
-.command-deck-landing .cd-deck-stages li > span:last-child {
+.command-deck-landing .cd-agent > span:nth-child(2) {
   min-width: 0;
   display: flex;
   flex-direction: column;

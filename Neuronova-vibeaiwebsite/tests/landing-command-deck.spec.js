@@ -1,11 +1,9 @@
 import { expect, test as base } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
-const FUTURE_GROUPS = []
-
 async function installAudioContextStub(page) {
   await page.addInitScript(() => {
-    const probe = { contexts: 0, resumes: 0, starts: 0, closes: 0 }
+    const probe = { contexts: 0, resumes: 0, suspends: 0, starts: 0, closes: 0 }
     window.__audioProbe = probe
     window.AudioContext = class AudioContextStub {
       constructor() {
@@ -18,6 +16,11 @@ async function installAudioContextStub(page) {
       async resume() {
         probe.resumes += 1
         this.state = 'running'
+      }
+
+      async suspend() {
+        probe.suspends += 1
+        this.state = 'suspended'
       }
 
       async close() {
@@ -273,6 +276,7 @@ test.describe('Landing sound consent @sound', () => {
 
     await page.getByRole('button', { name: 'Sound on' }).click()
     await expect(page.getByRole('button', { name: 'Enable sound' })).toHaveAttribute('aria-pressed', 'false')
+    await expect.poll(() => page.evaluate(() => window.__audioProbe.suspends)).toBe(1)
     await page.clock.runFor(5000)
     expect(await page.evaluate(() => window.__audioProbe.starts)).toBe(traceCueCount)
   })
@@ -346,9 +350,3 @@ test.describe('Landing accessibility @a11y', () => {
     await expect(menuButton).toHaveAttribute('aria-expanded', 'false')
   })
 })
-
-for (const [name, scope] of FUTURE_GROUPS) {
-  test.describe(name, () => {
-    test.skip(`is reserved for ${scope}`, () => {})
-  })
-}

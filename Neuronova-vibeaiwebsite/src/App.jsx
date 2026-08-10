@@ -121,7 +121,7 @@ function Landing() {
           <Nav />
           <main>
             <Hero motionMode={motionMode} />
-            <PlatformShowcase />
+            <PlatformShowcase motionMode={motionMode} />
             <Problem />
             <Failover />
             <Council />

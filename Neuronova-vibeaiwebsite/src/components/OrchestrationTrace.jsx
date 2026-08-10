@@ -44,15 +44,12 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
   const { playCue } = useLandingSound()
   const [runStatus, setRunStatus] = useState('idle')
   const [activeStage, setActiveStage] = useState(null)
-  const generationRef = useRef(0)
   const timerRef = useRef(null)
 
   useEffect(() => {
     if (runStatus !== 'running' || activeStage === null) return undefined
 
-    const generation = generationRef.current
     timerRef.current = window.setTimeout(() => {
-      if (generation !== generationRef.current) return
       if (activeStage === TRACE_STAGES.length - 1) {
         setRunStatus('complete')
         playCue('complete')
@@ -65,24 +62,14 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
     return () => window.clearTimeout(timerRef.current)
   }, [activeStage, playCue, runStatus])
 
-  useEffect(
-    () => () => {
-      generationRef.current += 1
-      window.clearTimeout(timerRef.current)
-    },
-    [],
-  )
-
   useEffect(() => {
     if (motionMode === 'full') return
-    generationRef.current += 1
     window.clearTimeout(timerRef.current)
     setActiveStage(TRACE_STAGES.length - 1)
     setRunStatus('complete')
   }, [motionMode])
 
   const begin = () => {
-    generationRef.current += 1
     window.clearTimeout(timerRef.current)
     setActiveStage(0)
     setRunStatus('running')
@@ -90,18 +77,15 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
   }
 
   const pause = () => {
-    generationRef.current += 1
     window.clearTimeout(timerRef.current)
     setRunStatus('paused')
   }
 
   const resume = () => {
-    generationRef.current += 1
     setRunStatus('running')
   }
 
   const inspect = (index) => {
-    generationRef.current += 1
     window.clearTimeout(timerRef.current)
     setActiveStage(index)
     setRunStatus('paused')

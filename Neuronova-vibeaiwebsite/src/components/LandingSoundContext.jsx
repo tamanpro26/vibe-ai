@@ -38,11 +38,9 @@ export function LandingSoundProvider({ children }) {
   const contextRef = useRef(null)
   const enabledRef = useRef(false)
   const generationRef = useRef(0)
-  const disposedRef = useRef(false)
 
   useEffect(
     () => () => {
-      disposedRef.current = true
       enabledRef.current = false
       generationRef.current += 1
       const context = contextRef.current
@@ -63,6 +61,8 @@ export function LandingSoundProvider({ children }) {
       generationRef.current += 1
       enabledRef.current = false
       setStatus('disabled')
+      const context = contextRef.current
+      if (context?.state === 'running') void context.suspend().catch(() => {})
       return
     }
     if (status !== 'disabled') return
@@ -81,12 +81,12 @@ export function LandingSoundProvider({ children }) {
       const context = contextRef.current || new AudioContext()
       contextRef.current = context
       await context.resume()
-      if (disposedRef.current || generation !== generationRef.current) return
+      if (generation !== generationRef.current) return
       enabledRef.current = true
       setStatus('enabled')
       playPattern(context, 'consent')
     } catch {
-      if (!disposedRef.current && generation === generationRef.current) {
+      if (generation === generationRef.current) {
         enabledRef.current = false
         setStatus('unavailable')
       }

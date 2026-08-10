@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react'
+import { motion, useScroll, useTransform } from 'motion/react'
 
 const CAPABILITIES = [
   {
@@ -22,14 +22,36 @@ const CAPABILITIES = [
   },
 ]
 
-export default function PlatformShowcase() {
-  const sectionRef = useRef(null)
-  const reduced = useReducedMotion()
+function CapabilityCards() {
+  return CAPABILITIES.map((capability) => (
+    <article className="cd-capability-card" key={capability.number}>
+      <header>
+        <span>{capability.number}</span>
+        <small>{capability.label}</small>
+      </header>
+      <h3>{capability.title}</h3>
+      <p>{capability.detail}</p>
+      <span className="cd-capability-line" aria-hidden="true" />
+    </article>
+  ))
+}
+
+function AnimatedCapabilityGrid({ sectionRef }) {
   const { scrollYProgress } = useScroll({
     target: sectionRef,
     offset: ['start end', 'end start'],
   })
   const panelY = useTransform(scrollYProgress, [0, 0.5, 1], [32, 0, -20])
+
+  return (
+    <motion.div className="cd-capability-grid" style={{ y: panelY }} data-reveal>
+      <CapabilityCards />
+    </motion.div>
+  )
+}
+
+export default function PlatformShowcase({ motionMode = 'full' }) {
+  const sectionRef = useRef(null)
 
   return (
     <section className="cd-capabilities" id="platform" ref={sectionRef} aria-labelledby="capabilities-title">
@@ -43,23 +65,13 @@ export default function PlatformShowcase() {
           </p>
         </div>
 
-        <motion.div
-          className="cd-capability-grid"
-          style={reduced ? undefined : { y: panelY }}
-          data-reveal
-        >
-          {CAPABILITIES.map((capability) => (
-            <article className="cd-capability-card" key={capability.number}>
-              <header>
-                <span>{capability.number}</span>
-                <small>{capability.label}</small>
-              </header>
-              <h3>{capability.title}</h3>
-              <p>{capability.detail}</p>
-              <span className="cd-capability-line" aria-hidden="true" />
-            </article>
-          ))}
-        </motion.div>
+        {motionMode === 'full' ? (
+          <AnimatedCapabilityGrid sectionRef={sectionRef} />
+        ) : (
+          <div className="cd-capability-grid is-in" data-reveal>
+            <CapabilityCards />
+          </div>
+        )}
       </div>
     </section>
   )

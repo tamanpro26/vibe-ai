@@ -6,6 +6,7 @@ const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL?.replace(/\/$/, '')
 export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
+  workers: 3,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'line' : 'list',
