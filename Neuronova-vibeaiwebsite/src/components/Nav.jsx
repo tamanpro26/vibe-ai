@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 
 const SECTION_LINKS = [
+  ['Platform', '#platform'],
   ['Why', '#problem'],
   ['Resilience', '#resilience'],
   ['Council', '#council'],
   ['Agent', '#agent'],
-  ['Platform', '#platform'],
   ['Proof', '#engineering'],
   ['Control', '#security'],
 ]

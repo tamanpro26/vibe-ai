@@ -1,8 +1,7 @@
 import { expect, test as base } from '@playwright/test'
+import AxeBuilder from '@axe-core/playwright'
 
-const FUTURE_GROUPS = [
-  ['Landing accessibility @a11y', 'axe and keyboard coverage'],
-]
+const FUTURE_GROUPS = []
 
 async function installAudioContextStub(page) {
   await page.addInitScript(() => {
@@ -301,6 +300,50 @@ test.describe('Landing sound consent @sound', () => {
 
     await expect(page.getByRole('button', { name: 'Sound unavailable' })).toBeDisabled()
     await expect(page.getByRole('status', { name: 'Sound status' })).toContainText('Sound is unavailable')
+  })
+})
+
+test.describe('Landing accessibility @a11y', () => {
+  for (const theme of ['cockpit', 'studio']) {
+    test(`${theme} theme has no serious WCAG violations`, async ({ page }) => {
+      await page.goto('/')
+      await page.evaluate((value) => {
+        document.documentElement.dataset.theme = value
+      }, theme)
+
+      const results = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+        .analyze()
+      const materialViolations = results.violations.filter(({ impact }) =>
+        impact === 'serious' || impact === 'critical',
+      )
+      expect(materialViolations).toEqual([])
+    })
+  }
+
+  test('all landing section links resolve to real targets', async ({ page }) => {
+    await page.goto('/')
+    const missingTargets = await page.locator('a[href^="#"]:not([href^="#/"])').evaluateAll((links) =>
+      links
+        .map((link) => link.getAttribute('href'))
+        .filter((href) => href && !document.querySelector(href)),
+    )
+    expect(missingTargets).toEqual([])
+  })
+
+  test('mobile section navigation moves and restores keyboard focus', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+    const menuButton = page.getByRole('button', { name: 'Open section menu' })
+
+    await menuButton.focus()
+    await menuButton.press('Enter')
+    const firstLink = page.getByRole('navigation', { name: 'Mobile sections' }).getByRole('link').first()
+    await expect(firstLink).toBeFocused()
+
+    await page.keyboard.press('Escape')
+    await expect(menuButton).toBeFocused()
+    await expect(menuButton).toHaveAttribute('aria-expanded', 'false')
   })
 })
 
