@@ -44,10 +44,14 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
   const { playCue } = useLandingSound()
   const [runStatus, setRunStatus] = useState('idle')
   const [activeStage, setActiveStage] = useState(null)
+  const [isPresentationActive, setIsPresentationActive] = useState(
+    () => document.visibilityState !== 'hidden',
+  )
+  const deckRef = useRef(null)
   const timerRef = useRef(null)
 
   useEffect(() => {
-    if (runStatus !== 'running' || activeStage === null) return undefined
+    if (runStatus !== 'running' || activeStage === null || !isPresentationActive) return undefined
 
     timerRef.current = window.setTimeout(() => {
       if (activeStage === TRACE_STAGES.length - 1) {
@@ -60,7 +64,35 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
     }, STAGE_DELAY)
 
     return () => window.clearTimeout(timerRef.current)
-  }, [activeStage, playCue, runStatus])
+  }, [activeStage, isPresentationActive, playCue, runStatus])
+
+  useEffect(() => {
+    const deck = deckRef.current
+    if (!deck) return undefined
+
+    let isIntersecting = true
+    const update = () => setIsPresentationActive(
+      document.visibilityState !== 'hidden' && isIntersecting,
+    )
+    const observer = new IntersectionObserver(([entry]) => {
+      isIntersecting = entry.isIntersecting
+      update()
+    }, { threshold: 0.05 })
+
+    observer.observe(deck)
+    document.addEventListener('visibilitychange', update)
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', update)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (motionMode === 'full' && !isPresentationActive && runStatus === 'running') {
+      window.clearTimeout(timerRef.current)
+      setRunStatus('paused')
+    }
+  }, [isPresentationActive, motionMode, runStatus])
 
   useEffect(() => {
     if (motionMode === 'full') return
@@ -88,7 +120,7 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
   const inspect = (index) => {
     window.clearTimeout(timerRef.current)
     setActiveStage(index)
-    setRunStatus('paused')
+    if (motionMode === 'full') setRunStatus('paused')
   }
 
   const control = {
@@ -109,6 +141,7 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
     <article
       className="cd-deck"
       id="command-deck"
+      ref={deckRef}
       aria-labelledby="command-deck-label"
       data-run-status={runStatus}
     >

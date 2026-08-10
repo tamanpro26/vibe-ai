@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useInView, useReducedMotion } from 'motion/react'
+import { useInView } from 'motion/react'
 import SectionHeader from './SectionHeader.jsx'
 import { PROVIDERS } from '../data.js'
 
@@ -14,17 +14,16 @@ const SCRIPT = [
   { active: 0, tripped: [], msg: 'all circuits closed, back on primary. 0 requests dropped' },
 ]
 
-export default function Failover() {
+export default function Failover({ motionMode = 'full' }) {
   const [step, setStep] = useState(0)
   const sectionRef = useRef(null)
   const isInView = useInView(sectionRef, { amount: 0.15 })
-  const reduced = useReducedMotion()
 
   useEffect(() => {
-    if (!isInView || reduced) return undefined
+    if (!isInView || motionMode !== 'full') return undefined
     const id = setInterval(() => setStep((s) => (s + 1) % SCRIPT.length), 2100)
     return () => clearInterval(id)
-  }, [isInView, reduced])
+  }, [isInView, motionMode])
 
   const { active, tripped, msg } = SCRIPT[step]
 

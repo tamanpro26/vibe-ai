@@ -1,8 +1,11 @@
 import { expect, test as base } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
-async function installAudioContextStub(page) {
-  await page.addInitScript(() => {
+const EXPECTED_REVISION = process.env.PLAYWRIGHT_EXPECTED_REVISION || 'local'
+
+async function installAudioContextStub(page, options = {}) {
+  const { rejectResume = false, deferResume = false } = options
+  await page.addInitScript(({ shouldRejectResume, shouldDeferResume }) => {
     const probe = { contexts: 0, resumes: 0, suspends: 0, starts: 0, closes: 0 }
     window.__audioProbe = probe
     window.AudioContext = class AudioContextStub {
@@ -15,6 +18,12 @@ async function installAudioContextStub(page) {
 
       async resume() {
         probe.resumes += 1
+        if (shouldDeferResume) {
+          await new Promise((resolve) => {
+            window.__resolveAudioResume = resolve
+          })
+        }
+        if (shouldRejectResume) throw new Error('resume rejected')
         this.state = 'running'
       }
 
@@ -48,7 +57,7 @@ async function installAudioContextStub(page) {
         }
       }
     }
-  })
+  }, { shouldRejectResume: rejectResume, shouldDeferResume: deferResume })
 }
 
 const test = base.extend({
@@ -76,6 +85,14 @@ const test = base.extend({
 })
 
 test.describe('Landing composition @composition', () => {
+  test('renders the expected build revision', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('.command-deck-landing')).toHaveAttribute(
+      'data-build-revision',
+      EXPECTED_REVISION,
+    )
+  })
+
   test('presents one Command Deck with coordinated specialists and verification', async ({ page }) => {
     await page.goto('/')
 
@@ -193,6 +210,19 @@ test.describe('Command Deck trace @trace', () => {
     await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'idle')
     await expect(page.locator('#command-deck [aria-current="step"]')).toHaveCount(0)
   })
+
+  test('pauses an active trace when the deck leaves the viewport', async ({ page }) => {
+    const deck = page.locator('#command-deck')
+    const activeStage = deck.locator('[aria-current="step"]')
+    await deck.getByRole('button', { name: 'Start trace' }).click()
+    await page.clock.runFor(1200)
+    await expect(activeStage).toContainText('Routing')
+
+    await page.locator('#contact').scrollIntoViewIfNeeded()
+    await expect(deck).toHaveAttribute('data-run-status', 'paused')
+    await page.clock.runFor(5000)
+    await expect(activeStage).toContainText('Routing')
+  })
 })
 
 test.describe('Responsive Command Deck @responsive', () => {
@@ -236,6 +266,8 @@ test.describe('Landing motion preferences @motion', () => {
       )
       await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
       await expect(page.getByRole('button', { name: 'Replay trace' })).toBeDisabled()
+      await page.getByRole('button', { name: 'Inspect Planning stage' }).click()
+      await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
     })
   }
 
@@ -251,6 +283,21 @@ test.describe('Landing motion preferences @motion', () => {
 
     await expect(deck).toHaveAttribute('data-run-status', 'complete')
     await expect(page.locator('.command-deck-landing')).toHaveAttribute('data-effective-motion', 'reduced')
+  })
+
+  test('explicit reduced motion stops retained procedural sections and CSS loops', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-08-09T12:00:00Z') })
+    await page.goto('/')
+    await page.evaluate(() => {
+      document.documentElement.dataset.motion = 'reduced'
+    })
+    const failover = page.locator('#resilience')
+    await failover.scrollIntoViewIfNeeded()
+    const status = failover.locator('.failover-status')
+    const initialStatus = await status.textContent()
+    await page.clock.runFor(10000)
+    await expect(status).toHaveText(initialStatus)
+    await expect(failover.locator('.status-dot')).toHaveCSS('animation-name', 'none')
   })
 })
 
@@ -274,11 +321,16 @@ test.describe('Landing sound consent @sound', () => {
     const traceCueCount = await page.evaluate(() => window.__audioProbe.starts)
     expect(traceCueCount).toBeGreaterThan(consentCueCount)
 
+    await page.clock.runFor(3600)
+    await expect(page.locator('#command-deck')).toHaveAttribute('data-run-status', 'complete')
+    const completionCueCount = await page.evaluate(() => window.__audioProbe.starts)
+    expect(completionCueCount).toBe(traceCueCount + 4)
+
     await page.getByRole('button', { name: 'Sound on' }).click()
     await expect(page.getByRole('button', { name: 'Enable sound' })).toHaveAttribute('aria-pressed', 'false')
     await expect.poll(() => page.evaluate(() => window.__audioProbe.suspends)).toBe(1)
     await page.clock.runFor(5000)
-    expect(await page.evaluate(() => window.__audioProbe.starts)).toBe(traceCueCount)
+    expect(await page.evaluate(() => window.__audioProbe.starts)).toBe(completionCueCount)
   })
 
   test('closes its only audio context when the landing unmounts', async ({ page }) => {
@@ -304,6 +356,31 @@ test.describe('Landing sound consent @sound', () => {
 
     await expect(page.getByRole('button', { name: 'Sound unavailable' })).toBeDisabled()
     await expect(page.getByRole('status', { name: 'Sound status' })).toContainText('Sound is unavailable')
+  })
+
+  test('reports a rejected audio resume without breaking the trace', async ({ page }) => {
+    await installAudioContextStub(page, { rejectResume: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Enable sound' }).click()
+
+    await expect(page.getByRole('button', { name: 'Sound unavailable' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Start trace' })).toBeEnabled()
+  })
+
+  test('ignores an in-flight resume result after route unmount', async ({ page }) => {
+    await installAudioContextStub(page, { deferResume: true })
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Enable sound' }).click()
+    await expect.poll(() => page.evaluate(() => window.__audioProbe.resumes)).toBe(1)
+
+    await page.evaluate(() => {
+      window.location.hash = '#/chat'
+    })
+
+    await expect(page).toHaveURL(/#\/chat$/)
+    await expect(page.locator('.command-deck-landing')).toHaveCount(0)
+    await page.evaluate(() => window.__resolveAudioResume?.())
+    await expect.poll(() => page.evaluate(() => window.__audioProbe.closes)).toBe(1)
   })
 })
 

@@ -766,3 +766,12 @@
     filter: none;
   }
 }
+
+.command-deck-landing[data-effective-motion='reduced'] *,
+.command-deck-landing[data-effective-motion='reduced'] *::before,
+.command-deck-landing[data-effective-motion='reduced'] *::after,
+.command-deck-landing[data-effective-motion='off'] *,
+.command-deck-landing[data-effective-motion='off'] *::before,
+.command-deck-landing[data-effective-motion='off'] *::after {
+  animation: none !important;
+}

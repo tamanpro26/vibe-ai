@@ -1,19 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { useInView, useReducedMotion } from 'motion/react'
+import { useInView } from 'motion/react'
 import SectionHeader from './SectionHeader.jsx'
 import { COUNCIL_STAGES } from '../data.js'
 
-export default function Council() {
+export default function Council({ motionMode = 'full' }) {
   const [active, setActive] = useState(0)
   const sectionRef = useRef(null)
   const isInView = useInView(sectionRef, { amount: 0.15 })
-  const reduced = useReducedMotion()
 
   useEffect(() => {
-    if (!isInView || reduced) return undefined
+    if (!isInView || motionMode !== 'full') return undefined
     const id = setInterval(() => setActive((a) => (a + 1) % COUNCIL_STAGES.length), 2400)
     return () => clearInterval(id)
-  }, [isInView, reduced])
+  }, [isInView, motionMode])
 
   return (
     <section className="section" id="council" ref={sectionRef}>

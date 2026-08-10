@@ -2,6 +2,11 @@ import { defineConfig, devices } from '@playwright/test'
 
 const localBaseURL = 'http://127.0.0.1:4173'
 const externalBaseURL = process.env.PLAYWRIGHT_BASE_URL?.replace(/\/$/, '')
+const expectedRevision = process.env.PLAYWRIGHT_EXPECTED_REVISION
+
+if (externalBaseURL && !expectedRevision) {
+  throw new Error('PLAYWRIGHT_EXPECTED_REVISION is required with PLAYWRIGHT_BASE_URL')
+}
 
 export default defineConfig({
   testDir: './tests',
@@ -27,6 +32,6 @@ export default defineConfig({
     : {
         command: 'npm run preview -- --host 127.0.0.1 --port 4173 --strictPort',
         url: localBaseURL,
-        reuseExistingServer: !process.env.CI,
+        reuseExistingServer: false,
       },
 })

@@ -115,7 +115,11 @@ function Landing() {
   return (
     <LandingSoundProvider>
       <MotionConfig reducedMotion={motionMode === 'full' ? 'never' : 'always'}>
-        <div className="app command-deck-landing" data-effective-motion={motionMode}>
+        <div
+          className="app command-deck-landing"
+          data-effective-motion={motionMode}
+          data-build-revision={import.meta.env.VITE_BUILD_REVISION}
+        >
           <div className="bg-grid" aria-hidden="true" />
           <div className="landing-scanfield" aria-hidden="true" />
           <Nav />
@@ -123,8 +127,8 @@ function Landing() {
             <Hero motionMode={motionMode} />
             <PlatformShowcase motionMode={motionMode} />
             <Problem />
-            <Failover />
-            <Council />
+            <Failover motionMode={motionMode} />
+            <Council motionMode={motionMode} />
             <AgentLoop />
             <Teams />
             <Ecosystem />
