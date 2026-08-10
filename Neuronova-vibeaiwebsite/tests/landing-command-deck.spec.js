@@ -1,9 +1,53 @@
 import { expect, test as base } from '@playwright/test'
 
 const FUTURE_GROUPS = [
-  ['Landing sound consent @sound', 'opt-in sound cues and failure states'],
   ['Landing accessibility @a11y', 'axe and keyboard coverage'],
 ]
+
+async function installAudioContextStub(page) {
+  await page.addInitScript(() => {
+    const probe = { contexts: 0, resumes: 0, starts: 0, closes: 0 }
+    window.__audioProbe = probe
+    window.AudioContext = class AudioContextStub {
+      constructor() {
+        probe.contexts += 1
+        this.currentTime = 0
+        this.destination = {}
+        this.state = 'suspended'
+      }
+
+      async resume() {
+        probe.resumes += 1
+        this.state = 'running'
+      }
+
+      async close() {
+        probe.closes += 1
+        this.state = 'closed'
+      }
+
+      createOscillator() {
+        return {
+          type: 'sine',
+          frequency: { setValueAtTime() {} },
+          connect() {},
+          start() { probe.starts += 1 },
+          stop() {},
+        }
+      }
+
+      createGain() {
+        return {
+          gain: {
+            setValueAtTime() {},
+            exponentialRampToValueAtTime() {},
+          },
+          connect() {},
+        }
+      }
+    }
+  })
+}
 
 const test = base.extend({
   runtimeGuard: [
@@ -205,6 +249,58 @@ test.describe('Landing motion preferences @motion', () => {
 
     await expect(deck).toHaveAttribute('data-run-status', 'complete')
     await expect(page.locator('.command-deck-landing')).toHaveAttribute('data-effective-motion', 'reduced')
+  })
+})
+
+test.describe('Landing sound consent @sound', () => {
+  test('stays silent until consent and plays only semantic trace cues while enabled', async ({ page }) => {
+    await installAudioContextStub(page)
+    await page.clock.install({ time: new Date('2026-08-09T12:00:00Z') })
+    await page.goto('/')
+
+    await expect(page.getByRole('button', { name: 'Enable sound' })).toHaveAttribute('aria-pressed', 'false')
+    expect(await page.evaluate(() => window.__audioProbe.contexts)).toBe(0)
+
+    await page.getByRole('button', { name: 'Enable sound' }).click()
+    await expect(page.getByRole('button', { name: 'Sound on' })).toHaveAttribute('aria-pressed', 'true')
+    expect(await page.evaluate(() => window.__audioProbe.contexts)).toBe(1)
+    const consentCueCount = await page.evaluate(() => window.__audioProbe.starts)
+
+    await page.getByRole('button', { name: 'Start trace' }).click()
+    expect(await page.evaluate(() => window.__audioProbe.starts)).toBeGreaterThan(consentCueCount)
+    await page.clock.runFor(1200)
+    const traceCueCount = await page.evaluate(() => window.__audioProbe.starts)
+    expect(traceCueCount).toBeGreaterThan(consentCueCount)
+
+    await page.getByRole('button', { name: 'Sound on' }).click()
+    await expect(page.getByRole('button', { name: 'Enable sound' })).toHaveAttribute('aria-pressed', 'false')
+    await page.clock.runFor(5000)
+    expect(await page.evaluate(() => window.__audioProbe.starts)).toBe(traceCueCount)
+  })
+
+  test('closes its only audio context when the landing unmounts', async ({ page }) => {
+    await installAudioContextStub(page)
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Enable sound' }).click()
+
+    await page.evaluate(() => {
+      window.location.hash = '#/chat'
+    })
+
+    await expect(page).toHaveURL(/#\/chat$/)
+    await expect.poll(() => page.evaluate(() => window.__audioProbe.closes)).toBe(1)
+  })
+
+  test('reports unavailable audio without creating a broken control state', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'AudioContext', { value: undefined, configurable: true })
+      Object.defineProperty(window, 'webkitAudioContext', { value: undefined, configurable: true })
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Enable sound' }).click()
+
+    await expect(page.getByRole('button', { name: 'Sound unavailable' })).toBeDisabled()
+    await expect(page.getByRole('status', { name: 'Sound status' })).toContainText('Sound is unavailable')
   })
 })
 

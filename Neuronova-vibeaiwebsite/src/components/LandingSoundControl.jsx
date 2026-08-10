@@ -1,69 +1,34 @@
-import { useEffect, useRef, useState } from 'react'
+import useLandingSound from './useLandingSound.js'
 
-function tone(context, frequency, start, duration, gain = 0.018) {
-  const oscillator = context.createOscillator()
-  const envelope = context.createGain()
-  oscillator.type = 'sine'
-  oscillator.frequency.setValueAtTime(frequency, start)
-  envelope.gain.setValueAtTime(0.0001, start)
-  envelope.gain.exponentialRampToValueAtTime(gain, start + 0.012)
-  envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration)
-  oscillator.connect(envelope)
-  envelope.connect(context.destination)
-  oscillator.start(start)
-  oscillator.stop(start + duration + 0.03)
+const LABELS = {
+  disabled: 'Enable sound',
+  enabling: 'Enabling sound',
+  enabled: 'Sound on',
+  unavailable: 'Sound unavailable',
 }
 
 export default function LandingSoundControl() {
-  const contextRef = useRef(null)
-  const [enabled, setEnabled] = useState(false)
-
-  const getContext = async () => {
-    if (!contextRef.current) {
-      const AudioContext = window.AudioContext || window.webkitAudioContext
-      if (!AudioContext) return null
-      contextRef.current = new AudioContext()
-    }
-    await contextRef.current.resume()
-    return contextRef.current
-  }
-
-  useEffect(() => {
-    if (!enabled) return undefined
-    const onClick = (event) => {
-      if (!event.target.closest('a, button')) return
-      const context = contextRef.current
-      if (!context || context.state !== 'running') return
-      tone(context, 420, context.currentTime, 0.055, 0.011)
-    }
-    document.addEventListener('click', onClick)
-    return () => document.removeEventListener('click', onClick)
-  }, [enabled])
-
-  const toggle = async () => {
-    const context = await getContext()
-    if (!context) return
-    const next = !enabled
-    setEnabled(next)
-    if (next) {
-      const start = context.currentTime + 0.02
-      tone(context, 220, start, 0.11)
-      tone(context, 330, start + 0.09, 0.12)
-      tone(context, 495, start + 0.18, 0.18, 0.014)
-    }
-  }
+  const { status, toggle } = useLandingSound()
+  const enabled = status === 'enabled'
+  const unavailable = status === 'unavailable'
 
   return (
-    <button
-      type="button"
-      className={`sound-control${enabled ? ' is-on' : ''}`}
-      aria-pressed={enabled}
-      onClick={toggle}
-    >
-      <span className="sound-control-icon" aria-hidden="true">
-        {enabled ? '◖◗' : '◖·◗'}
+    <>
+      <button
+        type="button"
+        className={`sound-control${enabled ? ' is-on' : ''}`}
+        aria-pressed={enabled}
+        disabled={status === 'enabling' || unavailable}
+        onClick={toggle}
+      >
+        <span className="sound-control-icon" aria-hidden="true">
+          {enabled ? '◖━◗' : '◖·◗'}
+        </span>
+        {LABELS[status]}
+      </button>
+      <span className="sr-only" role="status" aria-label="Sound status" aria-live="polite">
+        {unavailable ? 'Sound is unavailable in this browser.' : LABELS[status]}
       </span>
-      {enabled ? 'Sound on' : 'Enable sound'}
-    </button>
+    </>
   )
 }

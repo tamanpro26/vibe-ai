@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import useLandingSound from './useLandingSound.js'
 
 const TRACE_STAGES = [
   {
@@ -40,6 +41,7 @@ const SPECIALIST_ROLES = [
 const STAGE_DELAY = 1200
 
 export default function OrchestrationTrace({ motionMode = 'full' }) {
+  const { playCue } = useLandingSound()
   const [runStatus, setRunStatus] = useState('idle')
   const [activeStage, setActiveStage] = useState(null)
   const generationRef = useRef(0)
@@ -53,13 +55,15 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
       if (generation !== generationRef.current) return
       if (activeStage === TRACE_STAGES.length - 1) {
         setRunStatus('complete')
+        playCue('complete')
         return
       }
       setActiveStage((stage) => stage + 1)
+      playCue('advance')
     }, STAGE_DELAY)
 
     return () => window.clearTimeout(timerRef.current)
-  }, [activeStage, runStatus])
+  }, [activeStage, playCue, runStatus])
 
   useEffect(
     () => () => {
@@ -82,6 +86,7 @@ export default function OrchestrationTrace({ motionMode = 'full' }) {
     window.clearTimeout(timerRef.current)
     setActiveStage(0)
     setRunStatus('running')
+    playCue('start')
   }
 
   const pause = () => {

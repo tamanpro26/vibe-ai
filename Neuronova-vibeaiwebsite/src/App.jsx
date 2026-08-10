@@ -3,6 +3,7 @@ import { MotionConfig } from 'motion/react'
 import Nav from './components/Nav.jsx'
 import Hero from './components/Hero.jsx'
 import LandingSoundControl from './components/LandingSoundControl.jsx'
+import { LandingSoundProvider } from './components/LandingSoundContext.jsx'
 import useLandingMotionPreference from './components/useLandingMotionPreference.js'
 import PlatformShowcase from './components/PlatformShowcase.jsx'
 import Problem from './components/Problem.jsx'
@@ -112,27 +113,29 @@ function Landing() {
   useSpotlight(motionMode)
 
   return (
-    <MotionConfig reducedMotion={motionMode === 'full' ? 'never' : 'always'}>
-      <div className="app command-deck-landing" data-effective-motion={motionMode}>
-        <div className="bg-grid" aria-hidden="true" />
-        <div className="landing-scanfield" aria-hidden="true" />
-        <Nav />
-        <main>
-          <Hero motionMode={motionMode} />
-          <PlatformShowcase />
-          <Problem />
-          <Failover />
-          <Council />
-          <AgentLoop />
-          <Teams />
-          <Ecosystem />
-          <Engineering />
-          <Security />
-        </main>
-        <Footer />
-        <LandingSoundControl />
-      </div>
-    </MotionConfig>
+    <LandingSoundProvider>
+      <MotionConfig reducedMotion={motionMode === 'full' ? 'never' : 'always'}>
+        <div className="app command-deck-landing" data-effective-motion={motionMode}>
+          <div className="bg-grid" aria-hidden="true" />
+          <div className="landing-scanfield" aria-hidden="true" />
+          <Nav />
+          <main>
+            <Hero motionMode={motionMode} />
+            <PlatformShowcase />
+            <Problem />
+            <Failover />
+            <Council />
+            <AgentLoop />
+            <Teams />
+            <Ecosystem />
+            <Engineering />
+            <Security />
+          </main>
+          <Footer />
+          <LandingSoundControl />
+        </div>
+      </MotionConfig>
+    </LandingSoundProvider>
   )
 }
 
