@@ -440,6 +440,12 @@
   cursor: pointer;
 }
 
+.command-deck-landing .cd-deck-stages button > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
 .command-deck-landing .cd-deck-stages li:last-child {
   border-right: 0;
 }
