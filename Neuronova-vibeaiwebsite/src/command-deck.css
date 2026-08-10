@@ -256,6 +256,41 @@
   line-height: 1.5;
 }
 
+.command-deck-landing .cd-deck-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.command-deck-landing .cd-deck-controls button {
+  min-width: 118px;
+  min-height: 38px;
+  padding: 8px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: var(--accent-subtle);
+  font: 650 10px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.command-deck-landing .cd-deck-controls button:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.command-deck-landing .cd-deck-controls > span,
+.command-deck-landing .cd-deck-live {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
 .command-deck-landing .cd-deck-system {
   display: grid;
   grid-template-columns: 128px 1fr;
@@ -388,13 +423,23 @@
 .command-deck-landing .cd-deck-stages li {
   min-width: 0;
   min-height: 74px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--cd-inset);
+}
+
+.command-deck-landing .cd-deck-stages button {
+  width: 100%;
+  min-height: 100%;
   display: grid;
   grid-template-columns: auto 1fr;
   align-items: start;
   gap: 8px;
   padding: 12px 10px;
-  border-right: 1px solid var(--border-subtle);
-  background: var(--cd-inset);
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .command-deck-landing .cd-deck-stages li:last-child {
@@ -413,14 +458,33 @@
   line-height: 1.35;
 }
 
-.command-deck-landing .cd-deck-stages .is-verified {
+.command-deck-landing .cd-deck-stages .is-current {
   background: var(--accent-subtle);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
 
-.command-deck-landing .cd-deck-stages .is-verified strong,
-.command-deck-landing .cd-deck-stages .is-verified .cd-stage-index {
+.command-deck-landing .cd-deck-stages .is-current strong,
+.command-deck-landing .cd-deck-stages .is-current .cd-stage-index,
+.command-deck-landing .cd-deck-stages .is-complete .cd-stage-index {
   color: var(--accent);
+}
+
+.command-deck-landing .cd-deck-stages em {
+  display: none;
+  color: var(--text-tertiary);
+  font-size: 8px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.command-deck-landing .cd-deck-stages .is-current em {
+  display: block;
+}
+
+.command-deck-landing .cd-deck-live {
+  min-height: 28px;
+  margin: 10px 2px 0;
+  line-height: 1.45;
 }
 
 .command-deck-landing .cd-deck-verdict {
@@ -430,6 +494,11 @@
   border: 1px solid var(--accent-border);
   border-radius: 11px;
   background: var(--accent-subtle);
+  opacity: 0.58;
+}
+
+.command-deck-landing .cd-deck-verdict.is-complete {
+  opacity: 1;
 }
 
 .command-deck-landing .cd-verdict-mark {
