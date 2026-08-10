@@ -215,3 +215,31 @@ Final weighted score: **9.1 / 10**, up from **6.8 / 10**.
 ### Release assessment
 
 The public landing page meets the quantitative quality bar and has no known P0/P1 landing defects. Full-product release confidence remains conditional on two external checks: a signed-in Clerk QA session and restoration of the optional desktop automation dependency needed by two root VibeMind tests. Neither limitation is hidden or represented as a passing gate.
+
+## Iteration 5 - Cinematic Command Deck landing
+
+### Changes
+
+- Rebuilt the first screen as a responsive editorial Command Deck that explains manager-led multi-agent orchestration instead of imitating a single-model chat prompt.
+- Added a visitor-controlled Planning, Routing, Critique, and Verification trace with pause, resume, replay, and direct stage inspection.
+- Added an opt-in procedural sound layer that remains silent before consent and reports unsupported or rejected audio without blocking the experience.
+- Preserved useful content under reduced or disabled motion, paused active work when the deck leaves the viewport, and stopped retained procedural animation loops outside full-motion mode.
+- Added a focused Chromium Playwright contract covering composition, orchestration state, phone/tablet overflow, motion preferences, sound consent, keyboard behavior, anchors, accessibility, and build-revision identity.
+
+### Release-candidate evidence
+
+| Gate | Result | Notes |
+| --- | --- | --- |
+| JavaScript lint | PASS | `npm run lint`; zero warnings. |
+| Production build | PASS | `npm run build`; landing JavaScript 375.87 kB raw / 120.36 kB gzip. The gzip increase is 1.84% from the 118.19 kB baseline, below the 10% review threshold. |
+| Browser contract | PASS | 23/23 Chromium tests passed without retries. |
+| Manual responsive QA | PASS | Desktop, 820 px tablet, and 390 px phone layouts inspected; no horizontal overflow or browser console warnings/errors. |
+| Lighthouse mobile | PASS | Performance 99, Accessibility 100, Best Practices 100, SEO 100; FCP 1.5 s, LCP 1.7 s, TBT 0 ms, CLS 0. |
+| Accessibility scan | PASS | Cockpit and Studio themes have no serious WCAG violations in the automated landing sweep. |
+
+### Release boundary
+
+- Linked Vercel project: `vibeai-showcase`; production alias: `https://vibeai-showcase.vercel.app/`.
+- Previous known-good immutable deployment captured before release: `https://vibeai-showcase-jzgzx72yw-tamanpro26s-projects.vercel.app`.
+- Deployment must come from the existing `codex/chat-orchestration-ui` branch, then pass the same browser contract against its immutable HTTPS deployment with the expected Git revision.
+- Roll back by re-promoting the previous known-good deployment if the landing is blank, assets fail, the chat/auth handoff breaks, audio plays before consent, reduced-motion autoplay returns, or mobile overflow/runtime errors appear.
