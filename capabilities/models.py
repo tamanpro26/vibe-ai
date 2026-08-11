@@ -54,6 +54,19 @@ class ReviewState(StrEnum):
     REVOKED = "revoked"
 
 
+class ActionStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    INVALIDATED = "invalidated"
+    EXECUTING = "executing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+
 class ScopeKind(StrEnum):
     ACCOUNT = "account"
     PROJECT = "project"
@@ -378,6 +391,73 @@ class CapabilityExecutionLease(Base):
     send_attempted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class CapabilityActionRequest(Base):
+    __tablename__ = "capability_action_requests"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_capability_action_idempotency"),
+        Index("ix_capability_action_owner_status", "owner_id", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    capability_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    connection_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    shared_data: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    mutable_resources: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[ActionStatus] = mapped_column(
+        SAEnum(ActionStatus, native_enum=False, values_callable=lambda cls: [item.value for item in cls]),
+        default=ActionStatus.PENDING,
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    send_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
+class CapabilityActionOutbox(Base):
+    __tablename__ = "capability_action_outbox"
+
+    action_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_action_requests.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="ready", nullable=False, index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class CapabilityActionExecution(Base):
+    __tablename__ = "capability_action_executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    action_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_action_requests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    worker_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    send_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 class CapabilityAuditEvent(Base):
     __tablename__ = "capability_audit_events"
     __table_args__ = (Index("ix_capability_audit_owner_time", "owner_id", "created_at"),)
@@ -393,8 +473,12 @@ class CapabilityAuditEvent(Base):
 
 __all__ = [
     "ActivationMode",
+    "ActionStatus",
     "Base",
     "CapabilityActivationPreference",
+    "CapabilityActionExecution",
+    "CapabilityActionOutbox",
+    "CapabilityActionRequest",
     "CapabilityAuditEvent",
     "CapabilityAuthorDraft",
     "CapabilityCredentialRecord",

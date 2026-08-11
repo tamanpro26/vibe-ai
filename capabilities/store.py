@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import event, select
@@ -14,7 +14,11 @@ from capabilities.credentials import CredentialEnvelope
 from capabilities.manifests import ActivationMode, CapabilityManifest, TrustState, validate_package
 from capabilities.models import (
     Base,
+    ActionStatus,
     CapabilityActivationPreference,
+    CapabilityActionExecution,
+    CapabilityActionOutbox,
+    CapabilityActionRequest,
     CapabilityAuditEvent,
     CapabilityAuthorDraft,
     CapabilityCredentialRecord,
@@ -29,6 +33,7 @@ from capabilities.models import (
     CapabilitySystemState,
     CapabilitySuggestionDecision,
     CapabilityVersionRecord,
+    CapabilityWorkflowCheckpoint,
     DraftState,
     ReviewState,
     ScopeKind,
@@ -721,6 +726,296 @@ class CapabilityStore:
                 candidate.state = ReviewState.SUPERSEDED
                 candidate.reviewer_id = reviewer_id
 
+    async def get_active_installation(
+        self, owner_id: str, version_id: str
+    ) -> CapabilityInstallation | None:
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(CapabilityInstallation).where(
+                    CapabilityInstallation.owner_id == owner_id,
+                    CapabilityInstallation.capability_version_id == version_id,
+                    CapabilityInstallation.uninstalled_at.is_(None),
+                )
+            )
+
+    async def create_action_request(
+        self,
+        owner_id: str,
+        proposal,
+        *,
+        workflow_id: str | None = None,
+        ttl: timedelta = timedelta(minutes=15),
+    ) -> CapabilityActionRequest:
+        """Persist an immutable approval payload without creating executable work."""
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            existing = await session.scalar(
+                select(CapabilityActionRequest).where(
+                    CapabilityActionRequest.owner_id == owner_id,
+                    CapabilityActionRequest.idempotency_key == proposal.idempotency_key,
+                )
+            )
+            if existing:
+                if existing.request_digest != proposal.request_digest:
+                    raise ValueError("idempotency key is already bound to another action")
+                return existing
+            action = CapabilityActionRequest(
+                owner_id=owner_id,
+                capability_version_id=proposal.capability_version_id,
+                capability_digest=proposal.capability_digest,
+                connection_id=proposal.connection_id,
+                project_id=proposal.project_id,
+                chat_id=proposal.chat_id,
+                operation=proposal.operation,
+                arguments=proposal.arguments.model_dump(mode="json"),
+                shared_data=list(proposal.shared_data),
+                mutable_resources=list(proposal.mutable_resources),
+                request_digest=proposal.request_digest,
+                idempotency_key=proposal.idempotency_key,
+                workflow_id=workflow_id,
+                expires_at=now + ttl,
+            )
+            session.add(action)
+            await session.flush()
+            if workflow_id:
+                checkpoint = await session.scalar(
+                    select(CapabilityWorkflowCheckpoint).where(
+                        CapabilityWorkflowCheckpoint.owner_id == owner_id,
+                        CapabilityWorkflowCheckpoint.job_id == workflow_id,
+                    )
+                )
+                state = {"action_id": action.id, "request_digest": action.request_digest}
+                if checkpoint:
+                    checkpoint.status = "awaiting_confirmation"
+                    checkpoint.state = state
+                    checkpoint.checkpoint_version += 1
+                else:
+                    session.add(
+                        CapabilityWorkflowCheckpoint(
+                            owner_id=owner_id,
+                            job_id=workflow_id,
+                            status="awaiting_confirmation",
+                            state=state,
+                        )
+                    )
+        return action
+
+    async def get_action_request(
+        self, owner_id: str, action_id: str
+    ) -> CapabilityActionRequest:
+        async with self._sessions() as session:
+            action = await session.get(CapabilityActionRequest, action_id)
+            if action is None or action.owner_id != owner_id:
+                raise PermissionError("action not found for owner")
+            return action
+
+    async def list_pending_actions(self, owner_id: str) -> list[CapabilityActionRequest]:
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityActionRequest)
+                .where(
+                    CapabilityActionRequest.owner_id == owner_id,
+                    CapabilityActionRequest.status == ActionStatus.PENDING,
+                )
+                .order_by(CapabilityActionRequest.created_at)
+            )
+            return list(values)
+
+    async def approve_action(
+        self, owner_id: str, action_id: str, request_digest: str
+    ) -> CapabilityActionRequest:
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            action = await session.get(CapabilityActionRequest, action_id)
+            if action is None or action.owner_id != owner_id:
+                raise PermissionError("action not found for owner")
+            if action.request_digest != request_digest:
+                raise ValueError("approval digest does not match the displayed action")
+            if action.status is ActionStatus.APPROVED:
+                return action
+            if action.status is not ActionStatus.PENDING:
+                raise ValueError("action is no longer awaiting approval")
+            if _aware(action.expires_at) <= now:
+                action.status = ActionStatus.EXPIRED
+                action.decided_at = now
+                raise ValueError("action approval has expired")
+            action.status = ActionStatus.APPROVED
+            action.approved_at = now
+            action.decided_at = now
+            if await session.get(CapabilityActionOutbox, action.id) is None:
+                session.add(CapabilityActionOutbox(action_id=action.id, available_at=now))
+        return action
+
+    async def deny_action(self, owner_id: str, action_id: str) -> CapabilityActionRequest:
+        async with self._sessions.begin() as session:
+            action = await session.get(CapabilityActionRequest, action_id)
+            if action is None or action.owner_id != owner_id:
+                raise PermissionError("action not found for owner")
+            if action.status is ActionStatus.DENIED:
+                return action
+            if action.status is not ActionStatus.PENDING:
+                raise ValueError("action is no longer awaiting approval")
+            action.status = ActionStatus.DENIED
+            action.decided_at = datetime.now(timezone.utc)
+        return action
+
+    async def claim_action(
+        self, worker_id: str, *, lease_for: timedelta = timedelta(minutes=1)
+    ) -> CapabilityActionRequest | None:
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            query = (
+                select(CapabilityActionOutbox)
+                .join(CapabilityActionRequest)
+                .where(
+                    CapabilityActionOutbox.status == "ready",
+                    CapabilityActionOutbox.available_at <= now,
+                    CapabilityActionRequest.status == ActionStatus.APPROVED,
+                )
+                .order_by(CapabilityActionOutbox.available_at, CapabilityActionOutbox.action_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                query = query.with_for_update(skip_locked=True)
+            outbox = await session.scalar(query)
+            if outbox is None:
+                return None
+            action = await session.get(CapabilityActionRequest, outbox.action_id)
+            action.status = ActionStatus.EXECUTING
+            action.lease_owner = worker_id
+            action.lease_expires_at = now + lease_for
+            outbox.status = "claimed"
+            outbox.claimed_by = worker_id
+            outbox.claimed_at = now
+            outbox.attempts += 1
+            session.add(CapabilityActionExecution(action_id=action.id, worker_id=worker_id))
+        return action
+
+    async def mark_action_send_attempted(self, action_id: str, worker_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            action = await session.get(CapabilityActionRequest, action_id)
+            if (
+                action is None
+                or action.status is not ActionStatus.EXECUTING
+                or action.lease_owner != worker_id
+            ):
+                raise PermissionError("worker does not own action lease")
+            action.send_attempted_at = now
+            execution = await session.scalar(
+                select(CapabilityActionExecution)
+                .where(
+                    CapabilityActionExecution.action_id == action_id,
+                    CapabilityActionExecution.worker_id == worker_id,
+                    CapabilityActionExecution.send_attempted_at.is_(None),
+                )
+                .order_by(CapabilityActionExecution.created_at.desc())
+            )
+            if execution:
+                execution.send_attempted_at = now
+
+    async def finish_action(
+        self,
+        action_id: str,
+        worker_id: str,
+        status: ActionStatus,
+        *,
+        result: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> CapabilityActionRequest:
+        if status not in {
+            ActionStatus.SUCCEEDED,
+            ActionStatus.FAILED,
+            ActionStatus.INVALIDATED,
+            ActionStatus.OUTCOME_UNKNOWN,
+        }:
+            raise ValueError("invalid terminal action status")
+        async with self._sessions.begin() as session:
+            action = await session.get(CapabilityActionRequest, action_id)
+            if action is None or action.lease_owner != worker_id:
+                raise PermissionError("worker does not own action lease")
+            action.status = status
+            action.result = result
+            action.error = error[:1000] if error else None
+            action.lease_expires_at = None
+            outbox = await session.get(CapabilityActionOutbox, action_id)
+            if outbox:
+                outbox.status = "done"
+            execution = await session.scalar(
+                select(CapabilityActionExecution)
+                .where(
+                    CapabilityActionExecution.action_id == action_id,
+                    CapabilityActionExecution.worker_id == worker_id,
+                )
+                .order_by(CapabilityActionExecution.created_at.desc())
+            )
+            if execution:
+                execution.outcome = status.value
+                execution.result = result
+            if action.workflow_id:
+                checkpoint = await session.scalar(
+                    select(CapabilityWorkflowCheckpoint).where(
+                        CapabilityWorkflowCheckpoint.owner_id == action.owner_id,
+                        CapabilityWorkflowCheckpoint.job_id == action.workflow_id,
+                    )
+                )
+                if checkpoint:
+                    checkpoint.status = "resume_ready" if status is ActionStatus.SUCCEEDED else "action_terminal"
+                    checkpoint.state = {
+                        "action_id": action.id,
+                        "status": status.value,
+                        "result": result or {},
+                    }
+                    checkpoint.checkpoint_version += 1
+        return action
+
+    async def recover_stale_actions(self, now: datetime | None = None) -> int:
+        now = now or datetime.now(timezone.utc)
+        recovered = 0
+        async with self._sessions.begin() as session:
+            values = list(
+                await session.scalars(
+                    select(CapabilityActionRequest).where(
+                        CapabilityActionRequest.status == ActionStatus.EXECUTING
+                    )
+                )
+            )
+            for action in values:
+                if action.lease_expires_at and _aware(action.lease_expires_at) > now:
+                    continue
+                outbox = await session.get(CapabilityActionOutbox, action.id)
+                if action.send_attempted_at is None:
+                    action.status = ActionStatus.APPROVED
+                    action.lease_owner = None
+                    action.lease_expires_at = None
+                    if outbox:
+                        outbox.status = "ready"
+                        outbox.claimed_by = None
+                        outbox.claimed_at = None
+                        outbox.available_at = datetime.now(timezone.utc)
+                else:
+                    action.status = ActionStatus.OUTCOME_UNKNOWN
+                    action.error = "provider outcome is ambiguous after a worker interruption"
+                    action.lease_expires_at = None
+                    if outbox:
+                        outbox.status = "done"
+                recovered += 1
+        return recovered
+
+    async def get_workflow_checkpoint(
+        self, owner_id: str, workflow_id: str
+    ) -> CapabilityWorkflowCheckpoint:
+        async with self._sessions() as session:
+            checkpoint = await session.scalar(
+                select(CapabilityWorkflowCheckpoint).where(
+                    CapabilityWorkflowCheckpoint.owner_id == owner_id,
+                    CapabilityWorkflowCheckpoint.job_id == workflow_id,
+                )
+            )
+            if checkpoint is None:
+                raise LookupError("workflow checkpoint not found")
+            return checkpoint
+
     async def append_audit(
         self, owner_id: str, event_type: str, subject_id: str, payload: dict[str, Any]
     ) -> CapabilityAuditEvent:
@@ -912,6 +1207,10 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 async def _require_active_role(session, user_id: str, role: str) -> None:
