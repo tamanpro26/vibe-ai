@@ -1,5 +1,6 @@
 import { requireSessionContext } from './_lib/clerkAuth.js'
 import { boundedHistory } from './_lib/requestData.js'
+import { registerCapabilityScopes } from './_lib/capabilityScopes.js'
 import { createHash } from 'node:crypto'
 
 /*
@@ -140,6 +141,15 @@ export default async function handler(req, res) {
   const history = boundedHistory(req.body?.history)
 
   try {
+    if (PROJECT_ID_RE.test(projectId)) {
+      await registerCapabilityScopes({
+        backendUrl: VIBE_BACKEND_URL,
+        apiToken: VIBE_API_TOKEN,
+        userToken,
+        projectId,
+        chatId: typeof req.body?.chatId === 'string' ? req.body.chatId : '',
+      })
+    }
     const upstream = await fetch(`${VIBE_BACKEND_URL}/api/agent/jobs`, {
       method: 'POST',
       headers: {
@@ -154,6 +164,13 @@ export default async function handler(req, res) {
         workspace,
         context,
         history,
+        project_id: PROJECT_ID_RE.test(projectId) ? projectId : undefined,
+        chat_id: typeof req.body?.chatId === 'string' && PROJECT_ID_RE.test(req.body.chatId)
+          ? req.body.chatId
+          : undefined,
+        capability_ids: Array.isArray(req.body?.capabilityIds)
+          ? req.body.capabilityIds.slice(0, 16)
+          : [],
       }),
     })
     const data = await upstream.json()

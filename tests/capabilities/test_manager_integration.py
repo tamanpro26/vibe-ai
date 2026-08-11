@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -124,3 +125,45 @@ async def test_prompt_api_passes_the_authoritative_snapshot_to_manager(tmp_path,
 
     assert response.capability_snapshot == seen["capability_snapshot"].model_dump(mode="json")
     assert response.capability_snapshot["selected"][0]["version_id"] == version.id
+
+
+@pytest.mark.asyncio
+async def test_project_agent_receives_owner_scoped_capability_context(tmp_path, monkeypatch):
+    import api.server as server
+    from core.agent_loop import AgentLoop
+
+    store = CapabilityStore(f"sqlite+aiosqlite:///{tmp_path / 'agent-api.db'}")
+    await store.init()
+    registry = CapabilityRegistry(store)
+    draft = await registry.create_draft(
+        "user-1",
+        native_manifest(capability_id="coding-guide", supported_tasks=["coding"]),
+    )
+    version = await registry.publish("user-1", draft.id)
+    await store.install("user-1", version.id)
+    await store.set_activation_mode("user-1", ActivationMode.MANUAL_ONLY)
+    await store.register_owned_scope("user-1", server.ScopeKind.PROJECT, "project-1")
+    seen = {}
+
+    async def fake_run(self, **kwargs):
+        del self
+        seen.update(kwargs)
+        return SimpleNamespace(
+            final_response="done", files_created=[], files_edited=[], commands_run=[],
+            iterations=1, total_ms=1, workspace=str(tmp_path),
+        )
+
+    monkeypatch.setattr(server, "get_capability_store", lambda: store)
+    monkeypatch.setattr(AgentLoop, "run", fake_run)
+    request = server.AgentRequest(
+        task="Implement the API",
+        workspace=str(tmp_path / "workspace"),
+        project_id="project-1",
+        capability_ids=["coding-guide"],
+    )
+    request._capability_owner_id = "user-1"
+
+    await server._execute_agent(request)
+
+    assert "coding-guide@1.0.0" in seen["capability_context"]
+    assert version.content_digest in seen["capability_context"]

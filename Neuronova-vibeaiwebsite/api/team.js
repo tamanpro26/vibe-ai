@@ -1,4 +1,5 @@
 import { requireSessionContext } from './_lib/clerkAuth.js'
+import { registerCapabilityScopes } from './_lib/capabilityScopes.js'
 import { boundedHistory } from './_lib/requestData.js'
 
 /*
@@ -112,6 +113,13 @@ export default async function handler(req, res) {
   }
 
   try {
+    const scopes = await registerCapabilityScopes({
+      backendUrl: VIBE_BACKEND_URL,
+      apiToken: VIBE_API_TOKEN,
+      userToken,
+      projectId: typeof req.body?.project_id === 'string' ? req.body.project_id : '',
+      chatId: typeof req.body?.chat_id === 'string' ? req.body.chat_id : '',
+    })
     const upstream = await fetch(`${VIBE_BACKEND_URL}/api/prompt`, {
       method: 'POST',
       headers: {
@@ -131,8 +139,8 @@ export default async function handler(req, res) {
           typeof req.body?.search_context === 'string'
             ? req.body.search_context.slice(0, 16_000)
             : undefined,
-        project_id: typeof req.body?.project_id === 'string' ? req.body.project_id : undefined,
-        chat_id: typeof req.body?.chat_id === 'string' ? req.body.chat_id : undefined,
+        project_id: scopes.projectId || undefined,
+        chat_id: scopes.chatId || undefined,
         capability_ids: Array.isArray(req.body?.capability_ids)
           ? req.body.capability_ids.slice(0, 16)
           : [],

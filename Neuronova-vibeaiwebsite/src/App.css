@@ -10,17 +10,36 @@
 
 /* ── ambient background ─────────────────────────────── */
 
+/* Ambient depth behind the page, without the graph-paper tell.
+ *
+ * This was two hairline linear-gradients tiled at a fixed 56px cell -- a
+ * blueprint grid stretched across the whole viewport. That pattern belongs
+ * on a surface that is actually being measured (the render bay's lattice in
+ * chat.css earns it, and only while a render is in flight); as ambient
+ * decoration behind a marketing page it is one of the most recognisable
+ * generated-UI signatures, and it is the first thing a visitor sees.
+ *
+ * Replaced with a soft off-centre wash: same job -- lift the top of the
+ * page off flat black and give the hero somewhere to sit -- carried by
+ * light instead of by a ruled grid. Same fixed/inset/z-index/pointer-events
+ * contract, so the stacking above is untouched.
+ */
 .bg-grid {
   position: fixed;
   inset: 0;
   z-index: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(var(--line-soft) 1px, transparent 1px),
-    linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(ellipse at 50% 20%, black 0%, transparent 75%);
-  -webkit-mask-image: radial-gradient(ellipse at 50% 20%, black 0%, transparent 75%);
+    radial-gradient(
+      ellipse 80% 50% at 50% 0%,
+      rgba(var(--accent-rgb), 0.06) 0%,
+      transparent 70%
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 85% 15%,
+      rgba(var(--accent-rgb), 0.035) 0%,
+      transparent 65%
+    );
 }
 
 .nav,
@@ -1897,10 +1916,18 @@ main,
   flex-direction: column;
   min-width: 0;
   padding: clamp(24px, 4vw, 42px);
+  /* Same reasoning as .bg-grid above: this is a marketing mock of the
+     workspace, not a surface being measured, so a 32px ruled grid behind it
+     is decoration wearing a blueprint costume. A single soft wash gives the
+     panel the same lift without the tell. Fixed alongside .bg-grid rather
+     than separately -- leaving one of an identical pair behind is how a
+     design system drifts. */
   background:
-    linear-gradient(rgba(var(--accent-rgb), 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(var(--accent-rgb), 0.035) 1px, transparent 1px);
-  background-size: 32px 32px;
+    radial-gradient(
+      ellipse 70% 60% at 30% 0%,
+      rgba(var(--accent-rgb), 0.05) 0%,
+      transparent 70%
+    );
 }
 
 .platform-prompt {

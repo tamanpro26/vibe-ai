@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,7 +122,7 @@ async def get_current_principal(
     if not x_vibe_user_token:
         raise HTTPException(status_code=401, detail="Verified user session required")
     try:
-        return get_identity_verifier().verify(x_vibe_user_token)
+        return await asyncio.to_thread(get_identity_verifier().verify, x_vibe_user_token)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired user session") from exc
 
@@ -132,6 +133,6 @@ async def get_optional_principal(
     if not x_vibe_user_token:
         return None
     try:
-        return get_identity_verifier().verify(x_vibe_user_token)
+        return await asyncio.to_thread(get_identity_verifier().verify, x_vibe_user_token)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired user session") from exc

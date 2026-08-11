@@ -1,13 +1,16 @@
-async function request(body, query = '') {
-  const response = await fetch(`/api/capabilities${query}`, {
+async function apiRequest(path, body, fallback) {
+  const response = await fetch(path, {
     method: body ? 'POST' : 'GET',
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || 'Capability service is unavailable')
+  if (!response.ok) throw new Error(data.error || fallback)
   return data
 }
+
+const request = (body, query = '') =>
+  apiRequest(`/api/capabilities${query}`, body, 'Capability service is unavailable')
 
 export const capabilityApi = {
   list: () => request(null),
@@ -19,18 +22,17 @@ export const capabilityApi = {
     request({ operation: 'import_github', provider, repository, commit_sha: commitSha }),
   setScope: (id, scopeKind, scopeId, state) =>
     request({ operation: 'set_scope', id, scope_kind: scopeKind, scope_id: scopeId, state }),
+  registerScope: (scopeKind, scopeId, parentScopeId = null) =>
+    request({
+      operation: 'register_scope',
+      scope_kind: scopeKind,
+      scope_id: scopeId,
+      parent_scope_id: parentScopeId,
+    }),
 }
 
-async function actionRequest(body, query = '') {
-  const response = await fetch(`/api/actions${query}`, {
-    method: body ? 'POST' : 'GET',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || 'Action inbox is unavailable')
-  return data
-}
+const actionRequest = (body, query = '') =>
+  apiRequest(`/api/actions${query}`, body, 'Action inbox is unavailable')
 
 export const actionApi = {
   propose: (proposal) => actionRequest({ operation: 'propose', proposal }),
@@ -42,12 +44,9 @@ export const actionApi = {
 }
 
 export async function integrationRequest(operation, extra = {}) {
-  const response = await fetch('/api/integrations', {
-    method: operation === 'list' ? 'GET' : 'POST',
-    headers: operation === 'list' ? undefined : { 'Content-Type': 'application/json' },
-    body: operation === 'list' ? undefined : JSON.stringify({ operation, ...extra }),
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || 'Integration service is unavailable')
-  return data
+  return apiRequest(
+    '/api/integrations',
+    operation === 'list' ? null : { operation, ...extra },
+    'Integration service is unavailable',
+  )
 }

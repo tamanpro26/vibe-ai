@@ -33,7 +33,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 import httpx
 
 from api.identity import Principal, get_current_principal, get_optional_principal
@@ -120,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await push_store.init()
     action_worker_task = None
     if settings.capability_actions_enabled:
+        _validate_capability_action_runtime()
         action_worker_task = asyncio.create_task(_run_capability_action_worker())
     logger.info("VibeAI ready ✓  (multi-provider orchestration · video_observer integrated)")
     yield
@@ -129,6 +130,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await action_worker_task
     logger.info("VibeAI shutting down.")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+
+
+def _validate_capability_action_runtime() -> None:
+    """Fail startup instead of accepting approvals without an executable worker."""
+    from capabilities.credentials import CredentialVault
+
+    if (
+        settings.deployment_environment == "production"
+        and settings.capability_database_url.startswith("sqlite")
+    ):
+        raise RuntimeError("capability actions require PostgreSQL in production")
+    try:
+        keys = json.loads(settings.capability_credential_keys)
+        CredentialVault(
+            keys,
+            settings.capability_credential_active_key,
+            settings.deployment_environment,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise RuntimeError("capability action credential vault is invalid") from exc
+    if not settings.github_app_id or not settings.github_app_private_key:
+        raise RuntimeError("capability actions require GitHub App credentials")
 
 
 async def _run_capability_action_worker() -> None:
@@ -151,9 +174,13 @@ async def _run_capability_action_worker() -> None:
             {"github.issue.comment": GitHubIssueAdapter(get_capability_store(), vault, client)},
         )
         worker_id = f"capability-worker:{uuid.uuid4()}"
+        next_recovery_at = 0.0
         while True:
             try:
-                await get_capability_store().recover_stale_actions()
+                loop_time = asyncio.get_running_loop().time()
+                if loop_time >= next_recovery_at:
+                    await get_capability_store().recover_stale_actions()
+                    next_recovery_at = loop_time + 30
                 handled = await worker.run_once(worker_id)
                 if handled is None:
                     await asyncio.sleep(0.75)
@@ -896,6 +923,10 @@ class AgentRequest(BaseModel):
     # only, and a browser cannot read the server's disk, so without it there is
     # nothing to put in a downloadable zip.
     include_files: bool = False
+    project_id: str | None = Field(default=None, max_length=128)
+    chat_id: str | None = Field(default=None, max_length=128)
+    capability_ids: list[str] = Field(default_factory=list, max_length=16)
+    _capability_owner_id: str | None = PrivateAttr(default=None)
 
 
 class ProjectFile(BaseModel):
@@ -985,12 +1016,42 @@ async def _execute_agent(req: AgentRequest) -> dict:
     ws = Path(req.workspace) if req.workspace else None
     loop = AgentLoop(workspace=ws or Path("./workspace"))
 
+    capability_context = ""
+    if req._capability_owner_id and settings.capability_hub_enabled:
+        from capabilities.context import render_capability_context
+        from capabilities.resolver import ResolutionRequest, resolve_from_store
+
+        capability_store = get_capability_store()
+        if req.project_id and not await capability_store.owns_scope(
+            req._capability_owner_id, ScopeKind.PROJECT, req.project_id
+        ):
+            raise PermissionError("project capability scope not found")
+        if req.chat_id and not await capability_store.owns_scope(
+            req._capability_owner_id, ScopeKind.CHAT, req.chat_id
+        ):
+            raise PermissionError("chat capability scope not found")
+        snapshot = await resolve_from_store(
+            capability_store,
+            ResolutionRequest(
+                owner_id=req._capability_owner_id,
+                prompt=req.task,
+                activation_mode=await capability_store.get_activation_mode(
+                    req._capability_owner_id
+                ),
+                project_id=req.project_id,
+                chat_id=req.chat_id,
+                explicit_capability_ids=req.capability_ids,
+            ),
+        )
+        capability_context = render_capability_context(snapshot)
+
     result = await loop.run(
         task=req.task,
         model_id=req.model_id,
         task_type=req.task_type,
         context=req.context,
         history=req.history,
+        capability_context=capability_context,
     )
 
     files: list[dict] = []
@@ -1018,7 +1079,13 @@ async def _execute_agent(req: AgentRequest) -> dict:
 
 
 @app.post("/api/agent", response_model=AgentResponse, dependencies=[Depends(require_token)])
-async def run_agent(req: AgentRequest) -> dict:
+async def run_agent(
+    req: AgentRequest, principal=Depends(get_optional_principal)
+) -> dict:
+    # Direct local/service-token callers retain legacy behavior; verified web
+    # principals get owner-scoped capability resolution.
+    if isinstance(principal, Principal):
+        req._capability_owner_id = principal.subject
     return await _execute_agent(req)
 
 
@@ -1094,6 +1161,7 @@ async def start_agent_job(
     req: AgentRequest,
     principal=Depends(get_current_principal),
 ) -> dict:
+    req._capability_owner_id = principal.subject
     if len(_ACTIVE_AGENT_WORKSPACES) >= _MAX_RUNNING_AGENT_JOBS:
         raise HTTPException(429, "agent build capacity reached; try again shortly")
     workspace_key = req.workspace or "./workspace"

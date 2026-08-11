@@ -1136,7 +1136,7 @@ function waitForPoll(ms, signal) {
 
 export async function buildProject(
   task, token, taskType = 'coding', projectId = null,
-  { context = '', history = [], signal } = {},
+  { context = '', history = [], chatId = null, capabilityIds = [], signal } = {},
 ) {
   const res = await fetch('/api/project', {
     method: 'POST',
@@ -1155,6 +1155,8 @@ export async function buildProject(
       projectId,
       context,
       history: history.slice(-8).map(({ role, content }) => ({ role, content })),
+      capabilityIds: capabilityIds.slice(0, 16),
+      chatId,
     }),
   })
   let data = await res.json().catch(() => null)

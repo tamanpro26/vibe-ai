@@ -394,6 +394,17 @@ function SourceCards({ sources }) {
   )
 }
 
+function CapabilityReceipt({ snapshot }) {
+  if (!snapshot) return null
+  const selected = snapshot.selected || []
+  const recommended = snapshot.recommendations || []
+  if (!selected.length && !recommended.length) return null
+  return <aside className="msg-capabilities" aria-label="Capability resolution">
+    {selected.length > 0 && <p><strong>Capabilities used</strong> {selected.map((item) => `${item.capability_id} (${item.reason.replaceAll('_', ' ')})`).join(', ')}</p>}
+    {recommended.length > 0 && <p><strong>Suggested</strong> {recommended.map((item) => item.capability_id).join(', ')} · <a href="#/capabilities">review in Capability Hub</a></p>}
+  </aside>
+}
+
 export default function Message({
   msg,
   entryNo,
@@ -419,10 +430,10 @@ export default function Message({
         {isUser && entryNo != null ? String(entryNo).padStart(3, '0') : ''}
       </div>
       <div className="msg-body">
-        {/* Attribution slug. "Countersigned" is the product's honesty claim
-            made visible: a second pass checked this before it was entered. */}
+        {/* Per-message attribution remains accurate when the engine cascade
+            falls back from the multi-agent Council to a single model. */}
         <div className="msg-role">
-          {isUser ? 'You' : 'VibeAI · drafted by the team · countersigned'}
+          {isUser ? 'You' : msg.provenance || 'VibeAI assistant'}
         </div>
         {msg.attachments?.length > 0 && (
           <div className="msg-attachments">
@@ -472,6 +483,7 @@ export default function Message({
             instead of starting after it. */}
         {msg.image && <RenderBay image={msg.image} />}
         {msg.sources?.length > 0 && !isStreaming && <SourceCards sources={msg.sources} />}
+        {!isStreaming && <CapabilityReceipt snapshot={msg.capabilitySnapshot} />}
         {msg.project && !isStreaming && <ProjectPreview project={msg.project} />}
         {msg.project && !isStreaming && <ZipCard project={msg.project} />}
         {!isUser && !isStreaming && (

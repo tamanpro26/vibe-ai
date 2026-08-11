@@ -336,18 +336,31 @@ class FreeManagerTeam:
         contract = await build_intent_contract(prompt)
 
         # Ambiguity gate: guessing at a material ambiguity is the deepest
-        # "doesn't really respect the user" failure. Ask one good question
-        # instead of confidently building the wrong thing.
+        # "doesn't really respect the user" failure — so still surface the
+        # question. But returning ONLY questions is its own failure mode, and
+        # a worse one when the detector is wrong.
+        #
+        # Measured live 2026-08-08 on vibeloop's v4-code-07. The prompt spells
+        # the behaviour out ("items are additionally split whenever key(item)
+        # changes, so a chunk never mixes two key groups") and the detector
+        # still reported "the definition of 'key-based chunking' is not
+        # explicitly stated". The gate returned 3 questions, 0 lines of code,
+        # after 173s of pipeline work — scored 0. One false positive costs the
+        # entire answer, and nothing in a headless/API caller can answer back.
+        #
+        # So: build anyway, on best judgment, with the assumptions stated at
+        # the end. A user can correct a stated assumption; they cannot correct
+        # an empty response.
+        ambiguity_note = ""
         if contract.has_open_ambiguities:
             questions = "\n".join(f"- {q}" for q in contract.open_ambiguities[:3])
             logger.info(
                 f"[free_council] ambiguity gate: {len(contract.open_ambiguities)} "
-                f"open question(s) — asking instead of guessing"
+                f"open question(s) — building on best judgment and flagging them"
             )
-            return self._with_signature(
-                "Before I build this, I want to make sure I get it right:\n\n"
-                f"{questions}\n\n"
-                "Answer these (or tell me to just use my best judgment) and I'll continue."
+            ambiguity_note = (
+                "\n\n---\n**I made a judgment call on these — tell me if I "
+                "guessed wrong and I'll redo it:**\n\n" + questions
             )
 
         contract_block = contract.as_prompt_block()
@@ -364,7 +377,7 @@ class FreeManagerTeam:
                 prompt=f"ORIGINAL REQUEST:\n{prompt}\n\nREFINED RESPONSE:\n{draft}",
                 max_tokens=max_tokens, temperature=0.3,
             )
-            return self._with_signature(final or draft)
+            return self._with_signature((final or draft) + ambiguity_note)
 
         plan = await self._run_stage_supervised(
             "Planner", contract,
@@ -398,7 +411,7 @@ class FreeManagerTeam:
             max_tokens=max_tokens, temperature=0.3,
         )
 
-        return self._with_signature(final or refined or draft)
+        return self._with_signature((final or refined or draft) + ambiguity_note)
 
     async def _run_stage_supervised(
         self, role: str, contract: IntentContract,

@@ -23,7 +23,7 @@ class CredentialBinding:
 class CredentialEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    envelope_version: int = Field(default=1, frozen=True)
+    envelope_version: int = 1
     key_id: str
     environment: str
     binding_digest: str

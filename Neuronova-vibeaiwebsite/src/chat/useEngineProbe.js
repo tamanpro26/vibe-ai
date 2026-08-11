@@ -19,7 +19,8 @@ export function useEngineProbe() {
   const [manager, setManager] = useState(false)
   const [omni, setOmni] = useState(false)
   const [edge, setEdge] = useState(false)
-  const engineRef = useRef({ live: false, manager: false, omni: false, edge: false })
+  const [ready, setReady] = useState(false)
+  const engineRef = useRef({ live: false, manager: false, omni: false, edge: false, ready: false })
   const probeRef = useRef(null)
 
   // Probed in parallel: a down server costs a full timeout, and serially
@@ -35,12 +36,13 @@ export function useEngineProbe() {
         checkOmni(),
         checkEdge(),
       ])
-      engineRef.current = { live: okLive, manager: okManager, omni: okOmni, edge: okEdge }
+      engineRef.current = { live: okLive, manager: okManager, omni: okOmni, edge: okEdge, ready: true }
       if (!alive) return
       setLive(okLive)
       setManager(okManager)
       setOmni(okOmni)
       setEdge(okEdge)
+      setReady(true)
     }
     probeRef.current = probe()
     const id = setInterval(() => {
@@ -52,5 +54,5 @@ export function useEngineProbe() {
     }
   }, [])
 
-  return { live, manager, omni, edge, setLive, setManager, setOmni, setEdge, engineRef, probeRef }
+  return { live, manager, omni, edge, ready, setLive, setManager, setOmni, setEdge, engineRef, probeRef }
 }

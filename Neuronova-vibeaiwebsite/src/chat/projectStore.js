@@ -19,12 +19,20 @@ const key = (userId) => `vibeai_projects_${userId}`
  * conversation. Idempotent, so re-reading an already-migrated record is free.
  */
 function migrate(project) {
-  if (Array.isArray(project.chats)) return project
+  if (Array.isArray(project.chats)) {
+    const { builds, ...rest } = project
+    return { ...rest, latestBuild: project.latestBuild || builds?.[0] || null }
+  }
   const legacy = Array.isArray(project.messages) ? project.messages : []
   // Both keys are intentionally dropped from the result: `messages` is
   // re-homed into chats[0] below, and the project-level memorySyncedCount
   // becomes a per-chat field.
-  const { messages: _messages, memorySyncedCount: _syncedCount, ...rest } = project
+  const {
+    messages: _messages,
+    memorySyncedCount: _syncedCount,
+    builds: _builds,
+    ...rest
+  } = project
   return {
     ...rest,
     chats: legacy.length
@@ -41,6 +49,7 @@ function migrate(project) {
           },
         ]
       : [],
+    latestBuild: project.latestBuild || _builds?.[0] || null,
   }
 }
 
@@ -114,6 +123,7 @@ export function newProject(name, description) {
     // Both carry real content, so both can go in a downloaded zip and both
     // count against the size caps above.
     files: [],
+    latestBuild: null,
   }
 }
 
@@ -139,6 +149,16 @@ export function looksBinary(text) {
 
 export const fileBytes = (files) =>
   files.reduce((n, f) => n + new Blob([f.content]).size, 0)
+
+export function mergeProjectFiles(existing, incoming) {
+  const merged = [...existing]
+  for (const file of incoming) {
+    const index = merged.findIndex((current) => current.path === file.path)
+    if (index >= 0) merged[index] = file
+    else merged.push(file)
+  }
+  return merged
+}
 
 export const SORTS = [
   { value: 'updated', label: 'Last updated' },

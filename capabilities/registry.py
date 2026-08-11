@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from capabilities.manifests import CapabilityKind, CapabilityManifest, TrustState, validate_package
+from capabilities.manifests import CapabilityManifest, validate_owner_manifest, validate_package
 from capabilities.models import CapabilityAuthorDraft, CapabilityVersionRecord
 from capabilities.store import CapabilityStore
 
@@ -19,13 +19,7 @@ class CapabilityRegistry:
         self, owner_id: str, manifest: dict[str, Any]
     ) -> CapabilityAuthorDraft:
         parsed = validate_package(manifest).manifest
-        if owner_id != "vibeai":
-            if parsed.kind is not CapabilityKind.INSTRUCTION_SKILL:
-                raise ValueError("user-authored capabilities must be instruction skills")
-            if parsed.trust is not TrustState.USER_IMPORTED:
-                raise ValueError("user-authored capabilities use User Imported trust")
-            if parsed.permissions or parsed.services or parsed.dependencies:
-                raise ValueError("user-authored instruction skills cannot grant permissions or services")
+        validate_owner_manifest(owner_id, parsed)
         return await self.store.create_draft(owner_id, parsed.model_dump(mode="json"))
 
     def preview(self, manifest: dict[str, Any]) -> CapabilityManifest:
@@ -37,22 +31,26 @@ class CapabilityRegistry:
     async def edit_as_new_draft(
         self, owner_id: str, version_id: str, patch: dict[str, Any]
     ) -> CapabilityAuthorDraft:
-        return await self.store.create_draft_from_version(owner_id, version_id, patch)
+        version = await self.store.get_version(version_id)
+        if version is None or version.owner_id != owner_id:
+            raise PermissionError("capability version not found for owner")
+        return await self.create_draft(owner_id, {**version.manifest, **patch})
 
     async def archive(self, owner_id: str, version_id: str) -> None:
         await self.store.archive_version(owner_id, version_id)
 
     async def install(self, owner_id: str, version_id: str):
-        """Install a bundle and its version-pinned members as one logical operation."""
+        """Install a bundle and its version-pinned members atomically."""
         root = await self.store.get_version(version_id)
         if root is None or root.owner_id not in {owner_id, "vibeai"}:
             raise PermissionError("capability version not available to owner")
         visited: set[str] = set()
+        resolved: list = []
 
-        async def install_version(record):
+        async def resolve_version(record):
             manifest = CapabilityManifest.model_validate(record.manifest)
             if manifest.capability_id in visited:
-                return await self.store.get_active_installation(owner_id, record.id)
+                return
             visited.add(manifest.capability_id)
             for dependency in manifest.dependencies:
                 member = await self.store.find_version(
@@ -62,16 +60,31 @@ class CapabilityRegistry:
                     if dependency.required:
                         raise ValueError(f"required member unavailable: {dependency.capability_id}")
                     continue
-                await install_version(member)
-            return await self.store.install(owner_id, record.id)
+                await resolve_version(member)
+            resolved.append(record)
 
-        return await install_version(root)
+        await resolve_version(root)
+        installations = await self.store.install_many(
+            owner_id, [record.id for record in resolved]
+        )
+        return installations[-1]
 
     async def seed_builtins(self, builtins_root: Path | None = None) -> list[CapabilityVersionRecord]:
         root = builtins_root or Path(__file__).with_name("builtins")
         versions: list[CapabilityVersionRecord] = []
         for manifest_path in sorted(root.glob("*/manifest.json")):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            parsed = validate_package(manifest).manifest
+            existing = await self.store.find_version(
+                "vibeai", parsed.capability_id, parsed.version
+            )
+            if existing is not None:
+                if existing.content_digest != parsed.content_digest:
+                    raise ValueError(
+                        f"built-in {parsed.capability_id} changed without a version bump"
+                    )
+                versions.append(existing)
+                continue
             draft = await self.create_draft("vibeai", manifest)
             versions.append(await self.publish("vibeai", draft.id))
         return versions

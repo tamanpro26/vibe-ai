@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from capabilities.actions import ProposedAction
-from capabilities.manifests import CapabilityKind, CapabilityManifest, TrustState
+from capabilities.manifests import ActivationMode, CapabilityKind, CapabilityManifest, TrustState
 from capabilities.models import ReviewState, ScopeKind, ScopeState
 
 
@@ -34,6 +36,12 @@ class ActionPolicy:
             }
         )
         self.validate_shape(proposal)
+        expires_at = getattr(action, "expires_at", None)
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= datetime.now(timezone.utc):
+                raise ValueError("action approval has expired")
         version = await store.get_version(proposal.capability_version_id)
         if version is None or version.content_digest != proposal.capability_digest:
             raise ValueError("capability version changed or is unavailable")
@@ -66,15 +74,26 @@ class ActionPolicy:
         candidate = next((item for item in candidates if item.version_id == version.id), None)
         if candidate is None or not candidate.installed:
             raise ValueError("capability is not resolver-eligible")
-        for scope in candidate.scopes:
-            if scope.state is not ScopeState.DISABLED:
-                continue
-            if scope.scope_kind is ScopeKind.ACCOUNT:
-                raise ValueError("capability is disabled for this account")
-            if scope.scope_kind is ScopeKind.PROJECT and scope.scope_id == proposal.project_id:
-                raise ValueError("capability is disabled for this project")
-            if scope.scope_kind is ScopeKind.CHAT and scope.scope_id == proposal.chat_id:
-                raise ValueError("capability is disabled for this chat")
+        if await store.get_activation_mode(owner_id) is ActivationMode.DISABLED:
+            raise ValueError("capabilities are disabled for this account")
+        effective_state = ScopeState.ENABLED
+        for kind, scope_id in (
+            (ScopeKind.ACCOUNT, owner_id),
+            (ScopeKind.PROJECT, proposal.project_id),
+            (ScopeKind.CHAT, proposal.chat_id),
+        ):
+            override = next(
+                (
+                    scope for scope in candidate.scopes
+                    if scope.scope_kind is kind
+                    and (kind is ScopeKind.ACCOUNT or scope.scope_id == scope_id)
+                ),
+                None,
+            )
+            if override and override.state is not ScopeState.INHERIT:
+                effective_state = override.state
+        if effective_state is ScopeState.DISABLED:
+            raise ValueError("capability is disabled for the active scope")
         connection = await store.get_service_connection(owner_id, proposal.connection_id)
         if connection.provider != "github":
             raise ValueError("action requires a GitHub connection")
@@ -87,10 +106,4 @@ class ActionPolicy:
 
     async def validate_proposal(self, store, owner_id: str, proposal: ProposedAction) -> object:
         """Apply the same live authority checks before exposing a consent request."""
-        class Candidate:
-            pass
-
-        candidate = Candidate()
-        for key, value in proposal.model_dump(mode="json").items():
-            setattr(candidate, key, value)
-        return await self.validate_runtime(store, owner_id, candidate)
+        return await self.validate_runtime(store, owner_id, proposal)

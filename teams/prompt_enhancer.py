@@ -85,6 +85,13 @@ _ANGLE_MODELS = [
 _SYNTH_MODEL    = "gpt_oss_120b_planner"
 _MIN_PROMPT_LEN = 60   # prompts shorter than this skip enhancement
 
+# Same straggler problem prompt_refiner has (see _STAGE_TIMEOUT_S there): each
+# angle is one generate_resilient call that can walk a long failover chain with
+# nothing bounding it, and gather() waits for the slowest. Angles are already
+# optional — the loop below skips any that fail. Measured 2026-08-08 on a full
+# pipeline run: the three angles returned in 0.9s / 12.2s / 17.7s.
+_ANGLE_TIMEOUT_S = 40
+
 
 class PromptEnhancerPipeline:
     """
@@ -102,12 +109,15 @@ class PromptEnhancerPipeline:
         # ── 3 angles in parallel ──────────────────────────────────────────────
         raw_results = await asyncio.gather(
             *(
-                generate_resilient(
-                    model_id,
-                    prompt=f"User prompt to enhance:\n\n{prompt}",
-                    system=system,
-                    max_tokens=800,
-                    temperature=0.5,
+                asyncio.wait_for(
+                    generate_resilient(
+                        model_id,
+                        prompt=f"User prompt to enhance:\n\n{prompt}",
+                        system=system,
+                        max_tokens=800,
+                        temperature=0.5,
+                    ),
+                    timeout=_ANGLE_TIMEOUT_S,
                 )
                 for model_id, system, _ in _ANGLE_MODELS
             ),

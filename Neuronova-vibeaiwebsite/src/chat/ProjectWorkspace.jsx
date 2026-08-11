@@ -7,6 +7,7 @@ import {
   looksBinary,
   fileBytes,
   FILE_LIMITS,
+  mergeProjectFiles,
 } from './projectStore.js'
 import { newId, titleFrom } from './store.js'
 import {
@@ -18,8 +19,10 @@ import {
   summarizeMemory,
   readAttachments,
   stripAttachmentPayloads,
+  persistableImage,
   slugify,
   checkProjects,
+  projectFilesContext,
   DEFAULT_MODE,
 } from './engine.js'
 import { useEngineProbe } from './useEngineProbe.js'
@@ -31,6 +34,8 @@ import ListboxSelect from './ListboxSelect.jsx'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
 import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
+import CapabilityScopeControls from './capabilities/CapabilityScopeControls.jsx'
+import CapabilitySelect from './capabilities/CapabilitySelect.jsx'
 
 /*
  * A project's workspace. Two views, one component:
@@ -98,6 +103,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
 
   const [team, setTeam] = useState('auto')
   const [mode, setMode] = useState(DEFAULT_MODE)
+  const [capabilityId, setCapabilityId] = useState('')
   const [instructionsDraft, setInstructionsDraft] = useState(project?.instructions || '')
   const [buildTask, setBuildTask] = useState('')
   const [building, setBuilding] = useState(false)
@@ -111,6 +117,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
   const dragDepth = useRef(0)
   const scrollRef = useRef(null)
   const uploadRef = useRef(null)
+  const buildAbortRef = useRef(null)
 
   const activeChat = chatId ? project?.chats.find((c) => c.id === chatId) || null : null
 
@@ -134,15 +141,18 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     if (el) el.scrollTop = el.scrollHeight
   }, [activeChat?.messages, streaming])
 
-  useEffect(() => () => clearInterval(timerRef.current), [])
+  useEffect(() => () => {
+    clearInterval(timerRef.current)
+    buildAbortRef.current?.abort()
+  }, [])
 
   /* Persist. Storage failures are surfaced, not swallowed: projects hold
      uploaded file bodies, so filling the ~5MB origin budget is realistic,
      and a file that silently failed to save while still showing in the list
      is worse than an honest error. */
-  const persist = (next) => {
+  const persist = (next, projects = null) => {
     setProject(next)
-    const all = loadProjects(user.id).map((p) => (p.id === next.id ? next : p))
+    const all = (projects || loadProjects(user.id)).map((p) => (p.id === next.id ? next : p))
     const res = saveProjects(user.id, all)
     if (!res.ok) {
       setFileError(
@@ -183,12 +193,22 @@ export default function ProjectWorkspace({ projectId, chatId }) {
                   image: reply.image || null,
                   sources: done ? reply.sources || null : null,
                   truncated: done ? !!reply.truncated : false,
+                  provenance: reply.provenance || 'VibeAI assistant',
+                  capabilitySnapshot: done ? reply.capabilitySnapshot || null : null,
                 }
               : m,
           ),
         }))
         if (done) {
-          saveProjects(user.id, loadProjects(user.id).map((p) => (p.id === next.id ? next : p)))
+          const stored = patchChat(next, cid, (c) => ({
+            ...c,
+            messages: c.messages.map((message, index) =>
+              index === c.messages.length - 1
+                ? { ...message, image: persistableImage(message.image) }
+                : message,
+            ),
+          }))
+          saveProjects(user.id, loadProjects(user.id).map((p) => (p.id === stored.id ? stored : p)))
         }
         return next
       })
@@ -276,6 +296,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     stopRef.current = false
     const chat = proj.chats.find((c) => c.id === cid)
     const history = (chat?.messages || []).slice(0, -2)
+    const filesContext = projectFilesContext(proj.files)
     setStreaming(true)
     const reply = await dispatchEngineReply({
       text,
@@ -284,9 +305,17 @@ export default function ProjectWorkspace({ projectId, chatId }) {
       sent,
       team,
       mode,
-      systemPrompt: composeSystemPrompt(loadSettings(user.id), proj.instructions, proj.memory),
+      systemPrompt: [
+        composeSystemPrompt(loadSettings(user.id), proj.instructions, proj.memory),
+        filesContext
+          ? `Project files (authoritative current content):\n${filesContext}`
+          : '',
+      ].filter(Boolean).join('\n\n'),
       getToken,
       probe,
+      projectId: proj.id,
+      chatId: cid,
+      capabilityIds: capabilityId ? [capabilityId] : [],
     })
     if (stopRef.current) return
     streamReply(reply, cid)
@@ -300,8 +329,8 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         id: newId(),
         role: 'user',
         content: text,
-        // Metadata only: the base64/text payloads are for THIS request,
-        // never for storage -- see stripAttachmentPayloads.
+        // Keep capped text for faithful regeneration, but never persist
+        // visual/base64 payloads -- see stripAttachmentPayloads.
         attachments: stripAttachmentPayloads(sent),
         ts: Date.now(),
       },
@@ -345,6 +374,13 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     if (!project || !activeChat || streaming) return
     const lastUser = [...activeChat.messages].reverse().find((m) => m.role === 'user')
     if (!lastUser) return
+    const unavailable = (lastUser.attachments || []).some(
+      (attachment) => attachment.kind !== 'text' || (!attachment.content && !attachment.error),
+    )
+    if (unavailable) {
+      window.alert('Please reattach the image or video before regenerating this answer.')
+      return
+    }
     const next = patchChat(project, activeChat.id, (c) => ({
       ...c,
       messages: [
@@ -416,18 +452,38 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     setBuildError('')
     try {
       const token = await getToken()
-      const result = await buildProject(trimmed, token, 'coding', project.id)
-      const merged = [...project.files]
-      for (const f of result.files) {
-        const idx = merged.findIndex((x) => x.path === f.path)
-        if (idx >= 0) merged[idx] = { ...f, source: 'agent' }
-        else merged.push({ ...f, source: 'agent' })
+      const controller = new AbortController()
+      buildAbortRef.current = controller
+      const result = await buildProject(trimmed, token, 'coding', project.id, {
+        context: projectFilesContext(project.files, 48_000),
+        history: activeChat?.messages || [],
+        chatId: activeChat?.id || null,
+        capabilityIds: capabilityId ? [capabilityId] : [],
+        signal: controller.signal,
+      })
+      const projects = loadProjects(user.id)
+      const latest = projects.find((p) => p.id === project.id) || project
+      const merged = mergeProjectFiles(
+        latest.files,
+        result.files.map((file) => ({ ...file, source: 'agent' })),
+      )
+      const latestBuild = {
+        summary: result.summary,
+        iterations: result.iterations,
+        totalMs: result.totalMs,
+        filesTruncated: result.filesTruncated,
       }
-      persist({ ...project, files: merged, updatedAt: Date.now() })
+      persist({
+        ...latest,
+        files: merged,
+        latestBuild,
+        updatedAt: Date.now(),
+      }, projects)
       setBuildTask('')
     } catch (err) {
       setBuildError(String(err?.message || err))
     } finally {
+      buildAbortRef.current = null
       setBuilding(false)
     }
   }
@@ -464,12 +520,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     }
 
     if (accepted.length) {
-      const merged = [...project.files]
-      for (const f of accepted) {
-        const idx = merged.findIndex((x) => x.path === f.path)
-        if (idx >= 0) merged[idx] = f
-        else merged.push(f)
-      }
+      const merged = mergeProjectFiles(project.files, accepted)
       if (merged.length > FILE_LIMITS.maxFiles) {
         setFileError(`A project holds at most ${FILE_LIMITS.maxFiles} files.`)
         return
@@ -503,7 +554,9 @@ export default function ProjectWorkspace({ projectId, chatId }) {
      so an attached image or document produced an answer about nothing. */
   const addFiles = async (fileList) => {
     try {
-      const read = await readAttachments(fileList)
+      const room = Math.max(0, 20 - attachments.length)
+      if (!room) return
+      const read = await readAttachments(Array.from(fileList).slice(0, room))
       setAttachments((a) => [...a, ...read].slice(0, 20))
     } catch (err) {
       console.error('[project] could not read attachments:', err)
@@ -590,6 +643,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         aria-label="Route to team"
         onChange={setTeam}
       />
+      <CapabilitySelect value={capabilityId} onChange={setCapabilityId} />
       <ListboxSelect
         className="proj-model-pill"
         options={MODES}
@@ -731,6 +785,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
           />
         )}
         <aside id="project-details" className={`proj-side${projectDetailsOpen ? ' is-open' : ''}`}>
+          <CapabilityScopeControls projectId={project.id} chatId={activeChat?.id} />
           <section className="proj-side-section">
             <div className="proj-side-head">
               <h3 className="proj-side-h3">Memory</h3>
@@ -795,6 +850,18 @@ export default function ProjectWorkspace({ projectId, chatId }) {
               <p className="proj-error" role="alert">
                 {buildError}
               </p>
+            )}
+            {project.latestBuild && !buildError && (
+              <div className="proj-build-result" aria-live="polite">
+                <strong>Latest build completed</strong>
+                <span>
+                  {project.latestBuild.iterations} iterations · {(project.latestBuild.totalMs / 1000).toFixed(1)}s
+                </span>
+                {project.latestBuild.summary && <p>{project.latestBuild.summary}</p>}
+                {project.latestBuild.filesTruncated && (
+                  <p>Some generated files were too large to copy into the browser.</p>
+                )}
+              </div>
             )}
           </section>
 

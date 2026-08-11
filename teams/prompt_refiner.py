@@ -136,6 +136,22 @@ _TEAM_DEFAULT_MODELS = {
 }
 
 
+# Per-stage wall-clock ceiling. Each stage is ONE generate_resilient call, but
+# that call walks a whole failover chain internally (~30s per candidate), so a
+# stage whose primary is sick can run for minutes with nothing timing it out.
+# Measured live (2026-08-08, v4-code-05, full pipeline): stages 1-4 returned in
+# 21s / 37s / 76s while gpt_oss_20b_free (OpenRouter ":free") was still going at
+# 376s when the 400s trace cutoff fired. gather() waits for the slowest member,
+# so that one straggler WAS the >290s pipeline latency — the request never even
+# reached the code team.
+# 60s keeps the observed-healthy stages and drops a hung one. Losing a stage is
+# already an accepted outcome here (see the skip branch below): stages 1-4 are
+# additive context, not required inputs.
+# ponytail: fixed ceiling, not adaptive — revisit if healthy stages start
+# exceeding 60s rather than raising this blindly.
+_STAGE_TIMEOUT_S = 60
+
+
 class PromptRefinerPipeline:
     """
     Runs the 5-stage sequential prompt refinement pipeline.
@@ -164,12 +180,15 @@ class PromptRefinerPipeline:
 
         results = await asyncio.gather(
             *(
-                generate_resilient(
-                    model_id,
-                    prompt=f"Original user prompt: {original_prompt}",
-                    system=_STAGE_SYSTEMS[model_id],
-                    max_tokens=2000,
-                    temperature=0.3,  # low temp for structured outputs
+                asyncio.wait_for(
+                    generate_resilient(
+                        model_id,
+                        prompt=f"Original user prompt: {original_prompt}",
+                        system=_STAGE_SYSTEMS[model_id],
+                        max_tokens=2000,
+                        temperature=0.3,  # low temp for structured outputs
+                    ),
+                    timeout=_STAGE_TIMEOUT_S,
                 )
                 for model_id in parallel_stages
             ),
@@ -198,12 +217,15 @@ class PromptRefinerPipeline:
         logger.info("[prompt_refiner] stage 5/5 → nemotron_nano_format")
         final_output = ""
         try:
-            final_output = await generate_resilient(
-                "nemotron_nano_format",
-                prompt=f"Original user prompt: {original_prompt}{context_block}",
-                system=_STAGE_SYSTEMS["nemotron_nano_format"],
-                max_tokens=2000,
-                temperature=0.3,
+            final_output = await asyncio.wait_for(
+                generate_resilient(
+                    "nemotron_nano_format",
+                    prompt=f"Original user prompt: {original_prompt}{context_block}",
+                    system=_STAGE_SYSTEMS["nemotron_nano_format"],
+                    max_tokens=2000,
+                    temperature=0.3,
+                ),
+                timeout=_STAGE_TIMEOUT_S,
             )
         except Exception as exc:
             logger.warning(

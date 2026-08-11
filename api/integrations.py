@@ -11,6 +11,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import jwt
@@ -30,7 +31,8 @@ _GITHUB_API = "https://api.github.com"
 class GitHubCallbackBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: str = Field(min_length=20, max_length=4096)
-    installation_id: int = Field(gt=0)
+    installation_id: int | None = Field(default=None, gt=0)
+    code: str | None = Field(default=None, min_length=8, max_length=512)
 
 
 class GitHubAppClient:
@@ -90,6 +92,71 @@ class GitHubAppClient:
             if owns_client:
                 await client.aclose()
 
+    async def verify_user_admin(
+        self,
+        code: str,
+        installation_id: int,
+        *,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+    ) -> None:
+        """Prove the signed-in GitHub user owns/administers the installation."""
+        if not client_id or not client_secret or not redirect_uri:
+            raise RuntimeError("GitHub OAuth verification is not configured")
+        owns_client = self.client is None
+        client = self.client or httpx.AsyncClient(timeout=10, follow_redirects=False)
+        try:
+            token_response = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            token_response.raise_for_status()
+            user_token = token_response.json().get("access_token")
+            if not user_token:
+                raise RuntimeError("GitHub OAuth did not return a user token")
+            user_headers = {
+                "Authorization": f"Bearer {user_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            user_response = await client.get(f"{_GITHUB_API}/user", headers=user_headers)
+            user_response.raise_for_status()
+            user = user_response.json()
+            installation_response = await client.get(
+                f"{_GITHUB_API}/app/installations/{installation_id}",
+                headers={
+                    "Authorization": f"Bearer {self._app_token()}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            installation_response.raise_for_status()
+            account = installation_response.json().get("account") or {}
+            if account.get("type") == "User":
+                if account.get("id") != user.get("id"):
+                    raise PermissionError("GitHub user does not own this installation")
+                return
+            if account.get("type") == "Organization" and account.get("login"):
+                membership = await client.get(
+                    f"{_GITHUB_API}/user/memberships/orgs/{account['login']}",
+                    headers=user_headers,
+                )
+                membership.raise_for_status()
+                data = membership.json()
+                if data.get("state") == "active" and data.get("role") == "admin":
+                    return
+            raise PermissionError("GitHub user does not administer this installation")
+        finally:
+            if owns_client:
+                await client.aclose()
+
     def _app_token(self) -> str:
         now = int(time.time())
         return jwt.encode(
@@ -126,7 +193,13 @@ async def start_github_connection(
     principal: Principal = Depends(get_current_principal),
     store: CapabilityStore = Depends(get_capability_store),
 ) -> dict[str, str]:
-    if not settings.github_app_slug or not settings.github_app_state_secret:
+    if (
+        not settings.github_app_slug
+        or not settings.github_app_state_secret
+        or not settings.github_app_client_id
+        or not settings.github_app_client_secret
+        or not settings.github_app_callback_url
+    ):
         raise HTTPException(503, "GitHub App connection is not configured")
     state, nonce_digest, expires_at = _sign_state(
         principal.subject, settings.github_app_state_secret
@@ -150,26 +223,62 @@ async def finish_github_connection(
         state = _verify_state(body.state, settings.github_app_state_secret)
         if state["sub"] != principal.subject:
             raise ValueError("OAuth state owner mismatch")
+        if not body.code:
+            if not body.installation_id or state.get("phase", "install") != "install":
+                raise ValueError("GitHub installation callback is incomplete")
+            await store.consume_oauth_state(
+                principal.subject, "github", _nonce_digest(state["nonce"])
+            )
+            oauth_state, nonce_digest, expires_at = _sign_state(
+                principal.subject,
+                settings.github_app_state_secret,
+                phase="verify",
+                installation_id=body.installation_id,
+            )
+            await store.issue_oauth_state(
+                principal.subject, "github", nonce_digest, expires_at
+            )
+            query = urlencode({
+                "client_id": settings.github_app_client_id,
+                "redirect_uri": settings.github_app_callback_url,
+                "scope": "read:user read:org",
+                "state": oauth_state,
+            })
+            return {"status": "oauth_required", "url": f"https://github.com/login/oauth/authorize?{query}"}
+        if state.get("phase") != "verify" or not isinstance(state.get("installation_id"), int):
+            raise ValueError("GitHub OAuth callback is not bound to an installation")
         await store.consume_oauth_state(
             principal.subject, "github", _nonce_digest(state["nonce"])
         )
-        verified = await GitHubAppClient(
+        client = GitHubAppClient(
             settings.github_app_id, settings.github_app_private_key
-        ).verify_installation(body.installation_id)
+        )
+        await client.verify_user_admin(
+            body.code,
+            state["installation_id"],
+            client_id=settings.github_app_client_id,
+            client_secret=settings.github_app_client_secret,
+            redirect_uri=settings.github_app_callback_url,
+        )
+        verified = await client.verify_installation(state["installation_id"])
         vault = _credential_vault()
-        connection_id = str(uuid.uuid4())
-        connection = await store.create_service_connection(
+        expires_at = (
+            datetime.fromisoformat(verified["expires_at"].replace("Z", "+00:00"))
+            if verified.get("expires_at") else None
+        )
+        binding_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{principal.subject}:github:{verified['external_account_id']}"))
+        binding = CredentialBinding(principal.subject, "github", binding_id)
+        envelope = vault.encrypt(verified["access_token"].encode(), binding)
+        connection = await store.upsert_service_connection_with_credential(
             owner_id=principal.subject,
             provider="github",
             external_account_id=verified["external_account_id"],
-            credential_reference=f"credential:{connection_id}",
             allowed_operations=["issues:read", "issues:comment"],
             immutable_targets=[f"repository:{item}" for item in verified["repository_ids"]],
-            connection_id=connection_id,
+            expires_at=expires_at,
+            envelope=envelope,
+            connection_id=binding_id,
         )
-        binding = CredentialBinding(principal.subject, "github", connection.id)
-        envelope = vault.encrypt(verified["access_token"].encode(), binding)
-        await store.put_credential(principal.subject, "github", connection.id, envelope)
         await store.append_audit(
             principal.subject,
             "integration.connected",
@@ -210,11 +319,24 @@ async def revoke_integration(
         raise HTTPException(404, "service connection not found") from exc
 
 
-def _sign_state(owner_id: str, secret: str) -> tuple[str, str, datetime]:
+def _sign_state(
+    owner_id: str,
+    secret: str,
+    *,
+    phase: str = "install",
+    installation_id: int | None = None,
+) -> tuple[str, str, datetime]:
     if not secret:
         raise ValueError("OAuth state signing is not configured")
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    payload = {"sub": owner_id, "nonce": secrets.token_urlsafe(18), "exp": int(expires_at.timestamp())}
+    payload = {
+        "sub": owner_id,
+        "nonce": secrets.token_urlsafe(18),
+        "exp": int(expires_at.timestamp()),
+        "phase": phase,
+    }
+    if installation_id is not None:
+        payload["installation_id"] = installation_id
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     signature = hmac.new(secret.encode(), raw, hashlib.sha256).digest()
     state = f"{_b64(raw)}.{_b64(signature)}"

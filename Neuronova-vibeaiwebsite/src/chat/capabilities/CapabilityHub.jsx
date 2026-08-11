@@ -9,10 +9,23 @@ import './capability.css'
 
 const SECTIONS = ['discover', 'installed', 'bundles', 'create', 'import', 'activity']
 
+function hasGitHubCallback() {
+  const search = new URLSearchParams(window.location.search)
+  const hashQuery = window.location.hash.split('?')[1] || ''
+  const hashSearch = new URLSearchParams(hashQuery)
+  return Boolean(
+    (search.get('state') || hashSearch.get('state'))
+    && (
+      search.get('installation_id') || hashSearch.get('installation_id')
+      || search.get('code') || hashSearch.get('code')
+    )
+  )
+}
+
 export default function CapabilityHub() {
   const [items, setItems] = useState([])
-  const [section, setSection] = useState('discover')
-  const [selected, setSelected] = useState(null)
+  const [section, setSection] = useState(() => hasGitHubCallback() ? 'activity' : 'discover')
+  const [selectedId, setSelectedId] = useState(null)
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('')
@@ -29,15 +42,16 @@ export default function CapabilityHub() {
     const haystack = `${manifest.name} ${manifest.description} ${manifest.supported_tasks.join(' ')}`.toLowerCase()
     return haystack.includes(query.toLowerCase())
   }), [items, query, section])
+  const selected = items.find((item) => item.id === selectedId) || null
 
   const install = async (id) => {
     setBusy(id)
-    try { await capabilityApi.install(id); setNotice('Capability installed.'); await refresh() }
+    try { await capabilityApi.install(id); await refresh(); setNotice('Capability installed.') }
     catch (err) { setNotice(err.message) }
     finally { setBusy('') }
   }
 
-  if (selected) return <div className="cap-shell"><CapabilityDetail capability={selected} onBack={() => setSelected(null)} onInstall={install} busy={busy === selected.id} /></div>
+  if (selected) return <div className="cap-shell"><CapabilityDetail capability={selected} onBack={() => setSelectedId(null)} onInstall={install} busy={busy === selected.id} /></div>
 
   return (
     <main className="cap-shell">
@@ -63,7 +77,7 @@ export default function CapabilityHub() {
             <div><span className={`cap-trust is-${item.manifest.trust}`}>{item.manifest.trust.replaceAll('_', ' ')}</span><span className="cap-kind">{item.manifest.kind.replaceAll('_', ' ')}</span></div>
             <h2>{item.manifest.name}</h2><p>{item.manifest.description}</p>
             <div className="cap-tags">{item.manifest.supported_tasks.slice(0, 3).map((task) => <span key={task}>{task.replaceAll('_', ' ')}</span>)}</div>
-            <div className="cap-card-actions"><button className="cap-secondary" onClick={() => setSelected(item)}>Inspect</button>{item.installed ? <span className="cap-installed">Installed</span> : <button className="cap-primary" disabled={busy === item.id} onClick={() => install(item.id)}>Install</button>}</div>
+            <div className="cap-card-actions"><button className="cap-secondary" onClick={() => setSelectedId(item.id)}>Inspect</button>{item.installed ? <span className="cap-installed">Installed</span> : <button className="cap-primary" disabled={busy === item.id} onClick={() => install(item.id)}>Install</button>}</div>
           </article>)}
           {shown.length === 0 && <div className="cap-empty"><h2>Nothing here yet</h2><p>Try another search, or create a safe instruction skill.</p></div>}
         </section>

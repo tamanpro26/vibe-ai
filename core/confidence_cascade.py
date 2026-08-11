@@ -28,7 +28,24 @@ from loguru import logger
 from models.registry import generate_resilient
 
 DEFAULT_THRESHOLD = 0.65
-DEFAULT_VERIFIER = "qwen36_27b_verifier"   # brain team's "Reasoning verifier" — cheap, fast, cross-team reuse
+# Was qwen36_27b_verifier ("Reasoning verifier"), on the assumption it was
+# cheap and fast. Measured live 2026-08-08 — it is neither, and worse, it does
+# not discriminate. Same instruction + rubric, 3 samples each, temperature 0.0,
+# scoring a correct diff_dicts vs a deliberately broken one (flat, no recursion,
+# no dotted paths, ignores removals):
+#
+#   qwen36_27b_verifier   GOOD [0.97, 0.97, 0.97]   BAD [0.97, 0.02, 0.97]
+#   llama33_70b_memory    GOOD [1.0,  1.0,  1.0 ]   BAD [0.2,  0.2,  0.2 ]
+#
+# qwen scored BROKEN code above the 0.65 threshold in 2 of 3 runs — the gate
+# was passing garbage, so the cascade's whole quality check was inert. It is
+# also a reasoning model: hidden reasoning is billed against max_tokens, so a
+# 300-token scoring call still burns a full reasoning budget (0.5s–57s here,
+# 82s inside a live pipeline trace).
+# llama-3.3-70b-versatile separates cleanly (1.0 vs 0.2, both sides of the
+# threshold), is deterministic across samples, and returns in 0.2–0.4s.
+# Its "Memory manager" role label is just a registry tag, not a capability.
+DEFAULT_VERIFIER = "llama33_70b_memory"
 
 _GENERIC_RUBRIC = [
     "Directly and completely addresses the instruction.",

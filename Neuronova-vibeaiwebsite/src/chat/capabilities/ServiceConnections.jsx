@@ -7,7 +7,35 @@ export default function ServiceConnections() {
   const refresh = async () => {
     try { setItems((await integrationRequest('list')).items || []) } catch (err) { setMessage(err.message) }
   }
-  useEffect(() => { refresh() }, [])
+  useEffect(() => {
+    const search = new URLSearchParams(window.location.search)
+    const hash = window.location.hash
+    const hashQueryIndex = hash.indexOf('?')
+    const hashSearch = new URLSearchParams(hashQueryIndex >= 0 ? hash.slice(hashQueryIndex + 1) : '')
+    const state = search.get('state') || hashSearch.get('state')
+    const installationId = search.get('installation_id') || hashSearch.get('installation_id')
+    const code = search.get('code') || hashSearch.get('code')
+    if (!state || (!installationId && !code)) {
+      refresh()
+      return
+    }
+    setMessage('Finishing GitHub connection…')
+    integrationRequest('finish_github', {
+      state,
+      installation_id: installationId ? Number(installationId) : undefined,
+      code: code || undefined,
+    }).then((result) => {
+      if (result?.url) {
+        window.location.assign(result.url)
+        return
+      }
+      const cleanHash = hashQueryIndex >= 0 ? hash.slice(0, hashQueryIndex) : hash
+      const cleanUrl = `${window.location.pathname}${cleanHash || '#/capabilities'}`
+      window.history.replaceState({}, '', cleanUrl)
+      setMessage('GitHub connected.')
+      refresh()
+    }).catch((err) => setMessage(err.message))
+  }, [])
   const connect = async () => {
     try {
       const result = await integrationRequest('connect_github')

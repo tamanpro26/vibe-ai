@@ -2604,6 +2604,39 @@
   cursor: not-allowed;
 }
 
+.set-capability-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  margin-top: 18px;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.proj-build-result {
+  display: grid;
+  gap: var(--sp-1);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  color: var(--text-secondary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.proj-build-result strong {
+  color: var(--text-primary);
+  font-weight: var(--fw-semi);
+}
+
+.proj-build-result p {
+  margin: var(--sp-1) 0 0;
+  white-space: pre-wrap;
+}
+
 .proj-note {
   margin: var(--sp-3) 0 0;
   max-width: 62ch;

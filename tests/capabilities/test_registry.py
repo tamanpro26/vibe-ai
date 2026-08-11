@@ -55,3 +55,25 @@ async def test_user_draft_cannot_self_grant_trust_permissions_or_actions(tmp_pat
                 permissions=[{"name": "github.write", "purpose": "Write issues"}],
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_edit_cannot_promote_user_skill_into_a_reviewed_action(tmp_path):
+    store = CapabilityStore(f"sqlite+aiosqlite:///{tmp_path / 'authority-edit.db'}")
+    await store.init()
+    registry = CapabilityRegistry(store)
+    draft = await registry.create_draft("user-1", native_manifest())
+    version = await registry.publish("user-1", draft.id)
+
+    with pytest.raises(ValueError, match="instruction skills"):
+        await registry.edit_as_new_draft(
+            "user-1",
+            version.id,
+            {
+                "version": "2.0.0",
+                "kind": "approved_action",
+                "trust": "vibeai_builtin",
+                "instructions": None,
+                "permissions": [{"name": "github.write", "purpose": "Write issues"}],
+            },
+        )

@@ -298,8 +298,6 @@ class ReviewService:
         source_digest: str,
         evidence_digest: str,
     ):
-        if not await self.store.has_role(reviewer_id, "reviewer"):
-            raise PermissionError("reviewer role required")
         version = await self.store.approve_import_candidate(
             reviewer_id, candidate_id, source_digest, evidence_digest
         )
@@ -313,8 +311,6 @@ class ReviewService:
         return version
 
     async def revoke(self, reviewer_id: str, version_id: str, reason: str) -> None:
-        if not await self.store.has_role(reviewer_id, "reviewer"):
-            raise PermissionError("reviewer role required")
         await self.store.revoke_version(version_id, reviewer_id, reason)
         await self.store.append_audit(
             reviewer_id,
@@ -324,8 +320,6 @@ class ReviewService:
         )
 
     async def reject(self, reviewer_id: str, candidate_id: str, reason: str) -> None:
-        if not await self.store.has_role(reviewer_id, "reviewer"):
-            raise PermissionError("reviewer role required")
         await self.store.reject_import_candidate(candidate_id, reviewer_id, reason)
         self.quarantine.delete(candidate_id)
         await self.store.append_audit(
@@ -338,8 +332,6 @@ class ReviewService:
     async def supersede(
         self, reviewer_id: str, previous_version_id: str, replacement_version_id: str
     ) -> None:
-        if not await self.store.has_role(reviewer_id, "reviewer"):
-            raise PermissionError("reviewer role required")
         await self.store.supersede_version(
             previous_version_id, replacement_version_id, reviewer_id
         )

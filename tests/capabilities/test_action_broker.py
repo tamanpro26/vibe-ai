@@ -5,6 +5,8 @@ import pytest
 from capabilities.actions import ProposedAction
 from capabilities.broker import ActionBroker
 from capabilities.registry import CapabilityRegistry
+from capabilities.manifests import ActivationMode
+from capabilities.models import ScopeKind, ScopeState
 from capabilities.store import CapabilityStore
 from capabilities.worker import ActionWorker
 from tests.capabilities.test_action_policy import proposal
@@ -113,3 +115,27 @@ async def test_disabled_or_revoked_capability_is_rechecked_before_dispatch(tmp_p
     failed = await broker.get("user-1", action.id)
     assert failed.status == "invalidated"
     assert adapter.execute_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_account_disable_blocks_actions_but_chat_enable_overrides_project_disable(tmp_path):
+    store, broker, data = await setup_broker(tmp_path)
+    await store.set_activation_mode("user-1", ActivationMode.DISABLED)
+    with pytest.raises(ValueError, match="disabled for this account"):
+        await broker.propose("user-1", data)
+
+    await store.set_activation_mode("user-1", ActivationMode.MANUAL_ONLY)
+    await store.register_owned_scope("user-1", ScopeKind.PROJECT, "project-1")
+    await store.register_owned_scope("user-1", ScopeKind.CHAT, "chat-1", "project-1")
+    installation = await store.get_active_installation(
+        "user-1", data.capability_version_id
+    )
+    await store.set_scope_override(
+        "user-1", installation.id, ScopeKind.PROJECT, "project-1", ScopeState.DISABLED
+    )
+    await store.set_scope_override(
+        "user-1", installation.id, ScopeKind.CHAT, "chat-1", ScopeState.ENABLED
+    )
+    scoped = data.model_copy(update={"project_id": "project-1", "chat_id": "chat-1"})
+
+    assert (await broker.propose("user-1", scoped)).status == "pending"

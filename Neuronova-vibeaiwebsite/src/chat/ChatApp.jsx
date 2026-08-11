@@ -8,6 +8,7 @@ import {
   continueEdge,
   readAttachments,
   stripAttachmentPayloads,
+  persistableImage,
   DEFAULT_MODE,
 } from './engine.js'
 import { useEngineProbe } from './useEngineProbe.js'
@@ -28,6 +29,7 @@ import Composer from './Composer.jsx'
 import Message from './Message.jsx'
 import ListboxSelect from './ListboxSelect.jsx'
 import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
+import CapabilitySelect from './capabilities/CapabilitySelect.jsx'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -64,6 +66,7 @@ export default function ChatApp() {
   const [activeId, setActiveId] = useState(() => loadChats(user.id)[0]?.id ?? null)
   const [team, setTeam] = useState('auto')
   const [mode, setMode] = useState(DEFAULT_MODE)
+  const [capabilityId, setCapabilityId] = useState('')
   // Which conversation is mid-typewriter, if any. Distinct from `running`
   // (a request in flight) because the animation is purely local decoration
   // replayed over an already-complete, already-saved string.
@@ -273,9 +276,11 @@ export default function ChatApp() {
                     ...m,
                     content: reply.text,
                     project: reply.project || null,
-                    image: reply.image || null,
+                    image: persistableImage(reply.image),
                     sources: reply.sources || null,
                     truncated: !!reply.truncated,
+                    provenance: reply.provenance || 'VibeAI assistant',
+                    capabilitySnapshot: reply.capabilitySnapshot || null,
                   }
                 : m,
             ),
@@ -322,6 +327,7 @@ export default function ChatApp() {
       dispatch: () =>
         dispatchEngineReply({
           text, history, convId, sent, team, mode, systemPrompt, getToken, probe,
+          capabilityIds: capabilityId ? [capabilityId] : [],
         }),
       persist: (reply) => persistReply(convId, reply),
     })
@@ -351,8 +357,8 @@ export default function ChatApp() {
         id: newId(),
         role: 'user',
         content: text,
-        // Metadata only: the base64/text payloads are for THIS request,
-        // never for storage -- see stripAttachmentPayloads.
+        // Keep capped text for faithful regeneration, but never persist
+        // visual/base64 payloads -- see stripAttachmentPayloads.
         attachments: stripAttachmentPayloads(sent),
         ts: Date.now(),
       },
@@ -390,6 +396,13 @@ export default function ChatApp() {
     if (!active || streaming) return
     const lastUser = [...active.messages].reverse().find((m) => m.role === 'user')
     if (!lastUser) return
+    const unavailable = (lastUser.attachments || []).some(
+      (attachment) => attachment.kind !== 'text' || (!attachment.content && !attachment.error),
+    )
+    if (unavailable) {
+      window.alert('Please reattach the image or video before regenerating this answer.')
+      return
+    }
     const next = chats.map((c) =>
       c.id === active.id
         ? {
@@ -403,7 +416,12 @@ export default function ChatApp() {
         : c,
     )
     persist(next)
-    dispatchReply(active.id, lastUser.content, lastUser.attachments || [])
+    dispatchReply(
+      active.id,
+      lastUser.content,
+      lastUser.attachments || [],
+      next.find((conversation) => conversation.id === active.id),
+    )
   }
 
   // Recovers from a real, reproduced bug: a reply that hit its token ceiling
@@ -544,6 +562,7 @@ export default function ChatApp() {
         aria-label="Route to team"
         onChange={setTeam}
       />
+      <CapabilitySelect value={capabilityId} onChange={setCapabilityId} />
       <div className="mode-switch composer-mode-switch" role="radiogroup" aria-label="VibeAI reasoning level">
         {MODES.map((reasoningMode) => (
           <button

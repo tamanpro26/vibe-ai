@@ -7,11 +7,17 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import event, select
+from sqlalchemy import event, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from capabilities.credentials import CredentialEnvelope
-from capabilities.manifests import ActivationMode, CapabilityManifest, TrustState, validate_package
+from capabilities.manifests import (
+    ActivationMode,
+    CapabilityManifest,
+    TrustState,
+    validate_owner_manifest,
+    validate_package,
+)
 from capabilities.models import (
     Base,
     ActionStatus,
@@ -53,6 +59,7 @@ class CapabilityStore:
         if environment == "production" and database_url.startswith("sqlite"):
             raise ValueError("production capability storage must use PostgreSQL")
         self.database_url = database_url
+        self.environment = environment
         self.engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         if database_url.startswith("sqlite"):
             event.listen(self.engine.sync_engine, "connect", _enable_sqlite_foreign_keys)
@@ -60,7 +67,11 @@ class CapabilityStore:
 
     async def init(self) -> None:
         async with self.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            if self.environment == "production":
+                # Alembic is the only production schema authority.
+                await connection.execute(text("SELECT 1"))
+            else:
+                await connection.run_sync(Base.metadata.create_all)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -81,16 +92,17 @@ class CapabilityStore:
                 raise ValueError("only an editable draft may be published")
             package = validate_package(draft.manifest)
             manifest = package.manifest
+            validate_owner_manifest(owner_id, manifest)
             existing = await session.scalar(
                 select(CapabilityVersionRecord).where(
+                    CapabilityVersionRecord.owner_id == owner_id,
                     CapabilityVersionRecord.capability_id == manifest.capability_id,
                     CapabilityVersionRecord.version == manifest.version,
-                    CapabilityVersionRecord.content_digest == manifest.content_digest,
                 )
             )
             if existing is not None:
-                if existing.owner_id != owner_id:
-                    raise ValueError("version identity already belongs to another owner")
+                if existing.content_digest != manifest.content_digest:
+                    raise ValueError("capability version already exists with different content")
                 draft.state = DraftState.PUBLISHED
                 return existing
             review_state = (
@@ -172,26 +184,52 @@ class CapabilityStore:
                 version.archived_at = datetime.now(timezone.utc)
 
     async def install(self, owner_id: str, version_id: str) -> CapabilityInstallation:
+        return (await self.install_many(owner_id, [version_id]))[0]
+
+    async def install_many(
+        self, owner_id: str, version_ids: list[str]
+    ) -> list[CapabilityInstallation]:
+        """Install a fully resolved capability graph in one transaction."""
+        if not version_ids:
+            return []
+        ordered_ids = list(dict.fromkeys(version_ids))
         async with self._sessions.begin() as session:
-            version = await session.get(CapabilityVersionRecord, version_id)
-            if version is None:
-                raise LookupError("capability version not found")
-            if version.owner_id not in {owner_id, "vibeai"}:
-                raise PermissionError("capability version not available to owner")
-            if version.archived_at or version.revoked_at:
-                raise ValueError("archived or revoked capability cannot be installed")
-            existing = await session.scalar(
+            versions = {
+                item.id: item
+                for item in await session.scalars(
+                    select(CapabilityVersionRecord).where(
+                        CapabilityVersionRecord.id.in_(ordered_ids)
+                    )
+                )
+            }
+            for version_id in ordered_ids:
+                version = versions.get(version_id)
+                if version is None:
+                    raise LookupError("capability version not found")
+                if version.owner_id not in {owner_id, "vibeai"}:
+                    raise PermissionError("capability version not available to owner")
+                if version.archived_at or version.revoked_at:
+                    raise ValueError("archived or revoked capability cannot be installed")
+            existing = {
+                item.capability_version_id: item
+                for item in await session.scalars(
                 select(CapabilityInstallation).where(
                     CapabilityInstallation.owner_id == owner_id,
-                    CapabilityInstallation.capability_version_id == version_id,
+                    CapabilityInstallation.capability_version_id.in_(ordered_ids),
                     CapabilityInstallation.uninstalled_at.is_(None),
                 )
-            )
-            if existing:
-                return existing
-            installation = CapabilityInstallation(owner_id=owner_id, capability_version_id=version_id)
-            session.add(installation)
-        return installation
+                )
+            }
+            installations: list[CapabilityInstallation] = []
+            for version_id in ordered_ids:
+                installation = existing.get(version_id)
+                if installation is None:
+                    installation = CapabilityInstallation(
+                        owner_id=owner_id, capability_version_id=version_id
+                    )
+                    session.add(installation)
+                installations.append(installation)
+        return installations
 
     async def set_scope_override(
         self,
@@ -256,8 +294,8 @@ class CapabilityStore:
     ) -> CapabilityOwnedScope:
         if scope_kind is ScopeKind.ACCOUNT:
             raise ValueError("account ownership comes from the verified principal")
-        if scope_kind is ScopeKind.CHAT:
-            if not parent_scope_id or not await self.owns_scope(
+        if scope_kind is ScopeKind.CHAT and parent_scope_id:
+            if not await self.owns_scope(
                 owner_id, ScopeKind.PROJECT, parent_scope_id
             ):
                 raise PermissionError("parent project scope not found for owner")
@@ -312,6 +350,17 @@ class CapabilityStore:
                 raise PermissionError("scope not found for owner")
             record.active = False
             record.deleted_at = datetime.now(timezone.utc)
+            scope_column = (
+                CapabilityActionRequest.project_id
+                if scope_kind is ScopeKind.PROJECT
+                else CapabilityActionRequest.chat_id
+            )
+            await _invalidate_actions(
+                session,
+                CapabilityActionRequest.owner_id == owner_id,
+                scope_column == scope_id,
+                reason="owning scope was deleted",
+            )
 
     async def bootstrap_roles_once(
         self, admin_ids: list[str], reviewer_ids: list[str]
@@ -644,10 +693,10 @@ class CapabilityStore:
                     CapabilityVersionRecord.owner_id == "vibeai",
                     CapabilityVersionRecord.capability_id == manifest.capability_id,
                     CapabilityVersionRecord.version == manifest.version,
-                    CapabilityVersionRecord.content_digest == manifest.content_digest,
-                    CapabilityVersionRecord.source_digest == candidate.source_digest,
                 )
             )
+            if version is not None and version.content_digest != manifest.content_digest:
+                raise ValueError("reviewed capability version already exists with different content")
             if version is None:
                 version = CapabilityVersionRecord(
                     owner_id="vibeai",
@@ -690,6 +739,11 @@ class CapabilityStore:
                 raise LookupError("capability version not found")
             version.review_state = ReviewState.REVOKED
             version.revoked_at = datetime.now(timezone.utc)
+            await _invalidate_actions(
+                session,
+                CapabilityActionRequest.capability_version_id == version_id,
+                reason="capability version was revoked",
+            )
             candidate = await session.scalar(
                 select(CapabilityImportCandidate).where(
                     CapabilityImportCandidate.version_id == version_id
@@ -763,6 +817,20 @@ class CapabilityStore:
             )
             return list(values)
 
+    async def list_scope_overrides(
+        self, owner_id: str, installation_ids: list[str]
+    ) -> list[CapabilityScopeOverride]:
+        if not installation_ids:
+            return []
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityScopeOverride).where(
+                    CapabilityScopeOverride.owner_id == owner_id,
+                    CapabilityScopeOverride.installation_id.in_(installation_ids),
+                )
+            )
+            return list(values)
+
     async def create_action_request(
         self,
         owner_id: str,
@@ -809,7 +877,17 @@ class CapabilityStore:
                         CapabilityWorkflowCheckpoint.job_id == workflow_id,
                     )
                 )
-                state = {"action_id": action.id, "request_digest": action.request_digest}
+                state = dict(checkpoint.state) if checkpoint else {}
+                actions = dict(state.get("actions", {}))
+                actions[action.id] = {
+                    "request_digest": action.request_digest,
+                    "status": ActionStatus.PENDING.value,
+                }
+                state.update({
+                    "action_id": action.id,
+                    "request_digest": action.request_digest,
+                    "actions": actions,
+                })
                 if checkpoint:
                     checkpoint.status = "awaiting_confirmation"
                     checkpoint.state = state
@@ -835,7 +913,21 @@ class CapabilityStore:
             return action
 
     async def list_pending_actions(self, owner_id: str) -> list[CapabilityActionRequest]:
-        async with self._sessions() as session:
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            expired_actions = list(await session.scalars(
+                select(CapabilityActionRequest).where(
+                    CapabilityActionRequest.owner_id == owner_id,
+                    CapabilityActionRequest.status == ActionStatus.PENDING,
+                    CapabilityActionRequest.expires_at <= now,
+                )
+            ))
+            for action in expired_actions:
+                action.status = ActionStatus.EXPIRED
+                action.decided_at = now
+                await _update_workflow_action(
+                    session, action, ActionStatus.EXPIRED, error="action approval expired"
+                )
             values = await session.scalars(
                 select(CapabilityActionRequest)
                 .where(
@@ -843,6 +935,7 @@ class CapabilityStore:
                     CapabilityActionRequest.status == ActionStatus.PENDING,
                 )
                 .order_by(CapabilityActionRequest.created_at)
+                .limit(50)
             )
             return list(values)
 
@@ -850,6 +943,7 @@ class CapabilityStore:
         self, owner_id: str, action_id: str, request_digest: str
     ) -> CapabilityActionRequest:
         now = datetime.now(timezone.utc)
+        expired = False
         async with self._sessions.begin() as session:
             action = await session.get(CapabilityActionRequest, action_id)
             if action is None or action.owner_id != owner_id:
@@ -863,12 +957,18 @@ class CapabilityStore:
             if _aware(action.expires_at) <= now:
                 action.status = ActionStatus.EXPIRED
                 action.decided_at = now
-                raise ValueError("action approval has expired")
-            action.status = ActionStatus.APPROVED
-            action.approved_at = now
-            action.decided_at = now
-            if await session.get(CapabilityActionOutbox, action.id) is None:
-                session.add(CapabilityActionOutbox(action_id=action.id, available_at=now))
+                await _update_workflow_action(
+                    session, action, ActionStatus.EXPIRED, error="action approval expired"
+                )
+                expired = True
+            else:
+                action.status = ActionStatus.APPROVED
+                action.approved_at = now
+                action.decided_at = now
+                if await session.get(CapabilityActionOutbox, action.id) is None:
+                    session.add(CapabilityActionOutbox(action_id=action.id, available_at=now))
+        if expired:
+            raise ValueError("action approval has expired")
         return action
 
     async def deny_action(self, owner_id: str, action_id: str) -> CapabilityActionRequest:
@@ -882,6 +982,7 @@ class CapabilityStore:
                 raise ValueError("action is no longer awaiting approval")
             action.status = ActionStatus.DENIED
             action.decided_at = datetime.now(timezone.utc)
+            await _update_workflow_action(session, action, ActionStatus.DENIED)
         return action
 
     async def claim_action(
@@ -889,6 +990,18 @@ class CapabilityStore:
     ) -> CapabilityActionRequest | None:
         now = datetime.now(timezone.utc)
         async with self._sessions.begin() as session:
+            expired_actions = list(await session.scalars(
+                select(CapabilityActionRequest).where(
+                    CapabilityActionRequest.status == ActionStatus.APPROVED,
+                    CapabilityActionRequest.expires_at <= now,
+                )
+            ))
+            for action in expired_actions:
+                action.status = ActionStatus.EXPIRED
+                action.decided_at = now
+                await _update_workflow_action(
+                    session, action, ActionStatus.EXPIRED, error="action approval expired"
+                )
             query = (
                 select(CapabilityActionOutbox)
                 .join(CapabilityActionRequest)
@@ -896,6 +1009,7 @@ class CapabilityStore:
                     CapabilityActionOutbox.status == "ready",
                     CapabilityActionOutbox.available_at <= now,
                     CapabilityActionRequest.status == ActionStatus.APPROVED,
+                    CapabilityActionRequest.expires_at > now,
                 )
                 .order_by(CapabilityActionOutbox.available_at, CapabilityActionOutbox.action_id)
                 .limit(1)
@@ -977,21 +1091,9 @@ class CapabilityStore:
             if execution:
                 execution.outcome = status.value
                 execution.result = result
-            if action.workflow_id:
-                checkpoint = await session.scalar(
-                    select(CapabilityWorkflowCheckpoint).where(
-                        CapabilityWorkflowCheckpoint.owner_id == action.owner_id,
-                        CapabilityWorkflowCheckpoint.job_id == action.workflow_id,
-                    )
-                )
-                if checkpoint:
-                    checkpoint.status = "resume_ready" if status is ActionStatus.SUCCEEDED else "action_terminal"
-                    checkpoint.state = {
-                        "action_id": action.id,
-                        "status": status.value,
-                        "result": result or {},
-                    }
-                    checkpoint.checkpoint_version += 1
+            await _update_workflow_action(
+                session, action, status, result=result, error=error
+            )
         return action
 
     async def recover_stale_actions(self, now: datetime | None = None) -> int:
@@ -1001,7 +1103,11 @@ class CapabilityStore:
             values = list(
                 await session.scalars(
                     select(CapabilityActionRequest).where(
-                        CapabilityActionRequest.status == ActionStatus.EXECUTING
+                        CapabilityActionRequest.status == ActionStatus.EXECUTING,
+                        or_(
+                            CapabilityActionRequest.lease_expires_at.is_(None),
+                            CapabilityActionRequest.lease_expires_at <= now,
+                        ),
                     )
                 )
             )
@@ -1024,6 +1130,12 @@ class CapabilityStore:
                     action.lease_expires_at = None
                     if outbox:
                         outbox.status = "done"
+                    await _update_workflow_action(
+                        session,
+                        action,
+                        ActionStatus.OUTCOME_UNKNOWN,
+                        error=action.error,
+                    )
                 recovered += 1
         return recovered
 
@@ -1078,6 +1190,7 @@ class CapabilityStore:
         allowed_operations: list[str],
         immutable_targets: list[str],
         connection_id: str | None = None,
+        expires_at: datetime | None = None,
     ):
         from capabilities.models import CapabilityServiceConnection
 
@@ -1089,11 +1202,77 @@ class CapabilityStore:
                 credential_reference=credential_reference,
                 allowed_operations=sorted(set(allowed_operations)),
                 immutable_targets=sorted(set(immutable_targets)),
+                expires_at=expires_at,
             )
             if connection_id is not None:
                 record.id = connection_id
             session.add(record)
         return record
+
+    async def upsert_service_connection_with_credential(
+        self,
+        *,
+        owner_id: str,
+        provider: str,
+        external_account_id: str,
+        allowed_operations: list[str],
+        immutable_targets: list[str],
+        expires_at: datetime | None,
+        envelope: CredentialEnvelope,
+        connection_id: str,
+    ):
+        """Persist connection authority and its encrypted credential atomically."""
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions.begin() as session:
+            connection = await session.scalar(
+                select(CapabilityServiceConnection).where(
+                    CapabilityServiceConnection.owner_id == owner_id,
+                    CapabilityServiceConnection.provider == provider,
+                    CapabilityServiceConnection.external_account_id == external_account_id,
+                )
+            )
+            if connection is None:
+                connection = CapabilityServiceConnection(
+                    id=connection_id,
+                    owner_id=owner_id,
+                    provider=provider,
+                    external_account_id=external_account_id,
+                    credential_reference="pending",
+                    allowed_operations=[],
+                    immutable_targets=[],
+                )
+                session.add(connection)
+                await session.flush()
+            connection.credential_reference = f"credential:{connection.id}"
+            if connection.id != connection_id:
+                raise ValueError("service connection identity changed unexpectedly")
+            connection.allowed_operations = sorted(set(allowed_operations))
+            connection.immutable_targets = sorted(set(immutable_targets))
+            connection.expires_at = expires_at
+            connection.revoked_at = None
+            credential = await session.scalar(
+                select(CapabilityCredentialRecord).where(
+                    CapabilityCredentialRecord.owner_id == owner_id,
+                    CapabilityCredentialRecord.provider == provider,
+                    CapabilityCredentialRecord.connection_id == connection.id,
+                )
+            )
+            if credential is None:
+                credential = CapabilityCredentialRecord(
+                    owner_id=owner_id,
+                    provider=provider,
+                    connection_id=connection.id,
+                    envelope=envelope.model_dump(mode="json"),
+                    key_id=envelope.key_id,
+                )
+                session.add(credential)
+            else:
+                credential.envelope = envelope.model_dump(mode="json")
+                credential.key_id = envelope.key_id
+                credential.rotated_at = datetime.now(timezone.utc)
+                credential.revoked_at = None
+        return connection
 
     async def issue_oauth_state(
         self,
@@ -1140,6 +1319,16 @@ class CapabilityStore:
                 raise PermissionError("service connection not found for owner")
             return record
 
+    async def get_service_connection_record(self, owner_id: str, connection_id: str):
+        """Owner-scoped projection lookup that retains revoked history."""
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions() as session:
+            record = await session.get(CapabilityServiceConnection, connection_id)
+            if record is None or record.owner_id != owner_id:
+                raise PermissionError("service connection not found for owner")
+            return record
+
     async def list_service_connections(self, owner_id: str):
         from capabilities.models import CapabilityServiceConnection
 
@@ -1151,6 +1340,17 @@ class CapabilityStore:
             )
             return list(values)
 
+    async def update_service_connection_expiry(
+        self, owner_id: str, connection_id: str, expires_at: datetime
+    ) -> None:
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions.begin() as session:
+            record = await session.get(CapabilityServiceConnection, connection_id)
+            if record is None or record.owner_id != owner_id or record.revoked_at is not None:
+                raise PermissionError("service connection not found for owner")
+            record.expires_at = expires_at
+
     async def revoke_service_connection(self, owner_id: str, connection_id: str) -> None:
         from capabilities.models import CapabilityServiceConnection
 
@@ -1159,6 +1359,12 @@ class CapabilityStore:
             if record is None or record.owner_id != owner_id:
                 raise PermissionError("service connection not found for owner")
             record.revoked_at = datetime.now(timezone.utc)
+            await _invalidate_actions(
+                session,
+                CapabilityActionRequest.owner_id == owner_id,
+                CapabilityActionRequest.connection_id == connection_id,
+                reason="service connection was revoked",
+            )
 
     async def put_credential(
         self,
@@ -1248,6 +1454,65 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+async def _update_workflow_action(
+    session,
+    action: CapabilityActionRequest,
+    status: ActionStatus,
+    *,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    if not action.workflow_id:
+        return
+    checkpoint = await session.scalar(
+        select(CapabilityWorkflowCheckpoint).where(
+            CapabilityWorkflowCheckpoint.owner_id == action.owner_id,
+            CapabilityWorkflowCheckpoint.job_id == action.workflow_id,
+        )
+    )
+    if checkpoint is None:
+        return
+    state = dict(checkpoint.state or {})
+    actions = dict(state.get("actions", {}))
+    actions[action.id] = {
+        **dict(actions.get(action.id, {})),
+        "status": status.value,
+        "result": result or {},
+        "error": error,
+    }
+    state.update({
+        "action_id": action.id,
+        "status": status.value,
+        "result": result or {},
+        "actions": actions,
+    })
+    checkpoint.status = (
+        "resume_ready" if status is ActionStatus.SUCCEEDED else "action_terminal"
+    )
+    checkpoint.state = state
+    checkpoint.checkpoint_version += 1
+
+
+async def _invalidate_actions(session, *conditions, reason: str) -> None:
+    actions = list(await session.scalars(
+        select(CapabilityActionRequest).where(
+            *conditions,
+            CapabilityActionRequest.status.in_([
+                ActionStatus.PENDING,
+                ActionStatus.APPROVED,
+            ]),
+        )
+    ))
+    now = datetime.now(timezone.utc)
+    for action in actions:
+        action.status = ActionStatus.INVALIDATED
+        action.decided_at = now
+        action.error = reason
+        await _update_workflow_action(
+            session, action, ActionStatus.INVALIDATED, error=reason
+        )
 
 
 async def _require_active_role(session, user_id: str, role: str) -> None:

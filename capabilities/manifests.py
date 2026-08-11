@@ -112,7 +112,7 @@ class CapabilityManifest(BaseModel):
     directly as runtime authority.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["vibeai.capability/v1"] = SCHEMA_VERSION
     capability_id: str
@@ -175,6 +175,18 @@ class CapabilityManifest(BaseModel):
             self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
         return _digest(canonical)
+
+
+def validate_owner_manifest(owner_id: str, manifest: CapabilityManifest) -> None:
+    """Prevent ordinary authors from manufacturing VibeAI runtime authority."""
+    if owner_id == "vibeai":
+        return
+    if manifest.kind is not CapabilityKind.INSTRUCTION_SKILL:
+        raise ValueError("user-authored capabilities must be instruction skills")
+    if manifest.trust is not TrustState.USER_IMPORTED:
+        raise ValueError("user-authored capabilities use User Imported trust")
+    if manifest.permissions or manifest.services or manifest.dependencies:
+        raise ValueError("user-authored instruction skills cannot grant permissions or services")
 
 
 class ManifestAsset(BaseModel):

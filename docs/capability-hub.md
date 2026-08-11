@@ -35,7 +35,7 @@ superseded. Runtime eligibility rechecks both trust and lifecycle on every invoc
 ## Deployment requirements
 
 1. Use an async PostgreSQL `CAPABILITY_DATABASE_URL`; production rejects SQLite.
-2. Apply Alembic through `0005_action_broker` before the application deployment.
+2. Apply Alembic through `0008_workflow_identity` before the application deployment.
 3. Configure Clerk issuer/JWKS, audience, and authorized parties for the Vercel production origin.
 4. Configure `CAPABILITY_CREDENTIAL_KEYS` as a JSON map of versioned urlsafe-base64 32-byte keys;
    keep the active key available through credential rotation and backup restoration.

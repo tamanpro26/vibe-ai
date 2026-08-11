@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-import pytest
+from datetime import datetime, timedelta, timezone
 
-from capabilities.models import ActivationMode, ScopeKind, ScopeState
+import pytest
+from sqlalchemy import update
+
+from capabilities.models import (
+    ActionStatus,
+    ActivationMode,
+    CapabilityActionRequest,
+    ScopeKind,
+    ScopeState,
+)
 from capabilities.store import CapabilityStore
 from tests.capabilities.test_manifests import native_manifest
 
@@ -77,3 +86,33 @@ async def test_schema_initialization_is_idempotent_and_production_sqlite_is_reje
 
     with pytest.raises(ValueError, match="PostgreSQL"):
         CapabilityStore(url, environment="production")
+
+
+@pytest.mark.asyncio
+async def test_standalone_chat_scope_can_be_registered_without_a_project(tmp_path):
+    store = CapabilityStore(f"sqlite+aiosqlite:///{tmp_path / 'capabilities.db'}")
+    await store.init()
+
+    chat = await store.register_owned_scope("user-1", ScopeKind.CHAT, "chat-1")
+
+    assert chat.parent_scope_id is None
+    assert await store.owns_scope("user-1", ScopeKind.CHAT, "chat-1")
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_is_persisted_instead_of_rolled_back(tmp_path):
+    from tests.capabilities.test_action_broker import setup_broker
+
+    store, broker, proposal = await setup_broker(tmp_path)
+    action = await broker.propose("user-1", proposal)
+    async with store._sessions.begin() as session:
+        await session.execute(
+            update(CapabilityActionRequest)
+            .where(CapabilityActionRequest.id == action.id)
+            .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+        )
+
+    with pytest.raises(ValueError, match="expired"):
+        await broker.approve("user-1", action.id, action.request_digest)
+
+    assert (await broker.get("user-1", action.id)).status is ActionStatus.EXPIRED

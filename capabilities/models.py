@@ -102,8 +102,8 @@ class CapabilityVersionRecord(Base):
     __tablename__ = "capability_versions"
     __table_args__ = (
         UniqueConstraint(
-            "owner_id", "capability_id", "version", "content_digest", "source_digest",
-            name="uq_capability_version_digest",
+            "owner_id", "capability_id", "version",
+            name="uq_capability_version_identity",
         ),
         Index("ix_capability_versions_resolvable", "owner_id", "archived_at", "revoked_at"),
     )
@@ -368,6 +368,9 @@ class CapabilityCredentialRecord(Base):
 
 class CapabilityWorkflowCheckpoint(Base):
     __tablename__ = "capability_workflow_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "job_id", name="uq_capability_workflow_owner_job"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -396,6 +399,7 @@ class CapabilityActionRequest(Base):
     __table_args__ = (
         UniqueConstraint("owner_id", "idempotency_key", name="uq_capability_action_idempotency"),
         Index("ix_capability_action_owner_status", "owner_id", "status", "created_at"),
+        Index("ix_capability_action_stale_lease", "status", "lease_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)

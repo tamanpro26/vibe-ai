@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     github_app_state_secret: str = Field(default="", description="GitHub App OAuth state signing secret")
     github_app_id: str = ""
     github_app_private_key: str = Field(default="", description="GitHub App PEM private key")
+    github_app_client_id: str = ""
+    github_app_client_secret: str = Field(default="", description="GitHub App OAuth client secret")
+    github_app_callback_url: str = ""
 
     # ── Legacy (no longer used but kept for compat) ───────
     together_api_key:    str = Field(default="", description="Not used — replaced by Pollinations")

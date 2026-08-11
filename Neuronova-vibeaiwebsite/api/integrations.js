@@ -10,7 +10,11 @@ export default async function handler(req, res) {
     route = {
       method: 'POST',
       path: '/api/integrations/github/callback',
-      body: { state: req.body?.state, installation_id: req.body?.installation_id },
+      body: {
+        state: req.body?.state,
+        installation_id: req.body?.installation_id,
+        code: req.body?.code,
+      },
     }
   }
   if (operation === 'revoke' && id) route = { method: 'POST', path: `/api/integrations/${id}/revoke` }

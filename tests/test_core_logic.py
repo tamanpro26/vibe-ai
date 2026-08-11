@@ -4662,7 +4662,9 @@ class TestApiContractConsistency:
     def test_agent_route_status_value_is_ok_not_complete(self):
         import inspect
         import api.server as server_mod
-        src = inspect.getsource(server_mod.run_agent)
+        # The authenticated route delegates to the shared job executor so
+        # direct and background agent calls keep one response contract.
+        src = inspect.getsource(server_mod._execute_agent)
         status_line = next(line for line in src.splitlines() if '"status":' in line)
         assert "ok" in status_line
         assert "complete" not in status_line
@@ -4799,7 +4801,13 @@ class TestConfidenceCascade:
             calls.append(model_id)
             if model_id == "cheap":
                 return "a fine answer"
-            if model_id == "qwen36_27b_verifier":
+            # Match whatever DEFAULT_VERIFIER currently is, not a hardcoded id.
+            # These fakes used to pin "qwen36_27b_verifier"; when the default
+            # changed the fake raised, run_cascade's verifier-outage path
+            # swallowed it, and the tier-1 answer was accepted unscored --
+            # which happens to satisfy this test's assertions, so it kept
+            # passing while testing nothing.
+            if model_id == cascade_mod.DEFAULT_VERIFIER:
                 return '{"confidence": 0.9, "failed_points": [], "reasoning": "meets rubric"}'
             raise AssertionError(f"expensive tier should never be called, got {model_id}")
 
@@ -4820,7 +4828,7 @@ class TestConfidenceCascade:
                 return "a shaky answer"
             if model_id == "expensive":
                 return "a solid answer"
-            if model_id == "qwen36_27b_verifier":
+            if model_id == cascade_mod.DEFAULT_VERIFIER:
                 # score whichever candidate is embedded in the prompt
                 if "a shaky answer" in kwargs["prompt"]:
                     return '{"confidence": 0.3, "failed_points": ["misses edge case"], "reasoning": "weak"}'
@@ -5164,9 +5172,20 @@ class TestSupervisorPing:
 # (manager/free_manager.py)
 
 class TestFreeManagerAmbiguityGate:
-    def test_open_ambiguity_returns_question_without_running_any_stage(self, monkeypatch):
+    def test_open_ambiguity_still_delivers_work_and_flags_the_question(self, monkeypatch):
+        """An open ambiguity must NOT swallow the answer.
+
+        This gate used to return questions and nothing else. Measured live
+        2026-08-08 on vibeloop's v4-code-07: the detector reported the prompt
+        failed to define behaviour the prompt in fact defined verbatim, so the
+        request spent 173s and came back with 3 questions and no code. A false
+        positive cost the whole answer, and an API/headless caller has no way
+        to answer back. Now it builds on best judgment and states what it
+        assumed -- a user can correct a stated assumption, not an empty reply.
+        """
         import manager.free_manager as fm_mod
         from manager.intent_contract import IntentContract
+        from manager.supervisor import SupervisionVerdict
 
         async def fake_build_contract(raw_request):
             return IntentContract(
@@ -5174,15 +5193,32 @@ class TestFreeManagerAmbiguityGate:
                 open_ambiguities=["which framework: React or Vue?"],
             )
 
-        async def fail_if_called(self, member, prompt, system, max_tokens, temperature):
-            raise AssertionError("no stage should run while ambiguities are open")
+        stages_run = []
+
+        async def record_stage(self, member, prompt, system, max_tokens, temperature):
+            stages_run.append(member.role if hasattr(member, "role") else str(member))
+            return "here is the built thing"
+
+        async def fake_generate(model_id, **kwargs):
+            return "SIMPLE"   # keep this on the short path; stage count isn't the point
+
+        async def fake_ping(contract, role, output):
+            return SupervisionVerdict(
+                intent_alignment=10, criteria_on_track=True,
+                drift_detected=False, drift_description="", recommend="continue",
+            )
 
         monkeypatch.setattr(fm_mod, "build_intent_contract", fake_build_contract)
-        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", fail_if_called)
+        monkeypatch.setattr(fm_mod, "generate_resilient", fake_generate)
+        monkeypatch.setattr(fm_mod, "supervisor_ping", fake_ping)
+        monkeypatch.setattr(fm_mod.FreeManagerTeam, "_call", record_stage)
 
         team = fm_mod.FreeManagerTeam()
         result = asyncio.run(team._collaborative_pipeline("build me a website", 1000, 0.3))
 
+        assert stages_run, "an open ambiguity must not stop the work from being done"
+        assert "here is the built thing" in result
+        # ...and the question still has to reach the user, not be silently guessed.
         assert "which framework" in result.lower()
         assert "React or Vue" in result
 
@@ -5882,7 +5918,7 @@ class TestVerifierExcludeSameModelFallback:
         captured_excludes = []
 
         async def fake_generate(model_id, **kwargs):
-            if model_id != "qwen36_27b_verifier":
+            if model_id != cascade_mod.DEFAULT_VERIFIER:
                 return "candidate answer"
             captured_excludes.append(kwargs.get("exclude"))
             return '{"confidence": 0.9, "failed_points": [], "reasoning": "fine"}'

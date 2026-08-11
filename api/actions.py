@@ -31,11 +31,12 @@ async def propose_action(
     body: ProposedAction,
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
+    store: CapabilityStore = Depends(get_capability_store),
 ) -> dict:
     if not settings.capability_actions_enabled:
         raise HTTPException(503, "capability actions are disabled by the release kill switch")
     try:
-        return _response(await broker.propose(principal.subject, body))
+        return await _response(await broker.propose(principal.subject, body), store)
     except PermissionError as exc:
         raise HTTPException(404, "capability, scope, or connection not found") from exc
     except ValueError as exc:
@@ -46,8 +47,14 @@ async def propose_action(
 async def list_pending_actions(
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
+    store: CapabilityStore = Depends(get_capability_store),
 ) -> dict:
-    return {"items": [_response(item) for item in await broker.pending(principal.subject)]}
+    return {
+        "items": [
+            await _response(item, store)
+            for item in await broker.pending(principal.subject)
+        ]
+    }
 
 
 @router.get("/{action_id}")
@@ -55,9 +62,10 @@ async def get_action(
     action_id: str,
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
+    store: CapabilityStore = Depends(get_capability_store),
 ) -> dict:
     try:
-        return _response(await broker.get(principal.subject, action_id))
+        return await _response(await broker.get(principal.subject, action_id), store)
     except PermissionError as exc:
         raise HTTPException(404, "action not found") from exc
 
@@ -68,12 +76,13 @@ async def approve_action(
     body: ApprovalBody,
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
+    store: CapabilityStore = Depends(get_capability_store),
 ) -> dict:
     if not settings.capability_actions_enabled:
         raise HTTPException(503, "capability actions are disabled by the release kill switch")
     try:
-        return _response(
-            await broker.approve(principal.subject, action_id, body.request_digest)
+        return await _response(
+            await broker.approve(principal.subject, action_id, body.request_digest), store
         )
     except PermissionError as exc:
         raise HTTPException(404, "action not found") from exc
@@ -86,16 +95,22 @@ async def deny_action(
     action_id: str,
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
+    store: CapabilityStore = Depends(get_capability_store),
 ) -> dict:
     try:
-        return _response(await broker.deny(principal.subject, action_id))
+        return await _response(await broker.deny(principal.subject, action_id), store)
     except PermissionError as exc:
         raise HTTPException(404, "action not found") from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
-def _response(action) -> dict:
+async def _response(action, store: CapabilityStore) -> dict:
+    version = await store.get_version(action.capability_version_id)
+    connection = await store.get_service_connection_record(
+        action.owner_id, action.connection_id
+    )
+    manifest = version.manifest if version else {}
     return {
         "id": action.id,
         "status": action.status.value,
@@ -105,6 +120,18 @@ def _response(action) -> dict:
         "mutable_resources": action.mutable_resources,
         "request_digest": action.request_digest,
         "expires_at": action.expires_at.isoformat(),
+        "capability": {
+            "name": manifest.get("name", "Unavailable capability"),
+            "version": manifest.get("version"),
+            "trust": manifest.get("trust"),
+            "digest": action.capability_digest,
+        },
+        "service": {
+            "provider": connection.provider,
+            "external_account_id": connection.external_account_id,
+        },
+        "scope": {"project_id": action.project_id, "chat_id": action.chat_id},
+        "workflow_id": action.workflow_id,
         "result": action.result,
         "error": action.error,
     }

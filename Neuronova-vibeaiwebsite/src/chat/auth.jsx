@@ -13,6 +13,7 @@ import { ClerkProvider, useUser, useClerk, useAuth as useClerkAuth } from '@cler
  */
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
+const E2E_AUTH = import.meta.env.VITE_E2E_AUTH === 'true'
 
 const AuthCtx = createContext(null)
 
@@ -40,6 +41,14 @@ function AuthBridge({ children }) {
 }
 
 export function AuthProvider({ children }) {
+  if (E2E_AUTH) {
+    return <AuthCtx.Provider value={{
+      user: { id: 'e2e-user', name: 'E2E User', email: 'e2e@vibe.test' },
+      isLoaded: true,
+      logout: () => {},
+      getToken: async () => 'e2e-token',
+    }}>{children}</AuthCtx.Provider>
+  }
   if (!PUBLISHABLE_KEY) {
     throw new Error(
       'Missing VITE_CLERK_PUBLISHABLE_KEY. Add it to Neuronova-vibeaiwebsite/.env (get it from dashboard.clerk.com -> API Keys).',

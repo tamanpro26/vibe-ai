@@ -43,6 +43,7 @@ export default function SettingsModal({ open, onClose }) {
   const [settings, setSettings] = useState(() => loadSettings(user?.id))
   const [activation, setActivation] = useState('manual_only')
   const [activationStatus, setActivationStatus] = useState('')
+  const [activationSaving, setActivationSaving] = useState(false)
   const dialogRef = useRef(null)
 
   // Re-read whenever the modal is opened rather than only on mount: settings
@@ -56,13 +57,18 @@ export default function SettingsModal({ open, onClose }) {
   }, [open, user?.id])
 
   const updateActivation = async (mode) => {
+    const previous = activation
     setActivation(mode)
+    setActivationSaving(true)
     setActivationStatus('Saving…')
     try {
       await capabilityApi.setActivation(mode)
       setActivationStatus('Saved')
     } catch (error) {
+      setActivation(previous)
       setActivationStatus(error.message)
+    } finally {
+      setActivationSaving(false)
     }
   }
 
@@ -308,6 +314,7 @@ export default function SettingsModal({ open, onClose }) {
                       key={id}
                       className={`set-theme${activation === id ? ' is-active' : ''}`}
                       onClick={() => updateActivation(id)}
+                      disabled={activationSaving}
                       aria-pressed={activation === id}
                     >
                       <span className="set-theme-name">{name}</span>

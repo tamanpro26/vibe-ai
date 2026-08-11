@@ -78,4 +78,11 @@ def _rejected(component: str, reason: str, version: str | None) -> ConversionRes
 
 def _deduplicate(reports: list[ComponentReport]) -> list[ComponentReport]:
     seen: set[tuple[str, ConversionStatus]] = set()
-    return [item for item in reports if not ((item.component, item.status) in seen or seen.add((item.component, item.status)))]
+    unique: list[ComponentReport] = []
+    for item in reports:
+        key = (item.component, item.status)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique

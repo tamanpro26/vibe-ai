@@ -32,7 +32,11 @@ class ActionWorker:
         try:
             result = await adapter.execute(action, connection)
         except Exception as exc:
-            return await self._finish(action, worker_id, ActionStatus.FAILED, error=str(exc))
+            # Once the durable send marker exists, a transport/provider error
+            # cannot prove that the external effect did not happen. Never retry.
+            return await self._finish(
+                action, worker_id, ActionStatus.OUTCOME_UNKNOWN, error=str(exc)
+            )
         return await self._finish(action, worker_id, ActionStatus.SUCCEEDED, result=result)
 
     async def _finish(self, action, worker_id, status, *, result=None, error=None):

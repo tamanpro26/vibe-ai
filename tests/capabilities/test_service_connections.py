@@ -73,3 +73,36 @@ async def test_github_installation_is_verified_server_to_server():
 
     assert verified["external_account_id"] == "77:123"
     assert verified["repository_ids"] == ["456", "789"]
+
+
+@pytest.mark.asyncio
+async def test_github_installation_requires_the_users_admin_identity():
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "user-token"})
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": 99, "login": "attacker"})
+        if request.url.path == "/app/installations/123":
+            return httpx.Response(
+                200,
+                json={"account": {"id": 77, "login": "victim", "type": "User"}},
+            )
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        github = GitHubAppClient("42", pem, client)
+        with pytest.raises(PermissionError, match="does not own"):
+            await github.verify_user_admin(
+                "oauth-code",
+                123,
+                client_id="client-id",
+                client_secret="client-secret",
+                redirect_uri="https://vibe.test/callback",
+            )

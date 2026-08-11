@@ -130,12 +130,28 @@ async def list_capabilities(
     store: CapabilityStore = Depends(get_capability_store),
 ) -> dict[str, Any]:
     versions = await store.list_catalog(principal.subject, limit=limit, offset=offset)
-    installations = {
-        item.capability_version_id
-        for item in await store.list_active_installations(principal.subject)
-    }
+    active_installations = await store.list_active_installations(principal.subject)
+    installations = {item.capability_version_id: item.id for item in active_installations}
+    scope_overrides: dict[str, list[dict[str, Any]]] = {}
+    for override in await store.list_scope_overrides(
+        principal.subject, [item.id for item in active_installations]
+    ):
+        scope_overrides.setdefault(override.installation_id, []).append(
+            {
+                "scope_kind": override.scope_kind.value,
+                "scope_id": override.scope_id,
+                "state": override.state.value,
+            }
+        )
     return {
-        "items": [_version_response(item, installed=item.id in installations) for item in versions],
+        "items": [
+            _version_response(
+                item,
+                installation_id=installations.get(item.id),
+                scope_overrides=scope_overrides.get(installations.get(item.id), []),
+            )
+            for item in versions
+        ],
         "activation_mode": (await store.get_activation_mode(principal.subject)).value,
         "limit": limit,
         "offset": offset,
@@ -480,14 +496,21 @@ def _manifest_response(manifest: CapabilityManifest) -> dict[str, Any]:
     return {**manifest.model_dump(mode="json"), "content_digest": manifest.content_digest}
 
 
-def _version_response(version, *, installed: bool = False) -> dict[str, Any]:
+def _version_response(
+    version,
+    *,
+    installation_id: str | None = None,
+    scope_overrides: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "id": version.id,
         "owner": "vibeai" if version.owner_id == "vibeai" else "current_user",
         "content_digest": version.content_digest,
         "review_state": version.review_state.value,
         "archived": version.archived_at is not None,
-        "installed": installed,
+        "installed": installation_id is not None,
+        "installation_id": installation_id,
+        "scope_overrides": scope_overrides or [],
         "manifest": version.manifest,
     }
 
