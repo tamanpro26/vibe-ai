@@ -14,10 +14,12 @@ FastAPI server with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,9 +34,10 @@ from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from api.identity import get_current_principal
 from config.settings import settings
 from core.bus import bus
-from core.state import state
+from core.state import get_capability_store, state
 from core.push_notify import VAPID_PUBLIC_KEY, broadcast_alert, push_store
 from core.device_planner import plan_device_response
 from manager.claude_manager import manager
@@ -104,6 +107,11 @@ async def require_ws_token(token: str | None = Query(default=None)) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("VibeAI v2 starting...")
     await state.init()
+    await get_capability_store().init()
+    admin_ids = [item.strip() for item in settings.capability_bootstrap_admin_ids.split(",") if item.strip()]
+    reviewer_ids = [item.strip() for item in settings.capability_bootstrap_reviewer_ids.split(",") if item.strip()]
+    if admin_ids or reviewer_ids:
+        await get_capability_store().bootstrap_roles_once(admin_ids, reviewer_ids)
     await push_store.init()
     logger.info("VibeAI ready ✓  (multi-provider orchestration · video_observer integrated)")
     yield
@@ -124,6 +132,16 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# Capability routers keep service authentication and verified end-user
+# authorization as separate, mandatory boundaries.
+from api.actions import router as capability_actions_router
+from api.capabilities import router as capabilities_router
+from api.integrations import router as capability_integrations_router
+
+app.include_router(capabilities_router, dependencies=[Depends(require_token)])
+app.include_router(capability_actions_router, dependencies=[Depends(require_token)])
+app.include_router(capability_integrations_router, dependencies=[Depends(require_token)])
 
 
 # ── WebSocket manager ─────────────────────────────────────────────────────────
@@ -178,6 +196,9 @@ class PromptRequest(BaseModel):
     # accepts a real upload and runs the frames pipeline.
     video_path: str | None = None
     frames_path: str | None = None
+    history: list[dict[str, str]] = Field(default_factory=list)
+    user_id: str | None = None
+    search_context: str = ""
 
 
 class PromptResponse(BaseModel):
@@ -200,6 +221,12 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
     manager_args = {"forced_team": forced_team}
     if req.reasoning_mode:
         manager_args["reasoning_mode"] = req.reasoning_mode
+    if req.user_id:
+        manager_args["memory_namespace"] = (
+            "web:" + hashlib.sha256(req.user_id.encode("utf-8")).hexdigest()[:24]
+        )
+    if req.search_context:
+        manager_args["supplied_search_context"] = req.search_context[:16_000]
 
     # Media travels as `extra`, which is what _dispatch() checks to
     # force-activate the vision team (claude_manager.py). Without this the
@@ -219,7 +246,29 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
     if extra:
         manager_args["extra"] = extra
 
-    response = await manager.handle_user_request(req.prompt, **manager_args)
+    history_lines: list[str] = []
+    history_chars = 12_000
+    for turn in reversed(req.history[-8:]):
+        role = turn.get("role")
+        content = turn.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        content = content.strip()[:min(6000, history_chars)]
+        if content:
+            history_lines.insert(0, f"{role.title()}: {content}")
+            history_chars -= len(content)
+        if history_chars <= 0:
+            break
+
+    manager_prompt = req.prompt
+    if history_lines:
+        manager_prompt = (
+            "[Recent conversation — use this for continuity; answer only the current request]\n"
+            + "\n\n".join(history_lines)
+            + f"\n\n[Current request]\n{req.prompt}"
+        )
+
+    response = await manager.handle_user_request(manager_prompt, **manager_args)
     return PromptResponse(session_id=sid, response=response)
 
 
@@ -439,6 +488,28 @@ async def handle_image(req: ImageRequest) -> ImageResponse:
     from tools.image_gen import generate_image
     result = await generate_image(req.prompt, req.style)
     return ImageResponse(ok=result.ok, path=result.path, url=result.url, error=result.error)
+
+
+@app.post("/api/image/file", response_class=FileResponse, dependencies=[Depends(require_token)])
+async def handle_image_file(req: ImageRequest) -> FileResponse:
+    """Generate and return verified image bytes for web clients.
+
+    The normal JSON endpoint remains useful to CLI callers. Browsers use this
+    binary route so the generated JPEG is not inflated into base64 and copied
+    through multiple JSON/localStorage layers.
+    """
+    if not req.prompt.strip():
+        raise HTTPException(400, "Prompt cannot be empty")
+    from tools.image_gen import generate_image
+
+    result = await generate_image(req.prompt, req.style)
+    if not result.ok or not result.path:
+        raise HTTPException(502, result.error or "Image generation failed")
+    return FileResponse(
+        result.path,
+        media_type="image/jpeg",
+        headers={"X-Image-Source": result.url},
+    )
 
 
 # ── REST: video upload → .frames pipeline ─────────────────────────────────────
@@ -800,8 +871,7 @@ def _collect_project_files(workspace: str, paths: list[str]) -> tuple[list[dict]
     return out, truncated
 
 
-@app.post("/api/agent", response_model=AgentResponse, dependencies=[Depends(require_token)])
-async def run_agent(req: AgentRequest) -> dict:
+async def _execute_agent(req: AgentRequest) -> dict:
     """
     Run an autonomous agent that creates files and runs commands by itself.
 
@@ -850,6 +920,114 @@ async def run_agent(req: AgentRequest) -> dict:
         "files":           files,
         "files_truncated": files_truncated,
     }
+
+
+@app.post("/api/agent", response_model=AgentResponse, dependencies=[Depends(require_token)])
+async def run_agent(req: AgentRequest) -> dict:
+    return await _execute_agent(req)
+
+
+# Long browser builds cannot safely hold a Vercel request open. The job lives
+# on this persistent backend; the serverless proxy starts it quickly and polls
+# status with short requests. Results are intentionally memory-backed: project
+# files themselves are already written to the workspace, while this record is
+# only the delivery envelope for the current deployment process.
+_AGENT_JOBS: dict[str, dict[str, Any]] = {}
+_AGENT_JOB_TASKS: set[asyncio.Task] = set()
+_MAX_AGENT_JOBS = 100
+_MAX_RUNNING_AGENT_JOBS = 2
+_AGENT_JOB_TIMEOUT_SECONDS = 20 * 60
+_ACTIVE_AGENT_WORKSPACES: set[str] = set()
+
+
+def _trim_agent_jobs() -> None:
+    finished = [
+        (job_id, job.get("finished_at", 0.0))
+        for job_id, job in _AGENT_JOBS.items()
+        if job.get("status") in {"completed", "failed"}
+    ]
+    for job_id, _ in sorted(finished, key=lambda item: item[1])[:max(0, len(_AGENT_JOBS) - _MAX_AGENT_JOBS)]:
+        _AGENT_JOBS.pop(job_id, None)
+
+
+async def _run_agent_job(job_id: str, req: AgentRequest) -> None:
+    owner_id = _AGENT_JOBS.get(job_id, {}).get("owner_id")
+    try:
+        result = await asyncio.wait_for(
+            _execute_agent(req), timeout=_AGENT_JOB_TIMEOUT_SECONDS
+        )
+        _AGENT_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "completed",
+            "result": result,
+            "finished_at": time.time(),
+            "owner_id": owner_id,
+        }
+    except TimeoutError:
+        _AGENT_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": "build timed out after 20 minutes",
+            "finished_at": time.time(),
+            "owner_id": owner_id,
+        }
+    except asyncio.CancelledError:
+        _AGENT_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": "build cancelled",
+            "finished_at": time.time(),
+            "owner_id": owner_id,
+        }
+        raise
+    except Exception as exc:
+        logger.exception("Agent job {} failed", job_id)
+        _AGENT_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "failed",
+            "error": str(exc),
+            "finished_at": time.time(),
+            "owner_id": owner_id,
+        }
+    finally:
+        _ACTIVE_AGENT_WORKSPACES.discard(req.workspace or "./workspace")
+        _trim_agent_jobs()
+
+
+@app.post("/api/agent/jobs", status_code=202, dependencies=[Depends(require_token)])
+async def start_agent_job(
+    req: AgentRequest,
+    principal=Depends(get_current_principal),
+) -> dict:
+    if len(_ACTIVE_AGENT_WORKSPACES) >= _MAX_RUNNING_AGENT_JOBS:
+        raise HTTPException(429, "agent build capacity reached; try again shortly")
+    workspace_key = req.workspace or "./workspace"
+    if workspace_key in _ACTIVE_AGENT_WORKSPACES:
+        raise HTTPException(409, "a build is already running for this workspace")
+    _ACTIVE_AGENT_WORKSPACES.add(workspace_key)
+    job_id = uuid.uuid4().hex
+    _AGENT_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "started_at": time.time(),
+        "owner_id": principal.subject,
+    }
+    task = asyncio.create_task(_run_agent_job(job_id, req))
+    _AGENT_JOB_TASKS.add(task)
+    task.add_done_callback(_AGENT_JOB_TASKS.discard)
+    _trim_agent_jobs()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/agent/jobs/{job_id}", dependencies=[Depends(require_token)])
+async def get_agent_job(
+    job_id: str,
+    principal=Depends(get_current_principal),
+) -> dict:
+    job = _AGENT_JOBS.get(job_id)
+    if not job or job.get("owner_id") != principal.subject:
+        raise HTTPException(404, "agent job not found")
+    return job
 
 
 @app.websocket("/ws/agent/{client_id}", dependencies=[Depends(require_ws_token)])

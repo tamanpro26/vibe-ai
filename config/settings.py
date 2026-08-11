@@ -77,6 +77,10 @@ class Settings(BaseSettings):
 
     # ── GitHub Integration ────────────────────────────────
     github_token: str = Field(default="", description="GitHub PAT — github.com/settings/tokens (needs repo + workflow scopes)")
+    github_app_slug: str = ""
+    github_app_state_secret: str = Field(default="", description="GitHub App OAuth state signing secret")
+    github_app_id: str = ""
+    github_app_private_key: str = Field(default="", description="GitHub App PEM private key")
 
     # ── Legacy (no longer used but kept for compat) ───────
     together_api_key:    str = Field(default="", description="Not used — replaced by Pollinations")
@@ -99,6 +103,15 @@ class Settings(BaseSettings):
         description="JSON map of versioned urlsafe-base64 AES-256 credential master keys",
     )
     capability_credential_active_key: str = "v1"
+    clerk_issuer: str = Field(default="", description="Expected Clerk JWT issuer")
+    clerk_jwks_url: str = Field(default="", description="Clerk JSON Web Key Set URL")
+    clerk_audience: str = Field(default="", description="Expected Clerk session audience")
+    clerk_authorized_parties: str = Field(
+        default="", description="Comma-separated allowed Clerk azp origins"
+    )
+    clerk_jwt_leeway_seconds: int = 60
+    capability_bootstrap_admin_ids: str = ""
+    capability_bootstrap_reviewer_ids: str = ""
 
     # ── API server ────────────────────────────────────────
     # SECURITY: localhost by default. The API executes shell commands via the

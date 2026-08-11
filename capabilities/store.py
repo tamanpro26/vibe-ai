@@ -19,7 +19,11 @@ from capabilities.models import (
     CapabilityAuthorDraft,
     CapabilityCredentialRecord,
     CapabilityInstallation,
+    CapabilityOwnedScope,
+    CapabilityOAuthState,
+    CapabilityRoleAssignment,
     CapabilityScopeOverride,
+    CapabilitySystemState,
     CapabilityVersionRecord,
     DraftState,
     ReviewState,
@@ -118,6 +122,15 @@ class CapabilityStore:
             session.add(draft)
         return draft
 
+    async def delete_draft(self, owner_id: str, draft_id: str) -> None:
+        async with self._sessions.begin() as session:
+            draft = await session.get(CapabilityAuthorDraft, draft_id)
+            if draft is None or draft.owner_id != owner_id:
+                raise PermissionError("draft not found for owner")
+            if draft.state is not DraftState.DRAFT:
+                raise ValueError("only an unpublished draft can be deleted")
+            await session.delete(draft)
+
     async def get_version(self, version_id: str) -> CapabilityVersionRecord | None:
         async with self._sessions() as session:
             return await session.get(CapabilityVersionRecord, version_id)
@@ -139,6 +152,8 @@ class CapabilityStore:
             version = await session.get(CapabilityVersionRecord, version_id)
             if version is None:
                 raise LookupError("capability version not found")
+            if version.owner_id not in {owner_id, "vibeai"}:
+                raise PermissionError("capability version not available to owner")
             if version.archived_at or version.revoked_at:
                 raise ValueError("archived or revoked capability cannot be installed")
             existing = await session.scalar(
@@ -208,6 +223,114 @@ class CapabilityStore:
                 preference.onboarding_accepted_at = datetime.now(timezone.utc)
         return preference
 
+    async def register_owned_scope(
+        self,
+        owner_id: str,
+        scope_kind: ScopeKind,
+        scope_id: str,
+        parent_scope_id: str | None = None,
+    ) -> CapabilityOwnedScope:
+        if scope_kind is ScopeKind.ACCOUNT:
+            raise ValueError("account ownership comes from the verified principal")
+        if scope_kind is ScopeKind.CHAT:
+            if not parent_scope_id or not await self.owns_scope(
+                owner_id, ScopeKind.PROJECT, parent_scope_id
+            ):
+                raise PermissionError("parent project scope not found for owner")
+        async with self._sessions.begin() as session:
+            record = await session.scalar(
+                select(CapabilityOwnedScope).where(
+                    CapabilityOwnedScope.owner_id == owner_id,
+                    CapabilityOwnedScope.scope_kind == scope_kind,
+                    CapabilityOwnedScope.scope_id == scope_id,
+                )
+            )
+            if record:
+                record.active = True
+                record.deleted_at = None
+                if parent_scope_id:
+                    record.parent_scope_id = parent_scope_id
+                return record
+            record = CapabilityOwnedScope(
+                owner_id=owner_id,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                parent_scope_id=parent_scope_id,
+            )
+            session.add(record)
+        return record
+
+    async def owns_scope(self, owner_id: str, scope_kind: ScopeKind, scope_id: str) -> bool:
+        if scope_kind is ScopeKind.ACCOUNT:
+            return scope_id == owner_id
+        async with self._sessions() as session:
+            record = await session.scalar(
+                select(CapabilityOwnedScope.id).where(
+                    CapabilityOwnedScope.owner_id == owner_id,
+                    CapabilityOwnedScope.scope_kind == scope_kind,
+                    CapabilityOwnedScope.scope_id == scope_id,
+                    CapabilityOwnedScope.active.is_(True),
+                )
+            )
+            return record is not None
+
+    async def delete_owned_scope(self, owner_id: str, scope_kind: ScopeKind, scope_id: str) -> None:
+        async with self._sessions.begin() as session:
+            record = await session.scalar(
+                select(CapabilityOwnedScope).where(
+                    CapabilityOwnedScope.owner_id == owner_id,
+                    CapabilityOwnedScope.scope_kind == scope_kind,
+                    CapabilityOwnedScope.scope_id == scope_id,
+                    CapabilityOwnedScope.active.is_(True),
+                )
+            )
+            if record is None:
+                raise PermissionError("scope not found for owner")
+            record.active = False
+            record.deleted_at = datetime.now(timezone.utc)
+
+    async def bootstrap_roles_once(
+        self, admin_ids: list[str], reviewer_ids: list[str]
+    ) -> bool:
+        """Apply deployment-secret bootstrap exactly once, then seal it."""
+        async with self._sessions.begin() as session:
+            marker = await session.get(CapabilitySystemState, "role_bootstrap_complete")
+            if marker is not None:
+                return False
+            assignments = {
+                **{user_id: {"admin", "reviewer"} for user_id in admin_ids if user_id},
+            }
+            for user_id in reviewer_ids:
+                if user_id:
+                    assignments.setdefault(user_id, set()).add("reviewer")
+            for user_id, roles in assignments.items():
+                for role in roles:
+                    session.add(
+                        CapabilityRoleAssignment(
+                            user_id=user_id,
+                            role=role,
+                            granted_by="deployment-bootstrap",
+                        )
+                    )
+            session.add(
+                CapabilitySystemState(
+                    key="role_bootstrap_complete",
+                    value={"admin_count": len(admin_ids), "reviewer_count": len(reviewer_ids)},
+                )
+            )
+        return True
+
+    async def has_role(self, user_id: str, role: str) -> bool:
+        async with self._sessions() as session:
+            assignment = await session.scalar(
+                select(CapabilityRoleAssignment.id).where(
+                    CapabilityRoleAssignment.user_id == user_id,
+                    CapabilityRoleAssignment.role == role,
+                    CapabilityRoleAssignment.revoked_at.is_(None),
+                )
+            )
+            return assignment is not None
+
     async def list_resolvable_versions(self, owner_id: str) -> list[CapabilityVersionRecord]:
         async with self._sessions() as session:
             values = await session.scalars(
@@ -227,6 +350,23 @@ class CapabilityStore:
             )
             return list(values)
 
+    async def list_catalog(
+        self, owner_id: str, *, limit: int = 50, offset: int = 0
+    ) -> list[CapabilityVersionRecord]:
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityVersionRecord)
+                .where(
+                    CapabilityVersionRecord.owner_id.in_([owner_id, "vibeai"]),
+                    CapabilityVersionRecord.archived_at.is_(None),
+                    CapabilityVersionRecord.revoked_at.is_(None),
+                )
+                .order_by(CapabilityVersionRecord.capability_id, CapabilityVersionRecord.version)
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(values)
+
     async def append_audit(
         self, owner_id: str, event_type: str, subject_id: str, payload: dict[str, Any]
     ) -> CapabilityAuditEvent:
@@ -242,6 +382,97 @@ class CapabilityStore:
             )
             session.add(event_record)
         return event_record
+
+    async def create_service_connection(
+        self,
+        owner_id: str,
+        provider: str,
+        external_account_id: str,
+        credential_reference: str,
+        allowed_operations: list[str],
+        immutable_targets: list[str],
+        connection_id: str | None = None,
+    ):
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions.begin() as session:
+            record = CapabilityServiceConnection(
+                owner_id=owner_id,
+                provider=provider,
+                external_account_id=external_account_id,
+                credential_reference=credential_reference,
+                allowed_operations=sorted(set(allowed_operations)),
+                immutable_targets=sorted(set(immutable_targets)),
+            )
+            if connection_id is not None:
+                record.id = connection_id
+            session.add(record)
+        return record
+
+    async def issue_oauth_state(
+        self,
+        owner_id: str,
+        provider: str,
+        nonce_digest: str,
+        expires_at: datetime,
+    ) -> None:
+        async with self._sessions.begin() as session:
+            session.add(
+                CapabilityOAuthState(
+                    nonce_digest=nonce_digest,
+                    owner_id=owner_id,
+                    provider=provider,
+                    expires_at=expires_at,
+                )
+            )
+
+    async def consume_oauth_state(
+        self, owner_id: str, provider: str, nonce_digest: str
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        async with self._sessions.begin() as session:
+            record = await session.get(CapabilityOAuthState, nonce_digest)
+            expires_at = record.expires_at if record else None
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if (
+                record is None
+                or record.owner_id != owner_id
+                or record.provider != provider
+                or record.consumed_at is not None
+                or expires_at <= now
+            ):
+                raise PermissionError("OAuth state is invalid, expired, or already used")
+            record.consumed_at = now
+
+    async def get_service_connection(self, owner_id: str, connection_id: str):
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions() as session:
+            record = await session.get(CapabilityServiceConnection, connection_id)
+            if record is None or record.owner_id != owner_id or record.revoked_at is not None:
+                raise PermissionError("service connection not found for owner")
+            return record
+
+    async def list_service_connections(self, owner_id: str):
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityServiceConnection)
+                .where(CapabilityServiceConnection.owner_id == owner_id)
+                .order_by(CapabilityServiceConnection.created_at.desc())
+            )
+            return list(values)
+
+    async def revoke_service_connection(self, owner_id: str, connection_id: str) -> None:
+        from capabilities.models import CapabilityServiceConnection
+
+        async with self._sessions.begin() as session:
+            record = await session.get(CapabilityServiceConnection, connection_id)
+            if record is None or record.owner_id != owner_id:
+                raise PermissionError("service connection not found for owner")
+            record.revoked_at = datetime.now(timezone.utc)
 
     async def put_credential(
         self,

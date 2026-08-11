@@ -21,6 +21,7 @@ dependencies = [
     "aiosqlite>=0.20,<1",
     "asyncpg>=0.30,<1",
     "cryptography>=44,<50",
+    "PyJWT[crypto]>=2.10,<3",
 ]
 
 [project.optional-dependencies]

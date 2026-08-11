@@ -88,7 +88,10 @@ class CapabilityAuthorDraft(Base):
 class CapabilityVersionRecord(Base):
     __tablename__ = "capability_versions"
     __table_args__ = (
-        UniqueConstraint("capability_id", "version", "content_digest", name="uq_capability_version_digest"),
+        UniqueConstraint(
+            "owner_id", "capability_id", "version", "content_digest",
+            name="uq_capability_version_digest",
+        ),
         Index("ix_capability_versions_resolvable", "owner_id", "archived_at", "revoked_at"),
     )
 
@@ -171,6 +174,61 @@ class CapabilityActivationPreference(Base):
         nullable=False,
     )
     onboarding_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
+class CapabilityOwnedScope(Base):
+    __tablename__ = "capability_owned_scopes"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "scope_kind", "scope_id", name="uq_capability_owned_scope"),
+        Index("ix_capability_owned_scope_parent", "owner_id", "parent_scope_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    scope_kind: Mapped[ScopeKind] = mapped_column(
+        SAEnum(ScopeKind, native_enum=False, values_callable=lambda cls: [item.value for item in cls]),
+        nullable=False,
+    )
+    scope_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_scope_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CapabilityOAuthState(Base):
+    __tablename__ = "capability_oauth_states"
+
+    nonce_digest: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class CapabilityRoleAssignment(Base):
+    __tablename__ = "capability_role_assignments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "role", name="uq_capability_role_assignment"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(40), nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CapabilitySystemState(Base):
+    __tablename__ = "capability_system_state"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
     )
@@ -275,9 +333,13 @@ __all__ = [
     "CapabilityCredentialRecord",
     "CapabilityExecutionLease",
     "CapabilityInstallation",
+    "CapabilityOwnedScope",
+    "CapabilityOAuthState",
+    "CapabilityRoleAssignment",
     "CapabilityReviewEvidence",
     "CapabilityScopeOverride",
     "CapabilityServiceConnection",
+    "CapabilitySystemState",
     "CapabilityVersionRecord",
     "CapabilityWorkflowCheckpoint",
     "DraftState",

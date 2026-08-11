@@ -1,4 +1,5 @@
-import { requireSession } from './_lib/clerkAuth.js'
+import { requireSessionContext } from './_lib/clerkAuth.js'
+import { boundedHistory } from './_lib/requestData.js'
 
 /*
  * Proxy to the REAL VibeAI Manager/Team/Council backend -- the actual
@@ -51,14 +52,19 @@ export default async function handler(req, res) {
     return
   }
 
+  let session
+  let userToken
   try {
-    await requireSession(req)
+    const context = await requireSessionContext(req)
+    session = context.payload
+    userToken = context.token
   } catch {
     res.status(401).json({ error: 'sign in required' })
     return
   }
 
   const rawPrompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : ''
+  const history = boundedHistory(req.body?.history)
 
   /*
    * Personalization for the Manager tier.
@@ -111,6 +117,7 @@ export default async function handler(req, res) {
       headers: {
         Authorization: `Bearer ${VIBE_API_TOKEN}`,
         'Content-Type': 'application/json',
+        'X-Vibe-User-Token': userToken,
       },
       body: JSON.stringify({
         prompt,
@@ -118,6 +125,12 @@ export default async function handler(req, res) {
         team: typeof req.body?.team === 'string' ? req.body.team : undefined,
         reasoning_mode: typeof req.body?.reasoning_mode === 'string' ? req.body.reasoning_mode : undefined,
         image_b64: imageB64 || undefined,
+        history,
+        user_id: String(session.sub || ''),
+        search_context:
+          typeof req.body?.search_context === 'string'
+            ? req.body.search_context.slice(0, 16_000)
+            : undefined,
       }),
     })
     const data = await upstream.json()
@@ -125,7 +138,12 @@ export default async function handler(req, res) {
       res.status(upstream.status).json({ error: data?.detail || 'upstream error' })
       return
     }
-    res.status(200).json({ text: data.response, session_id: data.session_id })
+    const text = typeof data.response === 'string' ? data.response.trim() : ''
+    if (!text) {
+      res.status(502).json({ error: 'Manager returned an empty response' })
+      return
+    }
+    res.status(200).json({ text, session_id: data.session_id })
   } catch (err) {
     res.status(502).json({ error: String(err?.message || err) })
   }

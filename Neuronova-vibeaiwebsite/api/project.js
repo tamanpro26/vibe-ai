@@ -1,4 +1,6 @@
-import { requireSession } from './_lib/clerkAuth.js'
+import { requireSessionContext } from './_lib/clerkAuth.js'
+import { boundedHistory } from './_lib/requestData.js'
+import { createHash } from 'node:crypto'
 
 /*
  * Proxy to the REAL autonomous coding agent (core/agent_loop.py via the
@@ -15,13 +17,9 @@ import { requireSession } from './_lib/clerkAuth.js'
  * endpoint's whole purpose is remote code execution on our server. An
  * unauthenticated public route in front of it would be an open RCE proxy.
  *
- * TIMEOUT, stated plainly: real agent runs take minutes -- the recorded eval
- * runs in evals/runs/ range from 2 to 11 iterations. maxDuration below asks
- * Vercel for the longest window it allows, but a long build CAN still outlive
- * it. The backend process keeps working when that happens (it is a persistent
- * Render process, not serverless); it is only this connection that dies, so the
- * user loses the result rather than the work. Making that never happen needs a
- * job id + polling on the backend, which is a bigger change than this route.
+ * Real agent runs take minutes, so POST starts a job on the persistent backend
+ * and returns quickly. Authenticated GET requests poll that job in short-lived
+ * serverless invocations; no single Vercel request has to survive the build.
  */
 
 export const config = { maxDuration: 300 }
@@ -41,9 +39,22 @@ const TASK_TYPES = new Set(['coding', 'reasoning', 'creative'])
 // doesn't look like a UUID is dropped rather than forwarded -- degrading to
 // the shared default workspace is safe, forwarding an unchecked path is not.
 const PROJECT_ID_RE = /^[a-zA-Z0-9-]{1,64}$/
+const JOB_ID_RE = /^[a-f0-9]{32}$/
+
+function browserResult(data) {
+  return {
+    summary: data.final_response,
+    files: data.files || [],
+    filesTruncated: !!data.files_truncated,
+    commandsRun: data.commands_run || [],
+    iterations: data.iterations ?? 0,
+    totalMs: data.total_ms ?? 0,
+  }
+}
 
 export default async function handler(req, res) {
-  if (req.method === 'GET') {
+  const jobId = typeof req.query?.jobId === 'string' ? req.query.jobId : ''
+  if (req.method === 'GET' && !jobId) {
     if (!VIBE_BACKEND_URL) {
       res.status(200).json({ ok: false, reason: 'VIBE_BACKEND_URL not configured' })
       return
@@ -59,7 +70,7 @@ export default async function handler(req, res) {
     }
     return
   }
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST' && !(req.method === 'GET' && jobId)) {
     res.status(405).json({ error: 'method not allowed' })
     return
   }
@@ -68,10 +79,46 @@ export default async function handler(req, res) {
     return
   }
 
+  let session
+  let userToken
   try {
-    await requireSession(req)
+    const context = await requireSessionContext(req)
+    session = context.payload
+    userToken = context.token
   } catch {
     res.status(401).json({ error: 'sign in required' })
+    return
+  }
+
+  if (req.method === 'GET') {
+    if (!JOB_ID_RE.test(jobId)) {
+      res.status(400).json({ error: 'invalid job id' })
+      return
+    }
+    try {
+      const upstream = await fetch(`${VIBE_BACKEND_URL}/api/agent/jobs/${jobId}`, {
+        headers: {
+          Authorization: `Bearer ${VIBE_API_TOKEN}`,
+          'X-Vibe-User-Token': userToken,
+        },
+      })
+      const data = await upstream.json()
+      if (!upstream.ok) {
+        res.status(upstream.status).json({ error: data?.detail || 'upstream error' })
+        return
+      }
+      if (data.status === 'failed') {
+        res.status(502).json({ error: data.error || 'agent build failed' })
+        return
+      }
+      if (data.status !== 'completed') {
+        res.status(200).json({ status: 'running', jobId })
+        return
+      }
+      res.status(200).json({ status: 'completed', ...browserResult(data.result || {}) })
+    } catch (err) {
+      res.status(502).json({ error: String(err?.message || err) })
+    }
     return
   }
 
@@ -87,32 +134,34 @@ export default async function handler(req, res) {
   const taskType = TASK_TYPES.has(req.body?.taskType) ? req.body.taskType : 'coding'
 
   const projectId = typeof req.body?.projectId === 'string' ? req.body.projectId : ''
-  const workspace = PROJECT_ID_RE.test(projectId) ? `projects/${projectId}` : undefined
+  const userKey = createHash('sha256').update(String(session.sub || 'unknown')).digest('hex').slice(0, 20)
+  const workspace = PROJECT_ID_RE.test(projectId) ? `projects/${userKey}/${projectId}` : undefined
+  const context = typeof req.body?.context === 'string' ? req.body.context.slice(0, 48_000) : ''
+  const history = boundedHistory(req.body?.history)
 
   try {
-    const upstream = await fetch(`${VIBE_BACKEND_URL}/api/agent`, {
+    const upstream = await fetch(`${VIBE_BACKEND_URL}/api/agent/jobs`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${VIBE_API_TOKEN}`,
         'Content-Type': 'application/json',
+        'X-Vibe-User-Token': userToken,
       },
-      body: JSON.stringify({ task, task_type: taskType, include_files: true, workspace }),
+      body: JSON.stringify({
+        task,
+        task_type: taskType,
+        include_files: true,
+        workspace,
+        context,
+        history,
+      }),
     })
     const data = await upstream.json()
     if (!upstream.ok) {
       res.status(upstream.status).json({ error: data?.detail || 'upstream error' })
       return
     }
-    res.status(200).json({
-      summary: data.final_response,
-      files: data.files || [],
-      filesTruncated: !!data.files_truncated,
-      filesCreated: data.files_created || [],
-      filesEdited: data.files_edited || [],
-      commandsRun: data.commands_run || [],
-      iterations: data.iterations ?? 0,
-      totalMs: data.total_ms ?? 0,
-    })
+    res.status(202).json({ status: 'running', jobId: data.job_id })
   } catch (err) {
     res.status(502).json({ error: String(err?.message || err) })
   }

@@ -38,8 +38,20 @@ function getJwks() {
 }
 
 export async function requireSession(req) {
-  const auth = req.headers.authorization || ''
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null
+  const token = sessionToken(req)
   if (!token) throw new Error('missing session token')
-  await jwtVerify(token, getJwks(), { issuer: clerkIssuer(PUBLISHABLE_KEY) })
+  const { payload } = await jwtVerify(token, getJwks(), { issuer: clerkIssuer(PUBLISHABLE_KEY) })
+  return payload
+}
+
+export function sessionToken(req) {
+  const auth = req.headers.authorization || ''
+  return auth.startsWith('Bearer ') ? auth.slice(7) : null
+}
+
+export async function requireSessionContext(req) {
+  const token = sessionToken(req)
+  if (!token) throw new Error('missing session token')
+  const payload = await requireSession(req)
+  return { payload, token }
 }
