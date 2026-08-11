@@ -9,6 +9,10 @@ test.describe('@capability release controls', () => {
     expect(csp).toContain("frame-ancestors 'none'")
     expect(csp).toContain("object-src 'none'")
     expect(csp).toContain('https://awaited-pipefish-42.accounts.dev')
+    const scriptSources = csp.match(/script-src ([^;]+)/)?.[1] || ''
+    const connectSources = csp.match(/connect-src ([^;]+)/)?.[1] || ''
+    expect(scriptSources).toContain('https://*.clerk.accounts.dev')
+    expect(connectSources).toContain('https://*.clerk.accounts.dev')
   })
 
   test('tablet route keeps the Capability Hub primary action reachable', async ({ page }) => {
