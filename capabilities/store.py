@@ -19,8 +19,10 @@ from capabilities.models import (
     CapabilityAuthorDraft,
     CapabilityCredentialRecord,
     CapabilityInstallation,
+    CapabilityImportCandidate,
     CapabilityOwnedScope,
     CapabilityOAuthState,
+    CapabilityReviewEvidence,
     CapabilityRoleAssignment,
     CapabilityScopeOverride,
     CapabilitySystemState,
@@ -331,6 +333,42 @@ class CapabilityStore:
             )
             return assignment is not None
 
+    async def grant_role(self, admin_id: str, user_id: str, role: str) -> None:
+        if role not in {"admin", "reviewer"}:
+            raise ValueError("unsupported capability role")
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, admin_id, "admin")
+            assignment = await session.scalar(
+                select(CapabilityRoleAssignment).where(
+                    CapabilityRoleAssignment.user_id == user_id,
+                    CapabilityRoleAssignment.role == role,
+                )
+            )
+            if assignment:
+                assignment.revoked_at = None
+                assignment.granted_by = admin_id
+                assignment.granted_at = datetime.now(timezone.utc)
+            else:
+                session.add(
+                    CapabilityRoleAssignment(
+                        user_id=user_id, role=role, granted_by=admin_id
+                    )
+                )
+
+    async def revoke_role(self, admin_id: str, user_id: str, role: str) -> None:
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, admin_id, "admin")
+            assignment = await session.scalar(
+                select(CapabilityRoleAssignment).where(
+                    CapabilityRoleAssignment.user_id == user_id,
+                    CapabilityRoleAssignment.role == role,
+                    CapabilityRoleAssignment.revoked_at.is_(None),
+                )
+            )
+            if assignment is None:
+                raise LookupError("active role assignment not found")
+            assignment.revoked_at = datetime.now(timezone.utc)
+
     async def list_resolvable_versions(self, owner_id: str) -> list[CapabilityVersionRecord]:
         async with self._sessions() as session:
             values = await session.scalars(
@@ -366,6 +404,183 @@ class CapabilityStore:
                 .limit(limit)
             )
             return list(values)
+
+    async def create_import_candidate(
+        self,
+        *,
+        candidate_id: str,
+        owner_id: str,
+        provider: str,
+        repository: str,
+        commit_sha: str,
+        source_digest: str,
+        evidence_digest: str,
+        adapter_version: str,
+        manifest: dict[str, Any],
+        compatibility_report: dict[str, Any],
+        evidence: dict[str, Any],
+    ) -> CapabilityImportCandidate:
+        async with self._sessions.begin() as session:
+            existing = await session.scalar(
+                select(CapabilityImportCandidate).where(
+                    CapabilityImportCandidate.owner_id == owner_id,
+                    CapabilityImportCandidate.repository == repository,
+                    CapabilityImportCandidate.commit_sha == commit_sha,
+                    CapabilityImportCandidate.source_digest == source_digest,
+                )
+            )
+            if existing:
+                return existing
+            candidate = CapabilityImportCandidate(
+                id=candidate_id,
+                owner_id=owner_id,
+                provider=provider,
+                repository=repository,
+                commit_sha=commit_sha,
+                source_digest=source_digest,
+                evidence_digest=evidence_digest,
+                adapter_version=adapter_version,
+                manifest=manifest,
+                compatibility_report=compatibility_report,
+                evidence=evidence,
+                state=ReviewState.AWAITING_REVIEW,
+            )
+            session.add(candidate)
+        return candidate
+
+    async def get_import_candidate(self, candidate_id: str) -> CapabilityImportCandidate | None:
+        async with self._sessions() as session:
+            return await session.get(CapabilityImportCandidate, candidate_id)
+
+    async def approve_import_candidate(
+        self,
+        reviewer_id: str,
+        candidate_id: str,
+        expected_source_digest: str,
+        expected_evidence_digest: str,
+    ) -> CapabilityVersionRecord:
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, reviewer_id, "reviewer")
+            candidate = await session.get(CapabilityImportCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("import candidate not found")
+            if candidate.state is not ReviewState.AWAITING_REVIEW:
+                if candidate.state is ReviewState.REVIEWED and candidate.version_id:
+                    version = await session.get(CapabilityVersionRecord, candidate.version_id)
+                    if version:
+                        return version
+                raise ValueError("candidate is not awaiting review")
+            if (
+                candidate.source_digest != expected_source_digest
+                or candidate.evidence_digest != expected_evidence_digest
+            ):
+                raise ValueError("review digest does not match immutable evidence")
+            manifest_data = {**candidate.manifest, "trust": "vibeai_reviewed"}
+            manifest = CapabilityManifest.model_validate(manifest_data)
+            source_manifest = json.dumps(
+                candidate.manifest, sort_keys=True, separators=(",", ":")
+            ).encode()
+            version = await session.scalar(
+                select(CapabilityVersionRecord).where(
+                    CapabilityVersionRecord.owner_id == "vibeai",
+                    CapabilityVersionRecord.capability_id == manifest.capability_id,
+                    CapabilityVersionRecord.version == manifest.version,
+                    CapabilityVersionRecord.content_digest == manifest.content_digest,
+                    CapabilityVersionRecord.source_digest == candidate.source_digest,
+                )
+            )
+            if version is None:
+                version = CapabilityVersionRecord(
+                    owner_id="vibeai",
+                    capability_id=manifest.capability_id,
+                    version=manifest.version,
+                    kind=manifest.kind.value,
+                    trust=manifest.trust.value,
+                    review_state=ReviewState.REVIEWED,
+                    content_digest=manifest.content_digest,
+                    manifest=manifest.model_dump(mode="json"),
+                    source_manifest=source_manifest,
+                    source_digest=candidate.source_digest,
+                    source_provider=candidate.provider,
+                    source_revision=candidate.commit_sha,
+                    adapter_version=candidate.adapter_version,
+                    compatibility_report=candidate.compatibility_report,
+                )
+                session.add(version)
+                await session.flush()
+                session.add(
+                    CapabilityReviewEvidence(
+                        capability_version_id=version.id,
+                        evidence_digest=candidate.evidence_digest,
+                        evidence=candidate.evidence,
+                        reviewer_id=reviewer_id,
+                        decision="approved",
+                    )
+                )
+            candidate.state = ReviewState.REVIEWED
+            candidate.version_id = version.id
+            candidate.reviewer_id = reviewer_id
+            candidate.decided_at = datetime.now(timezone.utc)
+        return version
+
+    async def revoke_version(self, version_id: str, reviewer_id: str, reason: str) -> None:
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, reviewer_id, "reviewer")
+            version = await session.get(CapabilityVersionRecord, version_id)
+            if version is None:
+                raise LookupError("capability version not found")
+            version.review_state = ReviewState.REVOKED
+            version.revoked_at = datetime.now(timezone.utc)
+            candidate = await session.scalar(
+                select(CapabilityImportCandidate).where(
+                    CapabilityImportCandidate.version_id == version_id
+                )
+            )
+            if candidate:
+                candidate.state = ReviewState.REVOKED
+                candidate.reviewer_id = reviewer_id
+                candidate.decision_reason = reason[:1000]
+                candidate.decided_at = datetime.now(timezone.utc)
+
+    async def reject_import_candidate(
+        self, candidate_id: str, reviewer_id: str, reason: str
+    ) -> None:
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, reviewer_id, "reviewer")
+            candidate = await session.get(CapabilityImportCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("import candidate not found")
+            if candidate.state is not ReviewState.AWAITING_REVIEW:
+                raise ValueError("candidate is not awaiting review")
+            candidate.state = ReviewState.REJECTED
+            candidate.reviewer_id = reviewer_id
+            candidate.decision_reason = reason[:1000]
+            candidate.decided_at = datetime.now(timezone.utc)
+
+    async def supersede_version(
+        self, previous_version_id: str, replacement_version_id: str, reviewer_id: str
+    ) -> None:
+        async with self._sessions.begin() as session:
+            await _require_active_role(session, reviewer_id, "reviewer")
+            previous = await session.get(CapabilityVersionRecord, previous_version_id)
+            replacement = await session.get(CapabilityVersionRecord, replacement_version_id)
+            if (
+                previous is None
+                or replacement is None
+                or replacement.review_state is not ReviewState.REVIEWED
+                or previous.capability_id != replacement.capability_id
+            ):
+                raise ValueError("supersession requires reviewed versions of the same capability")
+            previous.review_state = ReviewState.SUPERSEDED
+            previous.archived_at = datetime.now(timezone.utc)
+            candidate = await session.scalar(
+                select(CapabilityImportCandidate).where(
+                    CapabilityImportCandidate.version_id == previous_version_id
+                )
+            )
+            if candidate:
+                candidate.state = ReviewState.SUPERSEDED
+                candidate.reviewer_id = reviewer_id
 
     async def append_audit(
         self, owner_id: str, event_type: str, subject_id: str, payload: dict[str, Any]
@@ -558,3 +773,15 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+async def _require_active_role(session, user_id: str, role: str) -> None:
+    assignment = await session.scalar(
+        select(CapabilityRoleAssignment.id).where(
+            CapabilityRoleAssignment.user_id == user_id,
+            CapabilityRoleAssignment.role == role,
+            CapabilityRoleAssignment.revoked_at.is_(None),
+        )
+    )
+    if assignment is None:
+        raise PermissionError(f"active {role} role required")

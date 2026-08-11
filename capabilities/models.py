@@ -89,7 +89,7 @@ class CapabilityVersionRecord(Base):
     __tablename__ = "capability_versions"
     __table_args__ = (
         UniqueConstraint(
-            "owner_id", "capability_id", "version", "content_digest",
+            "owner_id", "capability_id", "version", "content_digest", "source_digest",
             name="uq_capability_version_digest",
         ),
         Index("ix_capability_versions_resolvable", "owner_id", "archived_at", "revoked_at"),
@@ -251,6 +251,39 @@ class CapabilityReviewEvidence(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+class CapabilityImportCandidate(Base):
+    __tablename__ = "capability_import_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "repository", "commit_sha", "source_digest",
+            name="uq_capability_import_candidate",
+        ),
+        Index("ix_capability_import_state", "state", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    repository: Mapped[str] = mapped_column(String(255), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    evidence_digest: Mapped[str] = mapped_column(String(80), nullable=False)
+    adapter_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    compatibility_report: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    state: Mapped[ReviewState] = mapped_column(
+        SAEnum(ReviewState, native_enum=False, values_callable=lambda cls: [item.value for item in cls]),
+        default=ReviewState.AWAITING_REVIEW,
+        nullable=False,
+    )
+    version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reviewer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CapabilityServiceConnection(Base):
     __tablename__ = "capability_service_connections"
     __table_args__ = (
@@ -333,6 +366,7 @@ __all__ = [
     "CapabilityCredentialRecord",
     "CapabilityExecutionLease",
     "CapabilityInstallation",
+    "CapabilityImportCandidate",
     "CapabilityOwnedScope",
     "CapabilityOAuthState",
     "CapabilityRoleAssignment",

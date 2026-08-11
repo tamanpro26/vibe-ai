@@ -21,6 +21,7 @@ alembic>=1.14.0
 asyncpg>=0.30.0
 cryptography>=44.0.0
 PyJWT[crypto]>=2.10.0
+PyYAML>=6.0.2
 
 # ── Web Push (fire-alert broadcast) ───────────────────────
 pywebpush>=2.0.0

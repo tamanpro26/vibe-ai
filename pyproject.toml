@@ -22,6 +22,7 @@ dependencies = [
     "asyncpg>=0.30,<1",
     "cryptography>=44,<50",
     "PyJWT[crypto]>=2.10,<3",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from capabilities.manifests import CapabilityManifest, validate_package
+from capabilities.manifests import CapabilityKind, CapabilityManifest, TrustState, validate_package
 from capabilities.models import CapabilityAuthorDraft, CapabilityVersionRecord
 from capabilities.store import CapabilityStore
 
@@ -18,8 +18,15 @@ class CapabilityRegistry:
     async def create_draft(
         self, owner_id: str, manifest: dict[str, Any]
     ) -> CapabilityAuthorDraft:
-        validate_package(manifest)
-        return await self.store.create_draft(owner_id, manifest)
+        parsed = validate_package(manifest).manifest
+        if owner_id != "vibeai":
+            if parsed.kind is not CapabilityKind.INSTRUCTION_SKILL:
+                raise ValueError("user-authored capabilities must be instruction skills")
+            if parsed.trust is not TrustState.USER_IMPORTED:
+                raise ValueError("user-authored capabilities use User Imported trust")
+            if parsed.permissions or parsed.services or parsed.dependencies:
+                raise ValueError("user-authored instruction skills cannot grant permissions or services")
+        return await self.store.create_draft(owner_id, parsed.model_dump(mode="json"))
 
     def preview(self, manifest: dict[str, Any]) -> CapabilityManifest:
         return validate_package(manifest).manifest

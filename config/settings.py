@@ -103,6 +103,7 @@ class Settings(BaseSettings):
         description="JSON map of versioned urlsafe-base64 AES-256 credential master keys",
     )
     capability_credential_active_key: str = "v1"
+    capability_quarantine_path: str = "./logs/capability-quarantine"
     clerk_issuer: str = Field(default="", description="Expected Clerk JWT issuer")
     clerk_jwks_url: str = Field(default="", description="Clerk JSON Web Key Set URL")
     clerk_audience: str = Field(default="", description="Expected Clerk session audience")

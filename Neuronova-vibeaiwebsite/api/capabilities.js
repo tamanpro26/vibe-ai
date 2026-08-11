@@ -31,6 +31,50 @@ export default async function handler(req, res) {
     case 'install':
       if (id) route = { method: 'POST', path: `/api/capabilities/versions/${id}/install` }
       break
+    case 'import_github':
+      route = {
+        method: 'POST',
+        path: '/api/capabilities/imports/github',
+        body: {
+          provider: req.body?.provider,
+          repository: req.body?.repository,
+          commit_sha: req.body?.commit_sha,
+        },
+      }
+      break
+    case 'get_import':
+      if (id) route = { method: 'GET', path: `/api/capabilities/imports/${id}` }
+      break
+    case 'approve_import':
+      if (id) {
+        route = {
+          method: 'POST',
+          path: `/api/capabilities/imports/${id}/approve`,
+          body: {
+            source_digest: req.body?.source_digest,
+            evidence_digest: req.body?.evidence_digest,
+          },
+        }
+      }
+      break
+    case 'reject_import':
+      if (id) {
+        route = {
+          method: 'POST',
+          path: `/api/capabilities/imports/${id}/reject`,
+          body: { reason: req.body?.reason },
+        }
+      }
+      break
+    case 'revoke_version':
+      if (id) {
+        route = {
+          method: 'POST',
+          path: `/api/capabilities/versions/${id}/revoke`,
+          body: { reason: req.body?.reason },
+        }
+      }
+      break
     case 'activation':
       route = {
         method: 'PATCH',

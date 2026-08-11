@@ -20,6 +20,21 @@ class Principal:
     session_id: str | None
     claims: dict[str, Any]
 
+    def has_recent_step_up(self, max_age_seconds: int = 600) -> bool:
+        reauthenticated_at = self.claims.get("reauthenticated_at")
+        if isinstance(reauthenticated_at, (int, float)):
+            import time
+
+            return 0 <= time.time() - float(reauthenticated_at) <= max_age_seconds
+        factor_age = self.claims.get("fva")
+        if isinstance(factor_age, list) and len(factor_age) > 1:
+            second_factor_minutes = factor_age[1]
+            return (
+                isinstance(second_factor_minutes, int)
+                and 0 <= second_factor_minutes <= max_age_seconds // 60
+            )
+        return False
+
 
 class IdentityVerifier:
     """Validate Clerk JWTs independently from the browser/Vercel boundary."""

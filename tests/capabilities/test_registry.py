@@ -36,3 +36,22 @@ async def test_builtin_registry_seed_is_idempotent(tmp_path):
 
     assert [item.content_digest for item in first] == [item.content_digest for item in second]
     assert first[0].owner_id == "vibeai"
+
+
+@pytest.mark.asyncio
+async def test_user_draft_cannot_self_grant_trust_permissions_or_actions(tmp_path):
+    store = CapabilityStore(f"sqlite+aiosqlite:///{tmp_path / 'authority.db'}")
+    await store.init()
+    registry = CapabilityRegistry(store)
+
+    with pytest.raises(ValueError, match="User Imported"):
+        await registry.create_draft("user-1", native_manifest(trust="vibeai_reviewed"))
+    with pytest.raises(ValueError, match="instruction skills"):
+        await registry.create_draft(
+            "user-1",
+            native_manifest(
+                kind="approved_action",
+                instructions=None,
+                permissions=[{"name": "github.write", "purpose": "Write issues"}],
+            ),
+        )

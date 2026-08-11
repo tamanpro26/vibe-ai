@@ -19,7 +19,7 @@ def native_manifest(**overrides) -> dict:
         "permissions": [],
         "services": [],
         "dependencies": [],
-        "trust": "vibeai_builtin",
+        "trust": "user_imported",
         "risk": "low",
         "instructions": "Use primary sources and distinguish fact from inference.",
     }

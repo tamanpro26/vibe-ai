@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.identity import Principal, get_current_principal
+from capabilities.credentials import CredentialVault
 from capabilities.manifests import ActivationMode, CapabilityManifest, validate_package
 from capabilities.models import ScopeKind, ScopeState
 from capabilities.registry import CapabilityRegistry
+from capabilities.review import EncryptedQuarantine, PackageImporter, ReviewService
 from capabilities.store import CapabilityStore
 from core.state import get_capability_store as _get_capability_store
 
@@ -21,6 +25,27 @@ _SCOPE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 def get_capability_store() -> CapabilityStore:
     return _get_capability_store()
+
+
+def get_review_service(
+    store: CapabilityStore = Depends(get_capability_store),
+) -> ReviewService:
+    from config.settings import settings
+
+    try:
+        keys = json.loads(settings.capability_credential_keys)
+        vault = CredentialVault(
+            keys,
+            settings.capability_credential_active_key,
+            settings.deployment_environment,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise HTTPException(503, detail="Capability quarantine encryption is not configured") from exc
+    return ReviewService(
+        store,
+        PackageImporter(),
+        EncryptedQuarantine(Path(settings.capability_quarantine_path), vault),
+    )
 
 
 class DraftBody(BaseModel):
@@ -50,6 +75,25 @@ class ActivationBody(BaseModel):
     onboarding_accepted: bool = False
 
 
+class GitHubImportBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str = Field(pattern="^(claude|codex)$")
+    repository: str = Field(min_length=3, max_length=201)
+    commit_sha: str = Field(pattern="^[0-9a-f]{40}$")
+
+
+class ReviewDecisionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_digest: str = Field(pattern="^sha256:[0-9a-f]{64}$")
+    evidence_digest: str = Field(pattern="^sha256:[0-9a-f]{64}$")
+    reason: str = Field(default="", max_length=1000)
+
+
+class ReviewReasonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 @router.post("/validate")
 async def validate_manifest(
     body: DraftBody,
@@ -69,6 +113,94 @@ async def list_capabilities(
 ) -> dict[str, Any]:
     versions = await store.list_catalog(principal.subject, limit=limit, offset=offset)
     return {"items": [_version_response(item) for item in versions], "limit": limit, "offset": offset}
+
+
+@router.post("/imports/github", status_code=status.HTTP_202_ACCEPTED)
+async def import_github_capability(
+    body: GitHubImportBody,
+    principal: Principal = Depends(get_current_principal),
+    review: ReviewService = Depends(get_review_service),
+) -> dict[str, Any]:
+    try:
+        candidate = await review.submit_github_from_source(
+            principal.subject, body.provider, body.repository, body.commit_sha
+        )
+        return _candidate_response(candidate)
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+    except Exception as exc:
+        from httpx import HTTPError
+
+        if isinstance(exc, HTTPError):
+            raise HTTPException(502, detail="GitHub package could not be acquired") from exc
+        raise
+
+
+@router.get("/imports/{candidate_id}")
+async def get_import_candidate(
+    candidate_id: str,
+    principal: Principal = Depends(get_current_principal),
+    store: CapabilityStore = Depends(get_capability_store),
+) -> dict[str, Any]:
+    candidate = await store.get_import_candidate(candidate_id)
+    if candidate is None or (
+        candidate.owner_id != principal.subject
+        and not await store.has_role(principal.subject, "reviewer")
+    ):
+        raise HTTPException(404, detail="import candidate not found")
+    return _candidate_response(candidate)
+
+
+@router.post("/imports/{candidate_id}/approve")
+async def approve_import_candidate(
+    candidate_id: str,
+    body: ReviewDecisionBody,
+    principal: Principal = Depends(get_current_principal),
+    review: ReviewService = Depends(get_review_service),
+) -> dict[str, Any]:
+    if not principal.has_recent_step_up():
+        raise HTTPException(403, detail="Recent step-up authentication required")
+    try:
+        version = await review.approve(
+            principal.subject, candidate_id, body.source_digest, body.evidence_digest
+        )
+        return _version_response(version)
+    except PermissionError as exc:
+        raise HTTPException(403, detail="Reviewer role required") from exc
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+
+
+@router.post("/imports/{candidate_id}/reject")
+async def reject_import_candidate(
+    candidate_id: str,
+    body: ReviewReasonBody,
+    principal: Principal = Depends(get_current_principal),
+    review: ReviewService = Depends(get_review_service),
+) -> dict[str, bool]:
+    if not principal.has_recent_step_up():
+        raise HTTPException(403, detail="Recent step-up authentication required")
+    try:
+        await review.reject(principal.subject, candidate_id, body.reason)
+        return {"rejected": True}
+    except PermissionError as exc:
+        raise HTTPException(403, detail="Reviewer role required") from exc
+
+
+@router.post("/versions/{version_id}/revoke")
+async def revoke_reviewed_version(
+    version_id: str,
+    body: ReviewReasonBody,
+    principal: Principal = Depends(get_current_principal),
+    review: ReviewService = Depends(get_review_service),
+) -> dict[str, bool]:
+    if not principal.has_recent_step_up():
+        raise HTTPException(403, detail="Recent step-up authentication required")
+    try:
+        await review.revoke(principal.subject, version_id, body.reason)
+        return {"revoked": True}
+    except PermissionError as exc:
+        raise HTTPException(403, detail="Reviewer role required") from exc
 
 
 @router.post("/drafts", status_code=status.HTTP_201_CREATED)
@@ -265,4 +397,19 @@ def _version_response(version) -> dict[str, Any]:
         "review_state": version.review_state.value,
         "archived": version.archived_at is not None,
         "manifest": version.manifest,
+    }
+
+
+def _candidate_response(candidate) -> dict[str, Any]:
+    return {
+        "id": candidate.id,
+        "provider": candidate.provider,
+        "repository": candidate.repository,
+        "commit_sha": candidate.commit_sha,
+        "source_digest": candidate.source_digest,
+        "evidence_digest": candidate.evidence_digest,
+        "state": candidate.state.value,
+        "manifest": candidate.manifest,
+        "compatibility_report": candidate.compatibility_report,
+        "created_at": candidate.created_at.isoformat(),
     }
