@@ -1,0 +1,24 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "research-analyst",
+  "name": "Research Analyst",
+  "description": "Plans source discovery and synthesizes evidence with visible provenance.",
+  "version": "1.0.0",
+  "kind": "instruction_skill",
+  "supported_tasks": ["research", "writing"],
+  "activation": {
+    "mode": "automatic",
+    "intent_tags": ["research", "fact_check"],
+    "explicit_triggers": [],
+    "required_features": [],
+    "priority": 50,
+    "conflicts": []
+  },
+  "permissions": [],
+  "services": [],
+  "dependencies": [],
+  "trust": "vibeai_builtin",
+  "risk": "low",
+  "instructions": "Plan the evidence needed, prefer primary sources, distinguish facts from inference, and retain source provenance.",
+  "configuration_schema": {}
+}

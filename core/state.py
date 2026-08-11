@@ -163,3 +163,19 @@ def _now() -> str:
 
 # Singleton
 state = StateManager()
+
+
+def get_capability_store():
+    """Return the lazily-created Capability Hub store."""
+    from capabilities.store import CapabilityStore
+
+    global _capability_store
+    if _capability_store is None:
+        _capability_store = CapabilityStore(
+            settings.capability_database_url,
+            environment=settings.deployment_environment,
+        )
+    return _capability_store
+
+
+_capability_store = None

@@ -90,6 +90,15 @@ class Settings(BaseSettings):
 
     # ── Storage ───────────────────────────────────────────
     session_db_path: str = "./logs/sessions.db"
+    # Capability Hub uses a separate transactional store. Production must
+    # override this with an async PostgreSQL URL; SQLite is local/test only.
+    capability_database_url: str = "sqlite+aiosqlite:///./logs/capabilities.db"
+    deployment_environment: str = "local"
+    capability_credential_keys: str = Field(
+        default="",
+        description="JSON map of versioned urlsafe-base64 AES-256 credential master keys",
+    )
+    capability_credential_active_key: str = "v1"
 
     # ── API server ────────────────────────────────────────
     # SECURITY: localhost by default. The API executes shell commands via the
