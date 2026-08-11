@@ -30,6 +30,7 @@ import RegistryPanel from './RegistryPanel.jsx'
 import ListboxSelect from './ListboxSelect.jsx'
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
+import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
 
 /*
  * A project's workspace. Two views, one component:
@@ -613,6 +614,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
           ← All projects
         </a>
         <div className="chat-top-right">
+          <PendingActionInbox />
           <button
             type="button"
             className="proj-details-toggle"

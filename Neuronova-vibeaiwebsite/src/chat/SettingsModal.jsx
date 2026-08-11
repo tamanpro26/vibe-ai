@@ -9,11 +9,13 @@ import {
   loadSettings,
   saveSettings,
 } from './settings.js'
+import { capabilityApi } from './capabilities/capabilityApi.js'
 
 const PANELS = [
   { id: 'profile', label: 'Profile' },
   { id: 'personalization', label: 'Personalization' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'capabilities', label: 'Capabilities' },
 ]
 
 /* Wording taken from direction 2A's own Appearance panel. The previous copy
@@ -39,14 +41,30 @@ export default function SettingsModal({ open, onClose }) {
   const reduceMotion = useReducedMotion()
   const [panel, setPanel] = useState('profile')
   const [settings, setSettings] = useState(() => loadSettings(user?.id))
+  const [activation, setActivation] = useState('manual_only')
+  const [activationStatus, setActivationStatus] = useState('')
   const dialogRef = useRef(null)
 
   // Re-read whenever the modal is opened rather than only on mount: settings
   // can be changed elsewhere (or the account switched) while this component
   // stays mounted, and reopening should never show stale values.
   useEffect(() => {
-    if (open) setSettings(loadSettings(user?.id))
+    if (open) {
+      setSettings(loadSettings(user?.id))
+      capabilityApi.list().then((value) => setActivation(value.activation_mode || 'manual_only')).catch(() => {})
+    }
   }, [open, user?.id])
+
+  const updateActivation = async (mode) => {
+    setActivation(mode)
+    setActivationStatus('Saving…')
+    try {
+      await capabilityApi.setActivation(mode)
+      setActivationStatus('Saved')
+    } catch (error) {
+      setActivationStatus(error.message)
+    }
+  }
 
   // Persist and apply on every change. Appearance is applied live -- a theme
   // switch you have to confirm before seeing is a much worse way to choose a
@@ -269,6 +287,39 @@ export default function SettingsModal({ open, onClose }) {
                   ))}
                 </div>
               </Field>
+            </section>
+          )}
+
+          {panel === 'capabilities' && (
+            <section>
+              <h2 className="set-h2">Capabilities</h2>
+              <p className="set-note">
+                Choose how installed instruction skills join your AI team. External actions always
+                require a separate, exact confirmation regardless of this setting.
+              </p>
+              <Field label="Activation mode">
+                <div className="set-themes">
+                  {[
+                    ['automatic', 'Automatic', 'Compose trusted installed skills when they clearly fit.'],
+                    ['manual_only', 'Manual only', 'Use a capability only when you explicitly select it.'],
+                    ['disabled', 'Disabled', 'Run the standard VibeAI team without capability suggestions.'],
+                  ].map(([id, name, description]) => (
+                    <button
+                      key={id}
+                      className={`set-theme${activation === id ? ' is-active' : ''}`}
+                      onClick={() => updateActivation(id)}
+                      aria-pressed={activation === id}
+                    >
+                      <span className="set-theme-name">{name}</span>
+                      <span className="set-theme-desc">{description}</span>
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <a className="set-capability-link" href="#/capabilities" onClick={onClose}>
+                Open Capability Hub →
+              </a>
+              {activationStatus && <p className="set-note" role="status">{activationStatus}</p>}
             </section>
           )}
             </div>

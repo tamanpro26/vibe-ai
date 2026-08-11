@@ -27,6 +27,7 @@ import { applyAppearance, composeSystemPrompt, loadSettings } from './settings.j
 import Composer from './Composer.jsx'
 import Message from './Message.jsx'
 import ListboxSelect from './ListboxSelect.jsx'
+import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -99,7 +100,7 @@ export default function ChatApp() {
   // reachable -- distinct from `team` (the routing selector above), which is
   // which team a task routes to.
   const probe = useEngineProbe()
-  const { live, manager, omni, edge } = probe
+  const { live, manager, omni, edge, ready } = probe
   const timerRef = useRef(null)
   const dragDepth = useRef(0)
   const scrollRef = useRef(null)
@@ -503,7 +504,9 @@ export default function ChatApp() {
    * is told rather than left to guess. */
   const addFiles = async (fileList) => {
     try {
-      const read = await readAttachments(fileList)
+      const room = Math.max(0, 20 - attachments.length)
+      if (!room) return
+      const read = await readAttachments(Array.from(fileList).slice(0, room))
       setAttachments((a) => [...a, ...read].slice(0, 20))
     } catch (err) {
       console.error('[chat] could not read attachments:', err)
@@ -605,8 +608,11 @@ export default function ChatApp() {
           </button>
           <span className="chat-title">{active?.title || 'New chat'}</span>
           <div className="chat-top-right">
+            <PendingActionInbox />
             <span className={`engine-badge${live || manager || omni || edge ? ' is-live' : ''}`}>
-              {live
+              {!ready
+                ? 'CHECKING ENGINES'
+                : live
                 ? 'LIVE ENGINE'
                 : manager
                   ? 'MANAGER TEAM'

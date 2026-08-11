@@ -83,6 +83,13 @@ export default function Sidebar({
             </svg>
             Projects
           </a>
+          <a className="newproject-btn" href="#/capabilities">
+            <svg viewBox="0 0 16 16" aria-hidden="true" className="newproject-icon">
+              <path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3M3.4 3.4l2.1 2.1M10.5 10.5l2.1 2.1M12.6 3.4l-2.1 2.1M5.5 10.5l-2.1 2.1" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+            Capabilities
+          </a>
           <input
             className="sidebar-search"
             type="search"

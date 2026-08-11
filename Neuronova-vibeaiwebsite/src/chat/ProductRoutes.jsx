@@ -9,6 +9,7 @@ import './chat.css'
 const ChatApp = lazy(() => import('./ChatApp.jsx'))
 const ProjectsListPage = lazy(() => import('./ProjectsListPage.jsx'))
 const ProjectWorkspace = lazy(() => import('./ProjectWorkspace.jsx'))
+const CapabilityHub = lazy(() => import('./capabilities/CapabilityHub.jsx'))
 
 // Shared by every product route: resolve the Clerk session once, show the
 // same authentication surface, and gate chat/projects identically.
@@ -30,9 +31,12 @@ export default function ProductRoutes({ hash }) {
   const projectMatch = !projectChatMatch && hash.match(/^#\/projects\/([^/]+)/)
   const isProjects = !projectChatMatch && !projectMatch && hash.startsWith('#/projects')
   const initialAuthMode = hash.startsWith('#/chat/signup') ? 'signup' : 'login'
+  const isCapabilities = hash.startsWith('#/capabilities')
 
   let page = <ChatApp />
-  if (projectChatMatch) {
+  if (isCapabilities) {
+    page = <CapabilityHub />
+  } else if (projectChatMatch) {
     page = <ProjectWorkspace projectId={projectChatMatch[1]} chatId={projectChatMatch[2]} />
   } else if (projectMatch) {
     page = <ProjectWorkspace projectId={projectMatch[1]} chatId={null} />

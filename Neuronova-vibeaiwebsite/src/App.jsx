@@ -153,7 +153,10 @@ function Landing() {
 
 export default function App() {
   const hash = useHashRoute()
-  const isProductRoute = hash.startsWith('#/chat') || hash.startsWith('#/projects')
+  const isProductRoute =
+    hash.startsWith('#/chat') ||
+    hash.startsWith('#/projects') ||
+    hash.startsWith('#/capabilities')
 
   if (!isProductRoute) return <Landing />
 
