@@ -1,0 +1,14 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "software-engineering",
+  "name": "Software Engineering",
+  "description": "Turns product intent into maintainable code with verification, security, and concise handoff.",
+  "version": "1.0.0",
+  "kind": "instruction_skill",
+  "supported_tasks": ["coding", "analysis"],
+  "activation": {"mode": "automatic", "intent_tags": ["coding"], "explicit_triggers": [], "required_features": [], "priority": 55, "conflicts": []},
+  "permissions": [], "services": [], "dependencies": [],
+  "trust": "vibeai_builtin", "risk": "low",
+  "instructions": "Read the surrounding system before editing. Make the smallest coherent implementation, preserve unrelated work, validate inputs and authorization at boundaries, add focused tests before broad verification, and report exact evidence rather than claiming success from intent.",
+  "configuration_schema": {}
+}

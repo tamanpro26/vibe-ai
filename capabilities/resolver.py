@@ -84,6 +84,7 @@ class ResolutionSnapshot(BaseModel):
     rejected: tuple[ResolutionDecision, ...]
     recommendations: tuple[ResolutionDecision, ...]
     dependency_graph: dict[str, tuple[str, ...]]
+    skipped_optional: dict[str, tuple[str, ...]] = Field(default_factory=dict)
 
 
 class CapabilityResolver:
@@ -165,12 +166,14 @@ class CapabilityResolver:
                 selected_candidates.append((candidate, reason, provenance, configuration))
 
         dependency_graph: dict[str, tuple[str, ...]] = {}
+        skipped_optional: dict[str, tuple[str, ...]] = {}
         expanded = list(selected_candidates)
         expanded_ids = {item.manifest.capability_id for item, *_ in expanded}
         for candidate, reason, provenance, configuration in list(selected_candidates):
             if candidate.manifest.kind is not CapabilityKind.BUNDLE:
                 continue
             member_ids: list[str] = []
+            skipped_ids: list[str] = []
             missing_required = None
             for dependency in candidate.manifest.dependencies:
                 member = by_identity.get((dependency.capability_id, dependency.version))
@@ -178,6 +181,7 @@ class CapabilityResolver:
                     if dependency.required:
                         missing_required = dependency.capability_id
                         break
+                    skipped_ids.append(dependency.capability_id)
                     continue
                 member_ids.append(dependency.capability_id)
                 if dependency.capability_id not in expanded_ids:
@@ -190,6 +194,8 @@ class CapabilityResolver:
                 rejected.append(_decision(candidate, f"missing_required:{missing_required}"))
                 continue
             dependency_graph[candidate.manifest.capability_id] = tuple(member_ids)
+            if skipped_ids:
+                skipped_optional[candidate.manifest.capability_id] = tuple(skipped_ids)
 
         selected = tuple(
             SelectedCapability(
@@ -213,6 +219,7 @@ class CapabilityResolver:
             "rejected": [item.model_dump(mode="json") for item in rejected],
             "recommendations": [item.model_dump(mode="json") for item in recommendations],
             "dependency_graph": dependency_graph,
+            "skipped_optional": skipped_optional,
         }
         digest = hashlib.sha256(
             json.dumps(snapshot_data, sort_keys=True, separators=(",", ":")).encode()

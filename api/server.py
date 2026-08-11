@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from api.identity import Principal, get_current_principal, get_optional_principal
 from capabilities.models import ScopeKind
+from capabilities.registry import CapabilityRegistry
 from config.settings import settings
 from core.bus import bus
 from core.state import get_capability_store, state
@@ -109,6 +110,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("VibeAI v2 starting...")
     await state.init()
     await get_capability_store().init()
+    await CapabilityRegistry(get_capability_store()).seed_builtins()
     admin_ids = [item.strip() for item in settings.capability_bootstrap_admin_ids.split(",") if item.strip()]
     reviewer_ids = [item.strip() for item in settings.capability_bootstrap_reviewer_ids.split(",") if item.strip()]
     if admin_ids or reviewer_ids:

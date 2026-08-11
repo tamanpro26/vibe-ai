@@ -1,0 +1,18 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "research-to-creation",
+  "name": "Research to Creation",
+  "description": "A complete workflow that discovers evidence, develops the story, and verifies one polished deliverable.",
+  "version": "1.0.0",
+  "kind": "bundle",
+  "supported_tasks": ["research", "writing", "creative"],
+  "activation": {"mode": "automatic", "intent_tags": ["research", "writing", "creative"], "explicit_triggers": [], "required_features": [], "priority": 70, "conflicts": []},
+  "permissions": [], "services": [],
+  "dependencies": [
+    {"capability_id": "research-analyst", "version": "1.0.0", "required": true},
+    {"capability_id": "content-studio", "version": "1.0.0", "required": true},
+    {"capability_id": "quality-verifier", "version": "1.0.0", "required": false}
+  ],
+  "trust": "vibeai_builtin", "risk": "low", "instructions": null,
+  "configuration_schema": {}
+}

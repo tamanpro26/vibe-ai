@@ -144,6 +144,21 @@ class CapabilityStore:
         async with self._sessions() as session:
             return await session.get(CapabilityVersionRecord, version_id)
 
+    async def find_version(
+        self, owner_id: str, capability_id: str, version: str
+    ) -> CapabilityVersionRecord | None:
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(CapabilityVersionRecord).where(
+                    CapabilityVersionRecord.owner_id.in_([owner_id, "vibeai"]),
+                    CapabilityVersionRecord.capability_id == capability_id,
+                    CapabilityVersionRecord.version == version,
+                    CapabilityVersionRecord.archived_at.is_(None),
+                    CapabilityVersionRecord.revoked_at.is_(None),
+                    CapabilityVersionRecord.review_state == ReviewState.REVIEWED,
+                )
+            )
+
     async def update_version_manifest(self, version_id: str, manifest: dict[str, Any]) -> None:
         del version_id, manifest
         raise ValueError("capability versions are immutable; create a new draft")
@@ -737,6 +752,16 @@ class CapabilityStore:
                     CapabilityInstallation.uninstalled_at.is_(None),
                 )
             )
+
+    async def list_active_installations(self, owner_id: str) -> list[CapabilityInstallation]:
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityInstallation).where(
+                    CapabilityInstallation.owner_id == owner_id,
+                    CapabilityInstallation.uninstalled_at.is_(None),
+                )
+            )
+            return list(values)
 
     async def create_action_request(
         self,

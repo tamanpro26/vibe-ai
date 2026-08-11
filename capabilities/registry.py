@@ -42,6 +42,31 @@ class CapabilityRegistry:
     async def archive(self, owner_id: str, version_id: str) -> None:
         await self.store.archive_version(owner_id, version_id)
 
+    async def install(self, owner_id: str, version_id: str):
+        """Install a bundle and its version-pinned members as one logical operation."""
+        root = await self.store.get_version(version_id)
+        if root is None or root.owner_id not in {owner_id, "vibeai"}:
+            raise PermissionError("capability version not available to owner")
+        visited: set[str] = set()
+
+        async def install_version(record):
+            manifest = CapabilityManifest.model_validate(record.manifest)
+            if manifest.capability_id in visited:
+                return await self.store.get_active_installation(owner_id, record.id)
+            visited.add(manifest.capability_id)
+            for dependency in manifest.dependencies:
+                member = await self.store.find_version(
+                    owner_id, dependency.capability_id, dependency.version
+                )
+                if member is None:
+                    if dependency.required:
+                        raise ValueError(f"required member unavailable: {dependency.capability_id}")
+                    continue
+                await install_version(member)
+            return await self.store.install(owner_id, record.id)
+
+        return await install_version(root)
+
     async def seed_builtins(self, builtins_root: Path | None = None) -> list[CapabilityVersionRecord]:
         root = builtins_root or Path(__file__).with_name("builtins")
         versions: list[CapabilityVersionRecord] = []

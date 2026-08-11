@@ -130,7 +130,16 @@ async def list_capabilities(
     store: CapabilityStore = Depends(get_capability_store),
 ) -> dict[str, Any]:
     versions = await store.list_catalog(principal.subject, limit=limit, offset=offset)
-    return {"items": [_version_response(item) for item in versions], "limit": limit, "offset": offset}
+    installations = {
+        item.capability_version_id
+        for item in await store.list_active_installations(principal.subject)
+    }
+    return {
+        "items": [_version_response(item, installed=item.id in installations) for item in versions],
+        "activation_mode": (await store.get_activation_mode(principal.subject)).value,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/imports/github", status_code=status.HTTP_202_ACCEPTED)
@@ -362,7 +371,7 @@ async def install_version(
     store: CapabilityStore = Depends(get_capability_store),
 ) -> dict[str, Any]:
     try:
-        installation = await store.install(principal.subject, version_id)
+        installation = await CapabilityRegistry(store).install(principal.subject, version_id)
         return {
             "id": installation.id,
             "capability_version_id": installation.capability_version_id,
@@ -459,13 +468,14 @@ def _manifest_response(manifest: CapabilityManifest) -> dict[str, Any]:
     return {**manifest.model_dump(mode="json"), "content_digest": manifest.content_digest}
 
 
-def _version_response(version) -> dict[str, Any]:
+def _version_response(version, *, installed: bool = False) -> dict[str, Any]:
     return {
         "id": version.id,
         "owner": "vibeai" if version.owner_id == "vibeai" else "current_user",
         "content_digest": version.content_digest,
         "review_state": version.review_state.value,
         "archived": version.archived_at is not None,
+        "installed": installed,
         "manifest": version.manifest,
     }
 

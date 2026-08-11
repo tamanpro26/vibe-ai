@@ -1,0 +1,14 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "quality-verifier",
+  "name": "Quality Verifier",
+  "description": "Checks claims, constraints, completeness, and failure modes before the team presents a final answer.",
+  "version": "1.0.0",
+  "kind": "instruction_skill",
+  "supported_tasks": ["analysis", "research", "coding", "writing"],
+  "activation": {"mode": "manual_only", "intent_tags": ["analysis"], "explicit_triggers": ["verify this"], "required_features": [], "priority": 35, "conflicts": []},
+  "permissions": [], "services": [], "dependencies": [],
+  "trust": "vibeai_builtin", "risk": "low",
+  "instructions": "Build a short acceptance checklist from the request, test each material claim or constraint against available evidence, label unknowns, and return concrete corrections. Never manufacture verification evidence.",
+  "configuration_schema": {}
+}

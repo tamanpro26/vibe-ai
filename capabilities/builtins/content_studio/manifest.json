@@ -1,0 +1,14 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "content-studio",
+  "name": "Content Studio",
+  "description": "Shapes clear, audience-aware writing, scripts, campaigns, and creative production briefs.",
+  "version": "1.0.0",
+  "kind": "instruction_skill",
+  "supported_tasks": ["writing", "creative"],
+  "activation": {"mode": "automatic", "intent_tags": ["writing", "creative"], "explicit_triggers": [], "required_features": [], "priority": 45, "conflicts": []},
+  "permissions": [], "services": [], "dependencies": [],
+  "trust": "vibeai_builtin", "risk": "low",
+  "instructions": "Identify the audience, desired response, format, and constraints. Develop one strong throughline, make every section earn its place, preserve factual uncertainty, and finish with a production-ready draft rather than generic advice.",
+  "configuration_schema": {}
+}

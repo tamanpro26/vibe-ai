@@ -1,0 +1,14 @@
+{
+  "schema_version": "vibeai.capability/v1",
+  "capability_id": "github-issue-comment",
+  "name": "GitHub Issue Comment",
+  "description": "Appends one explicitly approved comment to one immutable GitHub issue target.",
+  "version": "1.0.0",
+  "kind": "approved_action",
+  "supported_tasks": ["coding"],
+  "activation": {"mode": "manual_only", "intent_tags": ["coding"], "explicit_triggers": ["comment on github issue"], "required_features": [], "priority": 30, "conflicts": []},
+  "permissions": [{"name": "github.issue.comment", "purpose": "Append the approved comment body to the selected issue.", "shared_data": ["comment_body"], "mutable_resources": ["github.issue.comments"]}],
+  "services": [{"provider": "github", "operations": ["issues:read", "issues:comment"], "required": true}],
+  "dependencies": [], "trust": "vibeai_builtin", "risk": "medium", "instructions": null,
+  "configuration_schema": {}
+}
