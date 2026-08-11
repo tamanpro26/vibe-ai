@@ -34,7 +34,8 @@ from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from api.identity import get_current_principal
+from api.identity import Principal, get_current_principal, get_optional_principal
+from capabilities.models import ScopeKind
 from config.settings import settings
 from core.bus import bus
 from core.state import get_capability_store, state
@@ -199,11 +200,16 @@ class PromptRequest(BaseModel):
     history: list[dict[str, str]] = Field(default_factory=list)
     user_id: str | None = None
     search_context: str = ""
+    project_id: str | None = Field(default=None, max_length=128)
+    chat_id: str | None = Field(default=None, max_length=128)
+    capability_ids: list[str] = Field(default_factory=list, max_length=16)
 
 
 class PromptResponse(BaseModel):
     session_id: str
     response: str
+    status: Literal["completed", "awaiting_confirmation"] = "completed"
+    capability_snapshot: dict[str, Any] | None = None
 
 
 # Validated here, not in the manager -- a bad value from the caller (e.g. the
@@ -213,7 +219,10 @@ _FORCEABLE_TEAMS = {"brain", "code", "vision", "design"}
 
 
 @app.post("/api/prompt", response_model=PromptResponse, dependencies=[Depends(require_token)])
-async def handle_prompt(req: PromptRequest) -> PromptResponse:
+async def handle_prompt(
+    req: PromptRequest,
+    principal=Depends(get_optional_principal),
+) -> PromptResponse:
     if not req.prompt.strip():
         raise HTTPException(400, "Prompt cannot be empty")
     sid = req.session_id or f"s_{uuid.uuid4().hex[:8]}"
@@ -227,6 +236,42 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
         )
     if req.search_context:
         manager_args["supplied_search_context"] = req.search_context[:16_000]
+
+    capability_snapshot = None
+    verified_principal = principal if isinstance(principal, Principal) else None
+    if verified_principal:
+        from capabilities.resolver import ResolutionRequest, resolve_from_store
+
+        capability_store = get_capability_store()
+        manager_args["memory_namespace"] = (
+            "web:" + hashlib.sha256(verified_principal.subject.encode()).hexdigest()[:24]
+        )
+        if req.project_id and not await capability_store.owns_scope(
+            verified_principal.subject, ScopeKind.PROJECT, req.project_id
+        ):
+            raise HTTPException(404, "project scope not found")
+        if req.chat_id and not await capability_store.owns_scope(
+            verified_principal.subject, ScopeKind.CHAT, req.chat_id
+        ):
+            raise HTTPException(404, "chat scope not found")
+        activation_mode = await capability_store.get_activation_mode(verified_principal.subject)
+        accepted_suggestions, rejected_suggestions = await capability_store.get_suggestion_decisions(
+            verified_principal.subject, req.chat_id, req.session_id or ""
+        )
+        capability_snapshot = await resolve_from_store(
+            capability_store,
+            ResolutionRequest(
+                owner_id=verified_principal.subject,
+                prompt=req.prompt,
+                activation_mode=activation_mode,
+                project_id=req.project_id,
+                chat_id=req.chat_id,
+                explicit_capability_ids=req.capability_ids,
+                accepted_suggestion_ids=accepted_suggestions,
+                rejected_suggestion_ids=rejected_suggestions,
+            ),
+        )
+        manager_args["capability_snapshot"] = capability_snapshot
 
     # Media travels as `extra`, which is what _dispatch() checks to
     # force-activate the vision team (claude_manager.py). Without this the
@@ -269,7 +314,13 @@ async def handle_prompt(req: PromptRequest) -> PromptResponse:
         )
 
     response = await manager.handle_user_request(manager_prompt, **manager_args)
-    return PromptResponse(session_id=sid, response=response)
+    return PromptResponse(
+        session_id=sid,
+        response=response,
+        capability_snapshot=(
+            capability_snapshot.model_dump(mode="json") if capability_snapshot else None
+        ),
+    )
 
 
 # ── REST: school heat-monitor sensor alerts ───────────────────────────────────

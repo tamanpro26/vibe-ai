@@ -496,6 +496,7 @@ class AgentLoop:
         history:       list[dict] | None = None,
         callbacks:     AgentCallbacks | None = None,
         model_explicit: bool = True,
+        capability_context: str = "",
     ) -> AgentResult:
         from models.registry import registry
         from config.model_params import get_params
@@ -702,7 +703,7 @@ class AgentLoop:
 
         messages  = self._build_messages(
             task, system,
-            context + skills_ctx + workspace_ctx + vibemind_ctx + lessons_ctx,
+            context + skills_ctx + capability_context[:12_000] + workspace_ctx + vibemind_ctx + lessons_ctx,
             history,
         )
         # Reflexion state — capped at 2 cycles so this can never spin (agent-lessons: infinite loop)

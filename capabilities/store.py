@@ -24,8 +24,10 @@ from capabilities.models import (
     CapabilityOAuthState,
     CapabilityReviewEvidence,
     CapabilityRoleAssignment,
+    CapabilityResolutionRecord,
     CapabilityScopeOverride,
     CapabilitySystemState,
+    CapabilitySuggestionDecision,
     CapabilityVersionRecord,
     DraftState,
     ReviewState,
@@ -387,6 +389,143 @@ class CapabilityStore:
                 .order_by(CapabilityVersionRecord.capability_id, CapabilityVersionRecord.version)
             )
             return list(values)
+
+    async def list_resolution_candidates(self, owner_id: str):
+        from capabilities.resolver import CapabilityCandidate, ScopeInput
+
+        async with self._sessions() as session:
+            installations = list(
+                await session.scalars(
+                    select(CapabilityInstallation).where(
+                        CapabilityInstallation.owner_id == owner_id,
+                        CapabilityInstallation.uninstalled_at.is_(None),
+                    )
+                )
+            )
+            installation_by_version = {
+                item.capability_version_id: item for item in installations
+            }
+            visible_versions = list(
+                await session.scalars(
+                    select(CapabilityVersionRecord).where(
+                        CapabilityVersionRecord.owner_id.in_([owner_id, "vibeai"]),
+                        CapabilityVersionRecord.archived_at.is_(None),
+                    )
+                )
+            )
+            installation_ids = [item.id for item in installations]
+            overrides = []
+            if installation_ids:
+                overrides = list(
+                    await session.scalars(
+                        select(CapabilityScopeOverride).where(
+                            CapabilityScopeOverride.owner_id == owner_id,
+                            CapabilityScopeOverride.installation_id.in_(installation_ids),
+                        )
+                    )
+                )
+            scopes_by_installation: dict[str, list[ScopeInput]] = {}
+            for override in overrides:
+                scopes_by_installation.setdefault(override.installation_id, []).append(
+                    ScopeInput(
+                        scope_kind=override.scope_kind,
+                        scope_id=override.scope_id,
+                        state=override.state,
+                        configuration_patch=override.configuration_patch,
+                    )
+                )
+            candidates = []
+            for version in visible_versions:
+                installation = installation_by_version.get(version.id)
+                report = version.compatibility_report or {}
+                candidates.append(
+                    CapabilityCandidate(
+                        version_id=version.id,
+                        installation_id=installation.id if installation else None,
+                        manifest=CapabilityManifest.model_validate(version.manifest),
+                        installed=installation is not None,
+                        reviewed=version.review_state is ReviewState.REVIEWED,
+                        revoked=version.revoked_at is not None,
+                        compatible=report.get("resolver_eligible", True) is not False,
+                        scopes=scopes_by_installation.get(
+                            installation.id if installation else "", []
+                        ),
+                    )
+                )
+            return candidates
+
+    async def record_resolution(self, snapshot, project_id: str | None, chat_id: str | None) -> None:
+        async with self._sessions.begin() as session:
+            existing = await session.scalar(
+                select(CapabilityResolutionRecord.id).where(
+                    CapabilityResolutionRecord.owner_id == snapshot.owner_id,
+                    CapabilityResolutionRecord.snapshot_id == snapshot.snapshot_id,
+                )
+            )
+            if existing is None:
+                session.add(
+                    CapabilityResolutionRecord(
+                        owner_id=snapshot.owner_id,
+                        project_id=project_id,
+                        chat_id=chat_id,
+                        snapshot_id=snapshot.snapshot_id,
+                        snapshot=snapshot.model_dump(mode="json"),
+                    )
+                )
+
+    async def set_suggestion_decision(
+        self,
+        owner_id: str,
+        chat_id: str,
+        request_id: str,
+        capability_id: str,
+        decision: str,
+    ) -> None:
+        if decision not in {"accepted", "rejected"}:
+            raise ValueError("suggestion decision must be accepted or rejected")
+        if not await self.owns_scope(owner_id, ScopeKind.CHAT, chat_id):
+            raise PermissionError("chat scope not found for owner")
+        async with self._sessions.begin() as session:
+            existing = await session.scalar(
+                select(CapabilitySuggestionDecision).where(
+                    CapabilitySuggestionDecision.owner_id == owner_id,
+                    CapabilitySuggestionDecision.chat_id == chat_id,
+                    CapabilitySuggestionDecision.request_id == request_id,
+                    CapabilitySuggestionDecision.capability_id == capability_id,
+                )
+            )
+            if existing:
+                existing.decision = decision
+            else:
+                session.add(
+                    CapabilitySuggestionDecision(
+                        owner_id=owner_id,
+                        chat_id=chat_id,
+                        request_id=request_id,
+                        capability_id=capability_id,
+                        decision=decision,
+                    )
+                )
+
+    async def get_suggestion_decisions(
+        self, owner_id: str, chat_id: str | None, request_id: str
+    ) -> tuple[list[str], list[str]]:
+        if not chat_id or not request_id:
+            return [], []
+        async with self._sessions() as session:
+            values = list(
+                await session.scalars(
+                    select(CapabilitySuggestionDecision).where(
+                        CapabilitySuggestionDecision.owner_id == owner_id,
+                        CapabilitySuggestionDecision.chat_id == chat_id,
+                        CapabilitySuggestionDecision.request_id == request_id,
+                    )
+                )
+            )
+            return (
+                [item.capability_id for item in values if item.decision == "accepted"],
+                [item.capability_id for item in values if item.decision == "rejected"],
+            )
 
     async def list_catalog(
         self, owner_id: str, *, limit: int = 50, offset: int = 0

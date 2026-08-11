@@ -133,3 +133,8 @@ def select_skills(task: str, max_skills: int = 2) -> str:
         return ""
     rendered = "\n\n".join(_render(s) for s in matched[:max_skills])
     return f"\n\nRELEVANT SKILLS (hard-won lessons from this project's own live testing):\n{rendered}\n"
+
+
+def combine_skill_context(legacy_context: str, capability_context: str, max_chars: int = 16_000) -> str:
+    """Combine static project lessons with the separately policy-bounded Hub context."""
+    return (legacy_context + capability_context)[:max_chars]

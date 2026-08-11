@@ -82,6 +82,31 @@ export default async function handler(req, res) {
         body: { mode: req.body?.mode, onboarding_accepted: !!req.body?.onboarding_accepted },
       }
       break
+    case 'resolve_preview':
+      route = {
+        method: 'POST',
+        path: '/api/capabilities/resolve-preview',
+        body: {
+          prompt: req.body?.prompt,
+          project_id: req.body?.project_id,
+          chat_id: req.body?.chat_id,
+          request_id: req.body?.request_id,
+          capability_ids: req.body?.capability_ids || [],
+        },
+      }
+      break
+    case 'suggestion':
+      route = {
+        method: 'POST',
+        path: '/api/capabilities/suggestions',
+        body: {
+          chat_id: req.body?.chat_id,
+          request_id: req.body?.request_id,
+          capability_id: req.body?.capability_id,
+          decision: req.body?.decision,
+        },
+      }
+      break
     case 'register_scope': {
       const kind = req.body?.scope_kind
       const scopeId = req.body?.scope_id

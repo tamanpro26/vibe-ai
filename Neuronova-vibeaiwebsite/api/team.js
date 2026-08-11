@@ -131,6 +131,11 @@ export default async function handler(req, res) {
           typeof req.body?.search_context === 'string'
             ? req.body.search_context.slice(0, 16_000)
             : undefined,
+        project_id: typeof req.body?.project_id === 'string' ? req.body.project_id : undefined,
+        chat_id: typeof req.body?.chat_id === 'string' ? req.body.chat_id : undefined,
+        capability_ids: Array.isArray(req.body?.capability_ids)
+          ? req.body.capability_ids.slice(0, 16)
+          : [],
       }),
     })
     const data = await upstream.json()
@@ -143,7 +148,12 @@ export default async function handler(req, res) {
       res.status(502).json({ error: 'Manager returned an empty response' })
       return
     }
-    res.status(200).json({ text, session_id: data.session_id })
+    res.status(200).json({
+      text,
+      session_id: data.session_id,
+      status: data.status || 'completed',
+      capability_snapshot: data.capability_snapshot || null,
+    })
   } catch (err) {
     res.status(502).json({ error: String(err?.message || err) })
   }

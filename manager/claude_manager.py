@@ -184,12 +184,25 @@ class ClaudeManager:
         extra: dict[str, Any] | None = None,
         forced_team: str | None = None,
         reasoning_mode: str | None = None,
+        memory_namespace: str = "",
+        supplied_search_context: str = "",
+        capability_snapshot: Any | None = None,
     ) -> str:
         session_id = f"s_{uuid.uuid4().hex[:8]}"
         extra      = extra or {}
         reasoning_guidance = _REASONING_MODE_GUIDANCE.get(reasoning_mode or "")
         from core.collab_viz import emit as viz
         viz("stage", "User request received")
+        from capabilities.context import apply_capability_context
+
+        capability_prompt = apply_capability_context(user_prompt, capability_snapshot)
+        if capability_prompt != user_prompt:
+            selected_count = len(
+                capability_snapshot.selected
+                if hasattr(capability_snapshot, "selected")
+                else capability_snapshot.get("selected", [])
+            )
+            logger.info(f"[manager] capability snapshot attached ({selected_count} selected)")
 
         # Detect video/image paths mentioned in the prompt and inject into extra
         if not extra:
@@ -217,23 +230,23 @@ class ClaudeManager:
                 if is_creative_task(user_prompt):
                     logger.info("[manager] creative task detected — creative engine")
                     viz("stage", "Creative task detected — 5-step creative pipeline")
-                    return await creative_engine.synthesize(user_prompt)
+                    return await creative_engine.synthesize(capability_prompt)
             except Exception as exc:
                 logger.warning(f"[manager] creative engine failed ({str(exc)[:60]}) — pipeline")
 
         # 0b. Fast path — simple text-only requests skip the heavy pipeline
         if not extra and forced_team is None and reasoning_guidance is None:
             viz("stage", "Manager triaging request (fast path check)…")
-            fast = await self._try_fast_path(user_prompt)
+            fast = await self._try_fast_path(capability_prompt)
             if fast is not None:
                 viz("stage", "Simple request — answered directly (fast path)", status="done")
                 return fast
 
         # 1a. Prompt Enhancer — strengthen prompt before the Prompt Refiner sees it
-        pipeline_prompt = user_prompt
+        pipeline_prompt = capability_prompt
         if reasoning_guidance:
             pipeline_prompt = (
-                f"{user_prompt}\n\n"
+                f"{capability_prompt}\n\n"
                 f"[VibeAI reasoning level: {reasoning_mode}]\n{reasoning_guidance}"
             )
 
@@ -283,7 +296,7 @@ class ClaudeManager:
                     "[manager] media attached — keeping the original prompt "
                     "over the text-only refiner's rewrite"
                 )
-            task_json.refined_prompt = task_json.original_prompt
+            task_json.refined_prompt = capability_prompt
 
         await state.save_session(session_id, task_json)
         _active_teams = [t.upper() for t, c in task_json.active_teams.items()
@@ -292,10 +305,12 @@ class ClaudeManager:
             status="done")
 
         # 2. Memory retrieval (Upgrade 6)
-        memory_ctx = await self._retrieve_memory(task_json.refined_prompt)
+        memory_ctx = await self._retrieve_memory(
+            task_json.refined_prompt, workspace=memory_namespace
+        )
 
         # 3. Search context (Upgrade 1)
-        search_ctx = await self._fetch_search_context(task_json)
+        search_ctx = supplied_search_context or await self._fetch_search_context(task_json)
 
         # 4. Dispatch teams
         team_outputs = await self._dispatch(
@@ -322,7 +337,9 @@ class ClaudeManager:
             final = self._degrade_to_team_outputs(team_outputs)
 
         # 6. Store approved outputs
-        await self._store_memory(task_json, team_outputs, session_id)
+        await self._store_memory(
+            task_json, team_outputs, session_id, workspace=memory_namespace
+        )
         viz("stage", "Final answer ready", status="done")
 
         return final
@@ -379,17 +396,62 @@ class ClaudeManager:
             or quick.get("needs_design")
             or quick.get("task_type") in ("ui_design", "animation", "video_analysis")
         )
-        if quick.get("complexity") == "simple" and not _needs_full_pipeline:
+        # A pure coding/debugging task takes the direct path at ANY complexity,
+        # not just "simple". Measured 2026-08-08 on vibeloop's 10-task v4 train
+        # split (deterministic execution checks, no LLM judging):
+        #
+        #   full pipeline (enhancer -> refiner -> dispatch -> review)  0.70, ~20min
+        #   gpt_oss_120b_coder alone, this same _CODE_SYSTEM           1.00, 115s
+        #   gpt_oss_120b_coder alone, generic prompt                   1.00, 46-69s
+        #   llama33_70b_coder (the CHEAP tier) alone                   1.00, 73s
+        #
+        # Every task the pipeline lost, a single model solved — the three
+        # remaining losses were 180s timeouts with zero output, not wrong
+        # answers. Running it with VibeAI's own _CODE_SYSTEM rules out "the
+        # bare model just had a better prompt": the prompts are fine, the
+        # orchestration is what costs the score.
+        # These tasks classify complexity="moderate", so they missed the old
+        # gate by one word and paid the whole pipeline for a worse answer.
+        #
+        # Deliberately NOT extended to ui_design/animation/video_analysis
+        # (already excluded above) or "mixed" — multi-part work is the case
+        # orchestration is actually for, and this benchmark does not measure it.
+        _is_pure_code = quick.get("task_type") in ("vibe_coding", "debugging")
+
+        if not _needs_full_pipeline and (
+            quick.get("complexity") == "simple" or _is_pure_code
+        ):
             logger.info(
-                f"[manager] ⚡ fast path: {quick.get('quick_summary', user_prompt[:60])}"
+                f"[manager] ⚡ fast path{' (code)' if _is_pure_code else ''}: "
+                f"{quick.get('quick_summary', user_prompt[:60])}"
             )
             from models.registry import generate_resilient
+            if _is_pure_code:
+                from teams.code import _CODE_SYSTEM
+                fast_model, fast_system, fast_temp = (
+                    "gpt_oss_120b_coder", _CODE_SYSTEM, 0.2,
+                )
+            else:
+                fast_model, fast_system, fast_temp = (
+                    "qwen36_27b_verifier", _FAST_SYSTEM, 0.6,
+                )
             answer = await generate_resilient(
-                "qwen36_27b_verifier",   # GPT-OSS 120B on Groq — strong and ~1s
+                fast_model,   # qwen36_27b_verifier is qwen/qwen3.6-27b — a REASONING model
                 prompt=user_prompt,
-                system=_FAST_SYSTEM,
-                max_tokens=2000,
-                temperature=0.6,
+                system=fast_system,
+                # Hidden reasoning is billed against max_tokens, so this budget
+                # buys reasoning AND the visible answer. Measured live on one
+                # graded task (2026-08-08): at 2048, 7/7 calls returned
+                # finish_reason="length" at exactly 2048 completion tokens —
+                # every answer cut mid-sentence. At 4096, 0/3 truncated, but
+                # real usage was 2611–3982, so 4096 leaves only 3% headroom.
+                # 2000 was therefore truncating the fast path's answers as a
+                # matter of course; it surfaced downstream as SyntaxError on
+                # half-written code, not as an obvious generation failure.
+                # 5000 is the most the connector's own TPM formula allows here
+                # (6000 TPM − ~195 input − 800 margin = 5005).
+                max_tokens=5000,
+                temperature=fast_temp,
             )
 
             # The fast path skips team dispatch entirely, so code returned here
@@ -460,17 +522,18 @@ class ClaudeManager:
 
     # ── Memory helpers ────────────────────────────────────────────────────────
 
-    async def _retrieve_memory(self, query: str) -> str:
+    async def _retrieve_memory(self, query: str, workspace: str = "") -> str:
         if not self._memory_ready:
             return ""
         try:
             from tools.memory import memory
-            return await memory.retrieve_context(query, top_k=3)
+            return await memory.retrieve_context(query, top_k=3, workspace=workspace)
         except Exception:
             return ""
 
     async def _store_memory(
-        self, task_json: TaskJSON, outputs: dict[str, str], session_id: str
+        self, task_json: TaskJSON, outputs: dict[str, str], session_id: str,
+        workspace: str = "",
     ) -> None:
         if not self._memory_ready:
             return
@@ -483,6 +546,7 @@ class ClaudeManager:
                         team=team, output=output, quality_score=0.85,
                         task_id=task_json.task_id,
                         task_type=task_json.classification.primary_type.value,
+                        workspace=workspace,
                     )
         except Exception as exc:
             logger.warning(f"[manager] memory store failed: {exc}")

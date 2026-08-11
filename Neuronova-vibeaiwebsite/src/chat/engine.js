@@ -126,11 +126,14 @@ async function commonsImage(title) {
  * on a deployment where the search key simply is not set, which is a worse
  * outcome than the encyclopaedic-only answer we had before.
  */
-export async function webSearchSources(query) {
+export async function webSearchSources(query, token = '') {
   try {
     const res = await fetch('/api/research', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({ query }),
     })
     if (!res.ok) return []
@@ -179,7 +182,19 @@ export async function researchSources(query, limit = 4) {
   return settled.filter((x) => x.status === 'fulfilled' && x.value.extract).map((x) => x.value)
 }
 
-export async function respondResearch(prompt, history = [], mode = DEFAULT_MODE) {
+async function findResearchSources(prompt, token = '') {
+  const searched = await webSearchSources(prompt, token)
+  if (searched.length) return searched
+  return researchSources(researchQuery(prompt))
+}
+
+function researchContext(sources) {
+  return sources.map((s, i) => `[${i + 1}] ${s.title}\n${s.extract}`).join('\n\n')
+}
+
+export async function respondResearch(
+  prompt, history = [], mode = DEFAULT_MODE, { token = '', complete = null } = {},
+) {
   // Real web search first, Wikipedia only as the fallback. Order matters:
   // Exa can answer current/niche/non-encyclopaedic questions that Wikipedia
   // structurally cannot, and those are exactly the ones that used to fall
@@ -189,21 +204,17 @@ export async function respondResearch(prompt, history = [], mode = DEFAULT_MODE)
   // index, so it needs the bare subject (researchQuery strips the ask). A
   // real search engine does better with the FULL natural question, since the
   // extra words carry intent -- stripping them there would throw away signal.
-  let sources = await webSearchSources(prompt)
-  if (!sources.length) sources = await researchSources(researchQuery(prompt))
+  const sources = await findResearchSources(prompt, token)
   if (!sources.length) throw new Error('no sources found')
 
-  const context = sources
-    .map((s, i) => `[${i + 1}] ${s.title}\n${s.extract}`)
-    .join('\n\n')
+  const context = researchContext(sources)
 
   const cfg = modeConfig(mode)
   // The grounding rule is not decoration. Correct retrieved context alone does
   // NOT stop a model inventing specifics -- during this project's CLI work a
   // model produced a confident wrong figure plus a fabricated citation marker
   // from otherwise-correct snippets. State the constraint explicitly.
-  const { text, truncated } = await omniComplete(
-    [
+  const messages = [
       {
         role: 'system',
         content:
@@ -218,10 +229,18 @@ export async function respondResearch(prompt, history = [], mode = DEFAULT_MODE)
       },
       ...history.slice(-6).map((m) => ({ role: m.role, content: m.content })),
       { role: 'user', content: `SOURCES:\n${context}\n\n---\nQuestion: ${prompt}` },
-    ],
-    { model: cfg.omniModel, maxTokens: cfg.maxTokens },
-  )
-  return { text, project: null, image: null, sources, truncated }
+    ]
+
+  const result = complete
+    ? await complete(messages)
+    : await omniComplete(messages, { model: cfg.omniModel, maxTokens: cfg.maxTokens })
+  return {
+    text: result.text,
+    project: null,
+    image: null,
+    sources,
+    truncated: !!result.truncated,
+  }
 }
 
 /* ── OmniRoute: real answers, in the browser ───────────────────────────────
@@ -404,17 +423,30 @@ export async function checkEdge() {
   }
 }
 
+async function edgeComplete(messages, token, mode = DEFAULT_MODE, systemPrompt = '') {
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ mode, systemPrompt, messages }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data?.error || `edge proxy ${res.status}`)
+  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  if (!text) throw new Error('Edge proxy returned empty content')
+  return { text, truncated: !!data.truncated }
+}
+
 export async function respondEdge(prompt, history = [], token, mode = DEFAULT_MODE, systemPrompt = '') {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
   if (isResearchRequest(prompt)) {
     try {
-      // NOTE: respondResearch's grounding step calls omniComplete, which is
-      // OmniRoute-only (localhost). On the public deploy that fetch always
-      // fails, so this always falls through to the plain (ungrounded) reply
-      // below -- a real, separate gap in the research feature, not
-      // introduced by mode support. Left as-is here; fixing it means giving
-      // respondResearch an injected completion function per engine tier.
-      return await respondResearch(prompt, history, mode)
+      return await respondResearch(prompt, history, mode, {
+        token,
+        complete: (messages) => edgeComplete(messages, token, mode),
+      })
     } catch {
       /* fall through to the plain reply below */
     }
@@ -422,25 +454,17 @@ export async function respondEdge(prompt, history = [], token, mode = DEFAULT_MO
 
   const cfg = modeConfig(mode)
   const sys = cfg.hint ? `${OMNI_SYSTEM}\n\n${cfg.hint}` : OMNI_SYSTEM
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({
-      mode,
-      systemPrompt,
-      messages: [
-        { role: 'system', content: sys },
-        ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
-        { role: 'user', content: prompt },
-      ],
-    }),
-  })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data?.error || `edge proxy ${res.status}`)
-  return { text: data.text, project: null, image: null, truncated: !!data.truncated }
+  const result = await edgeComplete(
+    [
+      { role: 'system', content: sys },
+      ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user', content: prompt },
+    ],
+    token,
+    mode,
+    systemPrompt,
+  )
+  return { ...result, project: null, image: null }
 }
 
 /* ── Continuing a truncated reply ───────────────────────────────────────────
@@ -471,28 +495,28 @@ export async function continueOmni(history, partialText, mode = DEFAULT_MODE) {
 export async function continueEdge(history, partialText, token, mode = DEFAULT_MODE) {
   const cfg = modeConfig(mode)
   const sys = cfg.hint ? `${OMNI_SYSTEM}\n\n${cfg.hint}` : OMNI_SYSTEM
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({
-      mode,
-      messages: [
-        { role: 'system', content: sys },
-        ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
-        { role: 'assistant', content: partialText },
-        { role: 'user', content: CONTINUE_INSTRUCTION },
-      ],
-    }),
-  })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data?.error || `edge proxy ${res.status}`)
-  return { text: data.text, truncated: !!data.truncated }
+  return edgeComplete(
+    [
+      { role: 'system', content: sys },
+      ...history.slice(-8).map((m) => ({ role: m.role, content: m.content })),
+      { role: 'assistant', content: partialText },
+      { role: 'user', content: CONTINUE_INSTRUCTION },
+    ],
+    token,
+    mode,
+  )
 }
 
-export async function respondLive(prompt, sessionId, team = 'auto', mode = DEFAULT_MODE, imageB64 = '') {
+export async function respondLive(prompt, {
+  sessionId,
+  team = 'auto',
+  mode = DEFAULT_MODE,
+  imageB64 = '',
+  history = [],
+  projectId,
+  chatId,
+  capabilityIds = [],
+} = {}) {
   // Image requests are served browser-side even in LIVE mode: /api/prompt
   // returns prose, not pictures, so routing an image ask through it would
   // yield a description of an image rather than an image.
@@ -510,11 +534,22 @@ export async function respondLive(prompt, sessionId, team = 'auto', mode = DEFAU
       team,
       reasoning_mode: mode,
       image_b64: imageB64 || undefined,
+      history: history.slice(-8).map(({ role, content }) => ({ role, content })),
+      project_id: projectId,
+      chat_id: chatId,
+      capability_ids: capabilityIds,
     }),
   })
   if (!res.ok) throw new Error(`API returned ${res.status}`)
   const data = await res.json()
-  return { text: data.response, project: null }
+  const text = typeof data.response === 'string' ? data.response.trim() : ''
+  if (!text) throw new Error('Manager returned an empty response')
+  return {
+    text,
+    project: null,
+    provenance: 'VibeAI Council · multi-agent verified',
+    capabilitySnapshot: data.capability_snapshot || null,
+  }
 }
 
 /* ── Team proxy: the real Manager, reached from the public URL ─────────────
@@ -542,9 +577,19 @@ export async function checkTeam() {
   }
 }
 
-export async function respondTeam(
-  prompt, sessionId, token, systemPrompt = '', team = 'auto', mode = DEFAULT_MODE, imageB64 = '',
-) {
+export async function respondTeam(prompt, {
+  sessionId,
+  token,
+  systemPrompt = '',
+  team = 'auto',
+  mode = DEFAULT_MODE,
+  imageB64 = '',
+  history = [],
+  searchContext = '',
+  projectId,
+  chatId,
+  capabilityIds = [],
+} = {}) {
   if (isImageRequest(prompt)) return imageReply(prompt, '\n')
 
   const res = await fetch('/api/team', {
@@ -561,11 +606,23 @@ export async function respondTeam(
       reasoning_mode: mode,
       // The only route to the vision team from a browser. See api/team.js.
       image_b64: imageB64 || undefined,
+      history: history.slice(-8).map(({ role, content }) => ({ role, content })),
+      search_context: searchContext || undefined,
+      project_id: projectId,
+      chat_id: chatId,
+      capability_ids: capabilityIds,
     }),
   })
   const data = await res.json()
   if (!res.ok) throw new Error(data?.error || `team proxy ${res.status}`)
-  return { text: data.text, project: null }
+  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  if (!text) throw new Error('Manager returned an empty response')
+  return {
+    text,
+    project: null,
+    provenance: 'VibeAI Council · multi-agent verified',
+    capabilitySnapshot: data.capability_snapshot || null,
+  }
 }
 
 /* ── Attachments: read the actual bytes ────────────────────────────────────
@@ -573,29 +630,85 @@ export async function respondTeam(
  * ever reached a model. These read real content in the browser:
  *   image/*  -> base64, sent as image_b64 for the vision team
  *   text     -> inlined into the prompt as context
- *   video    -> flagged unsupported (see below), never silently ignored
+ *   video    -> four browser-sampled frames sent as one vision contact sheet
  *
- * Video is deliberately NOT base64'd into the prompt. The vision team wants
- * a server-side video_path or a pre-extracted .frames directory (it samples
- * frames), and real videos blow past Vercel's ~4.5MB body limit anyway.
- * Routing video properly means POSTing the file to the backend's /api/video,
- * which is a separate upload path -- until that exists, saying so beats
- * pretending.
+ * The original video bytes never cross Vercel's request-size boundary. A
+ * compact 2x2 contact sheet is extracted locally and travels through the
+ * existing image_b64 vision path instead.
  */
 const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024 // ~3.4MB base64, under the proxy cap
 const MAX_TEXT_BYTES = 128 * 1024
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024
 const TEXT_RE = /\.(txt|md|markdown|json|ya?ml|csv|tsv|log|ini|toml|cfg|conf|xml|html?|css|scss|jsx?|tsx?|mjs|cjs|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|bash|zsh|sql|env|gitignore|dockerfile)$/i
 
-export async function readAttachments(fileList) {
-  const out = []
-  for (const file of Array.from(fileList)) {
+function mediaEvent(target, event, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => done(new Error(`${event} timed out`)), timeoutMs)
+    const done = (value) => {
+      clearTimeout(timer)
+      target.removeEventListener(event, onEvent)
+      target.removeEventListener('error', onError)
+      if (value instanceof Error) reject(value)
+      else resolve(value)
+    }
+    const onEvent = () => done()
+    const onError = () => done(new Error('media decode failed'))
+    target.addEventListener(event, onEvent, { once: true })
+    target.addEventListener('error', onError, { once: true })
+  })
+}
+
+async function videoContactSheet(file) {
+  if (typeof document === 'undefined' || typeof URL?.createObjectURL !== 'function') {
+    throw new Error('video sampling is unavailable')
+  }
+  const video = document.createElement('video')
+  const url = URL.createObjectURL(file)
+  video.preload = 'auto'
+  video.muted = true
+  video.playsInline = true
+  video.src = url
+  try {
+    await mediaEvent(video, 'loadeddata')
+    const sourceWidth = video.videoWidth || 640
+    const sourceHeight = video.videoHeight || 360
+    const frameWidth = 480
+    const frameHeight = Math.max(180, Math.round(frameWidth * sourceHeight / sourceWidth))
+    const canvas = document.createElement('canvas')
+    canvas.width = frameWidth * 2
+    canvas.height = frameHeight * 2
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('canvas unavailable')
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 1
+    const times = [0.05, 0.33, 0.66, 0.95].map((ratio) => Math.min(duration * ratio, Math.max(0, duration - 0.05)))
+    for (let index = 0; index < times.length; index += 1) {
+      if (Math.abs(video.currentTime - times[index]) > 0.01) {
+        video.currentTime = times[index]
+        await mediaEvent(video, 'seeked')
+      }
+      ctx.drawImage(
+        video,
+        (index % 2) * frameWidth,
+        Math.floor(index / 2) * frameHeight,
+        frameWidth,
+        frameHeight,
+      )
+    }
+    return canvas.toDataURL('image/jpeg', 0.72).split(',')[1] || ''
+  } finally {
+    video.removeAttribute('src')
+    video.load()
+    URL.revokeObjectURL(url)
+  }
+}
+
+async function readOneAttachment(file) {
     const name = file.webkitRelativePath || file.name
     const base = { name, size: file.size, type: file.type || '' }
 
     if (file.type.startsWith('image/')) {
       if (file.size > MAX_IMAGE_BYTES) {
-        out.push({ ...base, kind: 'image', error: `too large (max ${MAX_IMAGE_BYTES / 1024 / 1024}MB)` })
-        continue
+        return { ...base, kind: 'image', error: `too large (max ${MAX_IMAGE_BYTES / 1024 / 1024}MB)` }
       }
       try {
         // Strip the "data:image/png;base64," prefix -- the backend and the
@@ -606,49 +719,77 @@ export async function readAttachments(fileList) {
           fr.onerror = () => reject(fr.error)
           fr.readAsDataURL(file)
         })
-        out.push({ ...base, kind: 'image', b64: String(dataUrl).split(',')[1] || '' })
+        return { ...base, kind: 'image', b64: String(dataUrl).split(',')[1] || '' }
       } catch {
-        out.push({ ...base, kind: 'image', error: 'unreadable' })
+        return { ...base, kind: 'image', error: 'unreadable' }
       }
-      continue
     }
 
     if (file.type.startsWith('video/')) {
-      out.push({ ...base, kind: 'video' })
-      continue
+      if (file.size > MAX_VIDEO_BYTES) {
+        return { ...base, kind: 'video', error: 'too large to sample in the browser (max 100MB)' }
+      }
+      try {
+        return { ...base, kind: 'video', frameB64: await videoContactSheet(file) }
+      } catch {
+        return { ...base, kind: 'video', error: 'could not sample frames' }
+      }
     }
 
     if (TEXT_RE.test(name) || file.type.startsWith('text/')) {
       if (file.size > MAX_TEXT_BYTES) {
-        out.push({ ...base, kind: 'text', error: `too large (max ${MAX_TEXT_BYTES / 1024}KB)` })
-        continue
+        return { ...base, kind: 'text', error: `too large (max ${MAX_TEXT_BYTES / 1024}KB)` }
       }
       try {
-        out.push({ ...base, kind: 'text', content: await file.text() })
+        return { ...base, kind: 'text', content: await file.text() }
       } catch {
-        out.push({ ...base, kind: 'text', error: 'unreadable' })
+        return { ...base, kind: 'text', error: 'unreadable' }
       }
-      continue
     }
 
-    out.push({ ...base, kind: 'other' })
+    return { ...base, kind: 'other' }
+}
+
+export async function readAttachments(fileList) {
+  const files = Array.from(fileList)
+  const results = new Array(files.length)
+  await Promise.all(files.map(async (file, index) => {
+    if (!file.type.startsWith('video/')) results[index] = await readOneAttachment(file)
+  }))
+  for (let index = 0; index < files.length; index += 1) {
+    if (files[index].type.startsWith('video/')) {
+      results[index] = await readOneAttachment(files[index])
+    }
   }
-  return out
+  return results
 }
 
 /**
  * Strip an attachment down to what's safe to KEEP in chat history.
  *
- * The payloads are for one request, not for storage. A single 2.5MB image
+ * Visual payloads are for one request, not for storage. A single 2.5MB image
  * becomes ~3.4MB of base64, and chat history lives in localStorage, which
  * gives roughly 5MB for the whole origin -- persisting one would evict the
  * user's entire history (and every project) to save a picture they can
- * already see. Keeps only what the message bubble renders.
+ * already see. Small text payloads are retained, capped, so regeneration can
+ * faithfully re-send a document instead of silently dropping its contents.
  */
 export const stripAttachmentPayloads = (attachments = []) =>
-  (attachments || []).map(({ name, size, kind, type, error }) => ({
-    name, size, kind, type, error,
+  (attachments || []).map(({ name, size, kind, type, error, content }) => ({
+    name,
+    size,
+    kind,
+    type,
+    error,
+    ...(kind === 'text' && content ? { content: content.slice(0, 32_000) } : {}),
   }))
+
+export function persistableImage(image) {
+  if (!image) return null
+  const { persistUrl, ...stored } = image
+  if (persistUrl) stored.url = persistUrl
+  return stored.url && !stored.url.startsWith('blob:') ? stored : null
+}
 
 /** Split read attachments into what each transport can actually carry. */
 export function packAttachments(attachments = []) {
@@ -665,6 +806,11 @@ export function packAttachments(attachments = []) {
       unsupported.push(`a second image (${a.name}; only one image per message is sent)`)
     } else if (a.kind === 'text' && a.content) {
       textParts.push(`[Attached file: ${a.name}]\n${a.content}`)
+    } else if (a.kind === 'video' && a.frameB64 && !imageB64) {
+      imageB64 = a.frameB64
+      textParts.push(`[Sampled frames from video: ${a.name}]`)
+    } else if (a.kind === 'video' && a.frameB64) {
+      unsupported.push(`a second visual attachment (${a.name}; only one visual per message is sent)`)
     } else if (a.kind === 'video') {
       unsupported.push(`a video (${a.name})`)
     } else if (a.error) {
@@ -699,7 +845,17 @@ export function packAttachments(attachments = []) {
  */
 export async function dispatchEngineReply({
   text, history, convId, sent, team, mode, systemPrompt, getToken, probe,
+  projectId, chatId = convId, capabilityIds = [],
 }) {
+  if (isImageRequest(text)) {
+    try {
+      return await respondGeneratedImage(text, await getToken())
+    } catch (error) {
+      console.error('[engine:image] backend failed, using direct fallback:', error)
+      return imageReply(text, '\n')
+    }
+  }
+
   // Wait for any in-flight probe before trusting engineRef -- otherwise a
   // message sent right after page load reads the initial `false` defaults
   // instead of the real (still-resolving) availability.
@@ -740,7 +896,10 @@ ${base}`
     try {
       // Live hits the same /api/prompt as the manager proxy, so it carries
       // the image too -- it is not a blind tier.
-      return await respondLive(managerPrompt, convId, team, mode, imageB64)
+      return await respondLive(managerPrompt, {
+        sessionId: convId, team, mode, imageB64, history,
+        projectId, chatId, capabilityIds,
+      })
     } catch (err) {
       console.error('[engine:live] failed, falling through:', err)
       probe.setLive(false)
@@ -751,7 +910,35 @@ ${base}`
   if (engines.manager) {
     try {
       const token = await getToken()
-      return await respondTeam(managerPrompt, convId, token, systemPrompt, team, mode, imageB64)
+      let groundedPrompt = managerPrompt
+      let sources = null
+      if (isResearchRequest(text)) {
+        try {
+          sources = await findResearchSources(text, token)
+          if (sources.length) {
+            groundedPrompt = `${managerPrompt}\n\n[Retrieved sources]\n${researchContext(sources)}\n\n` +
+              'Ground the answer in these sources. If they do not support a claim, say so instead of guessing.'
+          }
+        } catch {
+          sources = null
+        }
+      }
+      return {
+        ...await respondTeam(groundedPrompt, {
+          sessionId: convId,
+          token,
+          systemPrompt,
+          team,
+          mode,
+          imageB64,
+          history,
+          searchContext: sources?.length ? researchContext(sources) : '',
+          projectId,
+          chatId,
+          capabilityIds,
+        }),
+        sources,
+      }
     } catch (err) {
       console.error('[engine:manager] failed, falling through:', err)
       probe.setManager(false)
@@ -761,7 +948,10 @@ ${base}`
 
   if (engines.omni) {
     try {
-      return await respondOmni(blindPrompt, history, mode, systemPrompt)
+      return {
+        ...await respondOmni(blindPrompt, history, mode, systemPrompt),
+        provenance: 'VibeAI · local single-model fallback',
+      }
     } catch (err) {
       console.error('[engine:omni] failed, falling through:', err)
       probe.setOmni(false)
@@ -772,7 +962,10 @@ ${base}`
   if (engines.edge) {
     try {
       const token = await getToken()
-      return await respondEdge(blindPrompt, history, token, mode, systemPrompt)
+      return {
+        ...await respondEdge(blindPrompt, history, token, mode, systemPrompt),
+        provenance: 'VibeAI · cloud single-model fallback',
+      }
     } catch (err) {
       console.error('[engine:edge] failed, falling through:', err)
       probe.setEdge(false)
@@ -782,6 +975,7 @@ ${base}`
 
   const sim = respond(text, sent, team)
   sim.text = `[CB] no live engine reachable - simulated response\n${sim.text}`
+  sim.provenance = 'VibeAI · offline simulation'
   return sim
 }
 
@@ -907,9 +1101,46 @@ export async function makeZip(files, slug) {
  * under the same "project" label would be the one thing a build surface must
  * never do. A failure is surfaced as a failure.
  */
-export async function buildProject(task, token, taskType = 'coding', projectId = null) {
+export function projectFilesContext(files, maxChars = 32_000) {
+  if (!Array.isArray(files) || maxChars <= 0) return ''
+  const blocks = []
+  let remaining = maxChars
+  for (const file of files.slice(0, 40)) {
+    const path = typeof file?.path === 'string' ? file.path : 'untitled'
+    const content = typeof file?.content === 'string' ? file.content : ''
+    const header = `--- ${path} ---\n`
+    if (remaining <= header.length) break
+    const block = header + content.slice(0, remaining - header.length)
+    blocks.push(block)
+    remaining -= block.length + 2
+    if (remaining <= 0) break
+  }
+  return blocks.join('\n\n').slice(0, maxChars)
+}
+
+function waitForPoll(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer)
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, ms)
+    if (!signal) return
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
+export async function buildProject(
+  task, token, taskType = 'coding', projectId = null,
+  { context = '', history = [], signal } = {},
+) {
   const res = await fetch('/api/project', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -918,10 +1149,38 @@ export async function buildProject(task, token, taskType = 'coding', projectId =
     // same persistent project land in the same directory instead of every
     // build on every project colliding in the backend's shared default
     // workspace -- see api/project.js.
-    body: JSON.stringify({ task, taskType, projectId }),
+    body: JSON.stringify({
+      task,
+      taskType,
+      projectId,
+      context,
+      history: history.slice(-8).map(({ role, content }) => ({ role, content })),
+    }),
   })
-  const data = await res.json().catch(() => null)
+  let data = await res.json().catch(() => null)
   if (!res.ok) throw new Error(data?.error || `project build failed (${res.status})`)
+  if (res.status === 202) {
+    const jobId = typeof data?.jobId === 'string' ? data.jobId : ''
+    if (!jobId) throw new Error('project build started without a job id')
+    const deadline = Date.now() + 20 * 60 * 1000
+    let pollMs = 1500
+    while (Date.now() < deadline) {
+      const statusRes = await fetch(`/api/project?jobId=${encodeURIComponent(jobId)}`, {
+        signal,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      data = await statusRes.json().catch(() => null)
+      if (!statusRes.ok) {
+        throw new Error(data?.error || `project build status failed (${statusRes.status})`)
+      }
+      if (data?.status === 'completed') break
+      await waitForPoll(pollMs, signal)
+      pollMs = Math.min(8000, Math.round(pollMs * 1.5))
+    }
+    if (data?.status !== 'completed') {
+      throw new Error('project build is still running after 20 minutes; try checking again shortly')
+    }
+  }
   if (!data?.files?.length) {
     throw new Error('the agent finished but wrote no files')
   }
@@ -1260,6 +1519,34 @@ export function buildImage(prompt, { width = 1024, height = 576 } = {}) {
   return { url, subject, width, height, sig: renderSignature(prompt) }
 }
 
+export async function respondGeneratedImage(prompt, token) {
+  const res = await fetch('/api/image', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ prompt: imageSubject(prompt) }),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null)
+    throw new Error(data?.error || `image proxy ${res.status}`)
+  }
+  const blob = await res.blob()
+  if (!blob.size) throw new Error('image proxy returned empty content')
+  const image = {
+    ...buildImage(prompt),
+    url: URL.createObjectURL(blob),
+    persistUrl: res.headers.get('x-image-source') || '',
+  }
+  return {
+    text: `Rendered **${image.subject}** at ${image.width}x${image.height}.`,
+    project: null,
+    image,
+    provenance: 'VibeAI · image generator',
+  }
+}
+
 function imageReply(prompt, attachNote) {
   const image = buildImage(prompt)
   const text =
@@ -1267,7 +1554,12 @@ function imageReply(prompt, attachNote) {
     `Rendering **${image.subject}** at ${image.width}x${image.height}.\n\n` +
     `The design team uses a keyless free model, so this runs entirely in your ` +
     `browser. No API key, no server round trip.`
-  return { text, project: null, image }
+  return {
+    text,
+    project: null,
+    image,
+    provenance: 'VibeAI · direct image fallback',
+  }
 }
 
 export function respond(prompt, attachments, team = 'auto') {

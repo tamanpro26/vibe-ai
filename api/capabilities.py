@@ -16,6 +16,7 @@ from capabilities.manifests import ActivationMode, CapabilityManifest, validate_
 from capabilities.models import ScopeKind, ScopeState
 from capabilities.registry import CapabilityRegistry
 from capabilities.review import EncryptedQuarantine, PackageImporter, ReviewService
+from capabilities.resolver import ResolutionRequest, resolve_from_store
 from capabilities.store import CapabilityStore
 from core.state import get_capability_store as _get_capability_store
 
@@ -94,6 +95,23 @@ class ReviewReasonBody(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class ResolvePreviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prompt: str = Field(min_length=1, max_length=50_000)
+    project_id: str | None = Field(default=None, max_length=128)
+    chat_id: str | None = Field(default=None, max_length=128)
+    request_id: str = Field(default="preview", max_length=128)
+    capability_ids: list[str] = Field(default_factory=list, max_length=16)
+
+
+class SuggestionDecisionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    chat_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    capability_id: str = Field(min_length=1, max_length=160)
+    decision: str = Field(pattern="^(accepted|rejected)$")
+
+
 @router.post("/validate")
 async def validate_manifest(
     body: DraftBody,
@@ -134,6 +152,58 @@ async def import_github_capability(
         if isinstance(exc, HTTPError):
             raise HTTPException(502, detail="GitHub package could not be acquired") from exc
         raise
+
+
+@router.post("/resolve-preview")
+async def resolve_preview(
+    body: ResolvePreviewBody,
+    principal: Principal = Depends(get_current_principal),
+    store: CapabilityStore = Depends(get_capability_store),
+) -> dict[str, Any]:
+    if body.project_id and not await store.owns_scope(
+        principal.subject, ScopeKind.PROJECT, body.project_id
+    ):
+        raise HTTPException(404, detail="project scope not found")
+    if body.chat_id and not await store.owns_scope(
+        principal.subject, ScopeKind.CHAT, body.chat_id
+    ):
+        raise HTTPException(404, detail="chat scope not found")
+    accepted, rejected = await store.get_suggestion_decisions(
+        principal.subject, body.chat_id, body.request_id
+    )
+    snapshot = await resolve_from_store(
+        store,
+        ResolutionRequest(
+            owner_id=principal.subject,
+            prompt=body.prompt,
+            activation_mode=await store.get_activation_mode(principal.subject),
+            project_id=body.project_id,
+            chat_id=body.chat_id,
+            explicit_capability_ids=body.capability_ids,
+            accepted_suggestion_ids=accepted,
+            rejected_suggestion_ids=rejected,
+        ),
+    )
+    return snapshot.model_dump(mode="json")
+
+
+@router.post("/suggestions")
+async def decide_suggestion(
+    body: SuggestionDecisionBody,
+    principal: Principal = Depends(get_current_principal),
+    store: CapabilityStore = Depends(get_capability_store),
+) -> dict[str, str]:
+    try:
+        await store.set_suggestion_decision(
+            principal.subject,
+            body.chat_id,
+            body.request_id,
+            body.capability_id,
+            body.decision,
+        )
+        return {"decision": body.decision}
+    except PermissionError as exc:
+        raise HTTPException(404, detail="chat scope not found") from exc
 
 
 @router.get("/imports/{candidate_id}")

@@ -164,6 +164,40 @@ class CapabilityScopeOverride(Base):
     )
 
 
+class CapabilitySuggestionDecision(Base):
+    __tablename__ = "capability_suggestion_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "chat_id", "request_id", "capability_id",
+            name="uq_capability_suggestion_decision",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    chat_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class CapabilityResolutionRecord(Base):
+    __tablename__ = "capability_resolution_records"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "snapshot_id", name="uq_capability_resolution_snapshot"),
+        Index("ix_capability_resolution_scope", "owner_id", "project_id", "chat_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    snapshot_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 class CapabilityActivationPreference(Base):
     __tablename__ = "capability_activation_preferences"
 
@@ -371,7 +405,9 @@ __all__ = [
     "CapabilityOAuthState",
     "CapabilityRoleAssignment",
     "CapabilityReviewEvidence",
+    "CapabilityResolutionRecord",
     "CapabilityScopeOverride",
+    "CapabilitySuggestionDecision",
     "CapabilityServiceConnection",
     "CapabilitySystemState",
     "CapabilityVersionRecord",
