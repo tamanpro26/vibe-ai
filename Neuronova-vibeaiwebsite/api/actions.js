@@ -7,6 +7,11 @@ export default async function handler(req, res) {
   let route
   if (operation === 'pending') route = { method: 'GET', path: '/api/actions/pending' }
   if (operation === 'detail' && id) route = { method: 'GET', path: `/api/actions/${id}` }
+  if (operation === 'propose') route = {
+    method: 'POST',
+    path: '/api/actions/propose',
+    body: req.body?.proposal,
+  }
   if (operation === 'approve' && id) route = {
     method: 'POST',
     path: `/api/actions/${id}/approve`,

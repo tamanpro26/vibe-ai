@@ -1057,6 +1057,18 @@ class CapabilityStore:
             session.add(event_record)
         return event_record
 
+    async def list_audit_events(
+        self, owner_id: str, *, limit: int = 100
+    ) -> list[CapabilityAuditEvent]:
+        async with self._sessions() as session:
+            values = await session.scalars(
+                select(CapabilityAuditEvent)
+                .where(CapabilityAuditEvent.owner_id == owner_id)
+                .order_by(CapabilityAuditEvent.created_at, CapabilityAuditEvent.id)
+                .limit(min(max(limit, 1), 500))
+            )
+            return list(values)
+
     async def create_service_connection(
         self,
         owner_id: str,

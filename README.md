@@ -58,8 +58,28 @@ teams/      prompt / brain / code / vision / design / router teams
 manager/    manager pipeline + Free Council
 tools/      agent tools (files, bash, git, SSH, web), code executor
 api/        FastAPI server (REST + WebSocket)
+capabilities/ provider-neutral skills, bundles, safe imports, resolver, and confirmed actions
 cli.py      Rich terminal UI (entry: python main.py)
 ```
+
+## Capability Hub
+
+Signed-in website users can open `#/capabilities` to discover and install built-in task
+families, create private instruction skills, import portable Claude or Codex packages from a
+pinned GitHub commit, choose Automatic / Manual-only / Disabled activation, connect a
+least-privilege GitHub App, and review external actions one at a time.
+
+The Capability Hub is deliberately separate from the model registry. Imported packages are
+parsed as data and cannot acquire shell, filesystem, arbitrary HTTP, hooks, raw credentials,
+or generic agent tools. Claude/Codex instructions and passive assets are portable; host-only
+hooks, agents, scripts, binaries, UI extensions, and MCP declarations remain disabled or
+unsupported. External mutations use typed server-owned adapters and an exact digest-bound
+approval. `CAPABILITY_ACTIONS_ENABLED=false` is the default release kill switch.
+
+Production requires PostgreSQL, independent Clerk JWT verification in FastAPI, versioned
+credential master keys, and a least-privilege GitHub App before enabling actions. See
+[Capability Hub operations](docs/capability-hub.md) for support, retention, rollout, and
+rollback details.
 
 Operational history (model deprecations, discovered rate limits, why things
 are the way they are) lives in [DECISIONS.md](DECISIONS.md).

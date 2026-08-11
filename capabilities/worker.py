@@ -27,16 +27,27 @@ class ActionWorker:
                 raise ValueError("no approved adapter is registered for this operation")
             await adapter.preflight(action, connection)
         except Exception as exc:
-            return await self.store.finish_action(
-                action.id, worker_id, ActionStatus.INVALIDATED, error=str(exc)
-            )
+            return await self._finish(action, worker_id, ActionStatus.INVALIDATED, error=str(exc))
         await self.store.mark_action_send_attempted(action.id, worker_id)
         try:
             result = await adapter.execute(action, connection)
         except Exception as exc:
-            return await self.store.finish_action(
-                action.id, worker_id, ActionStatus.FAILED, error=str(exc)
-            )
-        return await self.store.finish_action(
-            action.id, worker_id, ActionStatus.SUCCEEDED, result=result
+            return await self._finish(action, worker_id, ActionStatus.FAILED, error=str(exc))
+        return await self._finish(action, worker_id, ActionStatus.SUCCEEDED, result=result)
+
+    async def _finish(self, action, worker_id, status, *, result=None, error=None):
+        finished = await self.store.finish_action(
+            action.id, worker_id, status, result=result, error=error
         )
+        await self.store.append_audit(
+            action.owner_id,
+            f"action.{status.value}",
+            action.id,
+            {
+                "operation": action.operation,
+                "request_digest": action.request_digest,
+                "result": result or {},
+                "error_type": type(error).__name__ if error else None,
+            },
+        )
+        return finished

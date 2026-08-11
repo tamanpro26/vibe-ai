@@ -12,6 +12,7 @@ class ActionBroker:
 
     async def propose(self, owner_id: str, proposal, *, workflow_id: str | None = None):
         self.policy.validate_shape(proposal)
+        await self.policy.validate_proposal(self.store, owner_id, proposal)
         action = await self.store.create_action_request(
             owner_id, proposal, workflow_id=workflow_id
         )

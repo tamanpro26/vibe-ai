@@ -372,6 +372,12 @@ async def install_version(
 ) -> dict[str, Any]:
     try:
         installation = await CapabilityRegistry(store).install(principal.subject, version_id)
+        await store.append_audit(
+            principal.subject,
+            "capability.installed",
+            version_id,
+            {"installation_id": installation.id, "version_id": version_id},
+        )
         return {
             "id": installation.id,
             "capability_version_id": installation.capability_version_id,
@@ -460,6 +466,12 @@ async def set_activation(
 ) -> dict[str, str]:
     preference = await store.set_activation_mode(
         principal.subject, body.mode, onboarding_accepted=body.onboarding_accepted
+    )
+    await store.append_audit(
+        principal.subject,
+        "capability.activation_changed",
+        principal.subject,
+        {"mode": preference.mode.value},
     )
     return {"mode": preference.mode.value}
 

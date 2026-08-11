@@ -33,6 +33,7 @@ async function actionRequest(body, query = '') {
 }
 
 export const actionApi = {
+  propose: (proposal) => actionRequest({ operation: 'propose', proposal }),
   pending: () => actionRequest(null),
   detail: (id) => actionRequest(null, `?id=${encodeURIComponent(id)}`),
   approve: (id, requestDigest) =>

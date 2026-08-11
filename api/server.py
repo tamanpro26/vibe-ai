@@ -16,12 +16,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import shutil
 import tempfile
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
@@ -33,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from loguru import logger
 from pydantic import BaseModel, Field
+import httpx
 
 from api.identity import Principal, get_current_principal, get_optional_principal
 from capabilities.models import ScopeKind
@@ -116,10 +118,50 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if admin_ids or reviewer_ids:
         await get_capability_store().bootstrap_roles_once(admin_ids, reviewer_ids)
     await push_store.init()
+    action_worker_task = None
+    if settings.capability_actions_enabled:
+        action_worker_task = asyncio.create_task(_run_capability_action_worker())
     logger.info("VibeAI ready ✓  (multi-provider orchestration · video_observer integrated)")
     yield
+    if action_worker_task:
+        action_worker_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await action_worker_task
     logger.info("VibeAI shutting down.")
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+
+
+async def _run_capability_action_worker() -> None:
+    """Run only the reviewed adapter registry; generic tools never enter this worker."""
+    from capabilities.credentials import CredentialVault
+    from capabilities.integrations.github import GitHubIssueAdapter
+    from capabilities.worker import ActionWorker
+
+    try:
+        keys = json.loads(settings.capability_credential_keys)
+        vault = CredentialVault(
+            keys, settings.capability_credential_active_key, settings.deployment_environment
+        )
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.error(f"[capabilities] action worker disabled: credential vault invalid ({exc})")
+        return
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        worker = ActionWorker(
+            get_capability_store(),
+            {"github.issue.comment": GitHubIssueAdapter(get_capability_store(), vault, client)},
+        )
+        worker_id = f"capability-worker:{uuid.uuid4()}"
+        while True:
+            try:
+                await get_capability_store().recover_stale_actions()
+                handled = await worker.run_once(worker_id)
+                if handled is None:
+                    await asyncio.sleep(0.75)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"[capabilities] action worker error: {type(exc).__name__}")
+                await asyncio.sleep(1)
 
 
 app = FastAPI(title="VibeAI", version="2.0.0", lifespan=lifespan)
@@ -241,7 +283,7 @@ async def handle_prompt(
 
     capability_snapshot = None
     verified_principal = principal if isinstance(principal, Principal) else None
-    if verified_principal:
+    if verified_principal and settings.capability_hub_enabled:
         from capabilities.resolver import ResolutionRequest, resolve_from_store
 
         capability_store = get_capability_store()

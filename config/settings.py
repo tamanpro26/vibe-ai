@@ -113,6 +113,8 @@ class Settings(BaseSettings):
     clerk_jwt_leeway_seconds: int = 60
     capability_bootstrap_admin_ids: str = ""
     capability_bootstrap_reviewer_ids: str = ""
+    capability_hub_enabled: bool = True
+    capability_actions_enabled: bool = False
 
     # ── API server ────────────────────────────────────────
     # SECURITY: localhost by default. The API executes shell commands via the

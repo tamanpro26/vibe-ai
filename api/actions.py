@@ -7,8 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.identity import Principal, get_current_principal
 from capabilities.broker import ActionBroker
+from capabilities.actions import ProposedAction
 from capabilities.store import CapabilityStore
 from core.state import get_capability_store
+from config.settings import settings
 
 router = APIRouter(prefix="/api/actions", tags=["capability-actions"])
 
@@ -22,6 +24,22 @@ def get_action_broker(
     store: CapabilityStore = Depends(get_capability_store),
 ) -> ActionBroker:
     return ActionBroker(store)
+
+
+@router.post("/propose", status_code=201)
+async def propose_action(
+    body: ProposedAction,
+    principal: Principal = Depends(get_current_principal),
+    broker: ActionBroker = Depends(get_action_broker),
+) -> dict:
+    if not settings.capability_actions_enabled:
+        raise HTTPException(503, "capability actions are disabled by the release kill switch")
+    try:
+        return _response(await broker.propose(principal.subject, body))
+    except PermissionError as exc:
+        raise HTTPException(404, "capability, scope, or connection not found") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/pending")
@@ -51,6 +69,8 @@ async def approve_action(
     principal: Principal = Depends(get_current_principal),
     broker: ActionBroker = Depends(get_action_broker),
 ) -> dict:
+    if not settings.capability_actions_enabled:
+        raise HTTPException(503, "capability actions are disabled by the release kill switch")
     try:
         return _response(
             await broker.approve(principal.subject, action_id, body.request_digest)

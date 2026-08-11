@@ -8,7 +8,12 @@ export default function PendingActionInbox() {
   const refresh = useCallback(async () => {
     try { setItems((await actionApi.pending()).items || []) } catch { setItems([]) }
   }, [])
-  useEffect(() => { refresh(); const id = setInterval(refresh, 15000); return () => clearInterval(id) }, [refresh])
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 15000)
+    window.addEventListener('vibeai:actions-changed', refresh)
+    return () => { clearInterval(id); window.removeEventListener('vibeai:actions-changed', refresh) }
+  }, [refresh])
   if (items.length === 0) return null
   return (
     <>

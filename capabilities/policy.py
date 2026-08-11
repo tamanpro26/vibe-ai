@@ -84,3 +84,13 @@ class ActionPolicy:
         if repository_target not in connection.immutable_targets:
             raise ValueError("connection is not bound to the requested repository")
         return connection
+
+    async def validate_proposal(self, store, owner_id: str, proposal: ProposedAction) -> object:
+        """Apply the same live authority checks before exposing a consent request."""
+        class Candidate:
+            pass
+
+        candidate = Candidate()
+        for key, value in proposal.model_dump(mode="json").items():
+            setattr(candidate, key, value)
+        return await self.validate_runtime(store, owner_id, candidate)
