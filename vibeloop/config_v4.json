@@ -1,0 +1,49 @@
+{
+  "run_name": "vibeai-coding-v4",
+  "vibe": {
+    "_comment": "One VibeAI invocation = one manager.handle_user_request() call via scripts/vibeloop_run_one.py (cli.py is an interactive REPL, no headless single-prompt mode). Answer is read from --out, not stdout, so loguru's stderr logging never contaminates it.",
+    "command": [
+      "c:\\VS Codes\\vibe_ai_v4\\vibe_ai\\.venv\\Scripts\\python.exe",
+      "c:\\VS Codes\\vibe_ai_v4\\vibe_ai\\scripts\\vibeloop_run_one.py",
+      "--config",
+      "{config}",
+      "--prompt-file",
+      "{prompt_file}",
+      "--out",
+      "{out_file}",
+      "--quiet"
+    ],
+    "cwd": "c:\\VS Codes\\vibe_ai_v4\\vibe_ai",
+    "timeout_s": 180,
+    "env": {},
+    "_config_path_comment": "The mutable surface: 6 hot system prompts (config/scaffold_loader.py), extracted from what were Python string constants in manager/claude_manager.py, teams/code.py, teams/brain.py, teams/router_team.py. This is the ONLY file the loop may rewrite.",
+    "config_path": "c:\\VS Codes\\vibe_ai_v4\\vibe_ai\\configs\\scaffold.json"
+  },
+  "eval": {
+    "_comment": "repeats:1 by design, not the usual 2-floor recommendation -- loop-tester's own escalation policy (see .claude/agents/loop-tester.md) re-runs at 2-3 repeats only when a delta lands near the promotion boundary, so paying for repeats up front on every candidate would duplicate what that gate already does cheaper.",
+    "holdout_frac": 0.35,
+    "repeats": 1,
+    "seed": 17
+  },
+  "budget": {
+    "max_iterations": 10,
+    "plateau_patience": 3,
+    "min_gain": 0.03,
+    "max_p_value": 0.2,
+    "ceiling_stop_share": 0.6,
+    "_spend_ceiling_comment": "No max_total_calls/max_total_tokens yet -- set these after seeing iteration-0's actual spend (budget.py spend status), not as a guess before any real number exists."
+  },
+  "mutation": {
+    "_comment": "Only system_prompts actually exists as a rewritable surface right now -- routing policy, council parameters, and verifier thresholds are still Python constants, not config, so listing them as allowed would let scaffold-mutator believe it can touch something it can't.",
+    "max_edits_per_iteration": 2,
+    "allowed_surfaces": [
+      "system_prompts"
+    ],
+    "forbidden_surfaces": [
+      "task_specific_hardcoding",
+      "evaluation_harness",
+      "held_out_tasks",
+      "application_code"
+    ]
+  }
+}
