@@ -36,7 +36,7 @@ function Field({ label, hint, children }) {
   )
 }
 
-export default function SettingsModal({ open, onClose }) {
+export default function SettingsModal({ open, onClose, onSettingsChange }) {
   const { user } = useAuth()
   const reduceMotion = useReducedMotion()
   const [panel, setPanel] = useState('profile')
@@ -80,6 +80,7 @@ export default function SettingsModal({ open, onClose }) {
       const next = { ...prev, ...patch }
       saveSettings(user?.id, next)
       applyAppearance(next)
+      if (Object.hasOwn(patch, 'slashCommandsEnabled')) onSettingsChange?.(next)
       return next
     })
   }
@@ -321,6 +322,29 @@ export default function SettingsModal({ open, onClose }) {
                       <span className="set-theme-desc">{description}</span>
                     </button>
                   ))}
+                </div>
+              </Field>
+              <Field
+                label="Slash commands"
+                hint="Type / in Chat or Projects to invoke an installed skill, bundle, or reviewed plugin feature for one message."
+              >
+                <div className="set-seg" role="group" aria-label="Slash commands">
+                  <button
+                    className={`set-seg-btn${settings.slashCommandsEnabled !== false ? ' is-active' : ''}`}
+                    aria-label="Enable slash commands"
+                    aria-pressed={settings.slashCommandsEnabled !== false}
+                    onClick={() => update({ slashCommandsEnabled: true })}
+                  >
+                    Enabled
+                  </button>
+                  <button
+                    className={`set-seg-btn${settings.slashCommandsEnabled === false ? ' is-active' : ''}`}
+                    aria-label="Disable slash commands"
+                    aria-pressed={settings.slashCommandsEnabled === false}
+                    onClick={() => update({ slashCommandsEnabled: false })}
+                  >
+                    Disabled
+                  </button>
                 </div>
               </Field>
               <a className="set-capability-link" href="#/capabilities" onClick={onClose}>

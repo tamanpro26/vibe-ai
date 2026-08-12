@@ -34,6 +34,7 @@ export const DEFAULTS = {
   textSize: 'm',
   motion: 'full',
   chatFont: 'sans',
+  slashCommandsEnabled: true,
 }
 
 export const CHAT_FONTS = [

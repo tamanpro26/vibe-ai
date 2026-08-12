@@ -36,6 +36,9 @@ import Message from './Message.jsx'
 import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
 import CapabilityScopeControls from './capabilities/CapabilityScopeControls.jsx'
 import CapabilitySelect from './capabilities/CapabilitySelect.jsx'
+import useCapabilityCommands from './capabilities/useCapabilityCommands.js'
+import { capabilityForRegenerate } from './capabilities/commands.js'
+import useSlashCommandsEnabled from './useSlashCommandsEnabled.js'
 
 /*
  * A project's workspace. Two views, one component:
@@ -104,6 +107,8 @@ export default function ProjectWorkspace({ projectId, chatId }) {
   const [team, setTeam] = useState('auto')
   const [mode, setMode] = useState(DEFAULT_MODE)
   const [capabilityId, setCapabilityId] = useState('')
+  const [slashCommandsEnabled, applySlashCommandSettings] = useSlashCommandsEnabled(user.id)
+  const capabilityCommands = useCapabilityCommands()
   const [instructionsDraft, setInstructionsDraft] = useState(project?.instructions || '')
   const [buildTask, setBuildTask] = useState('')
   const [building, setBuilding] = useState(false)
@@ -122,7 +127,8 @@ export default function ProjectWorkspace({ projectId, chatId }) {
   const activeChat = chatId ? project?.chats.find((c) => c.id === chatId) || null : null
 
   useEffect(() => {
-    applyAppearance(loadSettings(user.id))
+    const settings = loadSettings(user.id)
+    applyAppearance(settings)
   }, [user.id])
 
   useEffect(() => {
@@ -292,7 +298,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
     }
   }
 
-  const dispatchReply = async (proj, cid, text, sent) => {
+  const dispatchReply = async (proj, cid, text, sent, requestedCapabilityId = capabilityId) => {
     stopRef.current = false
     const chat = proj.chats.find((c) => c.id === cid)
     const history = (chat?.messages || []).slice(0, -2)
@@ -315,14 +321,15 @@ export default function ProjectWorkspace({ projectId, chatId }) {
       probe,
       projectId: proj.id,
       chatId: cid,
-      capabilityIds: capabilityId ? [capabilityId] : [],
+      capabilityIds: requestedCapabilityId ? [requestedCapabilityId] : [],
     })
     if (stopRef.current) return
     streamReply(reply, cid)
   }
 
-  const handleSend = (text) => {
+  const handleSend = (text, { capabilityId: commandCapabilityId } = {}) => {
     if (streaming || !project) return
+    const requestedCapabilityId = commandCapabilityId || capabilityId
     const sent = attachments
     const turn = [
       {
@@ -332,6 +339,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         // Keep capped text for faithful regeneration, but never persist
         // visual/base64 payloads -- see stripAttachmentPayloads.
         attachments: stripAttachmentPayloads(sent),
+        capabilityId: requestedCapabilityId || null,
         ts: Date.now(),
       },
       { id: newId(), role: 'assistant', content: '', ts: Date.now() },
@@ -357,7 +365,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
 
     persist(next)
     setAttachments([])
-    dispatchReply(next, cid, text, sent)
+    dispatchReply(next, cid, text, sent, requestedCapabilityId)
   }
 
   const handleStop = () => {
@@ -389,7 +397,13 @@ export default function ProjectWorkspace({ projectId, chatId }) {
       ],
     }))
     persist(next)
-    dispatchReply(next, activeChat.id, lastUser.content, lastUser.attachments || [])
+    dispatchReply(
+      next,
+      activeChat.id,
+      lastUser.content,
+      lastUser.attachments || [],
+      capabilityForRegenerate(lastUser),
+    )
   }
 
   const handleContinue = async (messageId) => {
@@ -612,7 +626,11 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenRegistry={() => setRegistryOpen(true)}
       />
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSettingsChange={applySlashCommandSettings}
+      />
       <RegistryPanel open={registryOpen} onClose={() => setRegistryOpen(false)} />
       {children}
     </div>
@@ -643,7 +661,7 @@ export default function ProjectWorkspace({ projectId, chatId }) {
         aria-label="Route to team"
         onChange={setTeam}
       />
-      <CapabilitySelect value={capabilityId} onChange={setCapabilityId} />
+      <CapabilitySelect commands={capabilityCommands} value={capabilityId} onChange={setCapabilityId} />
       <ListboxSelect
         className="proj-model-pill"
         options={MODES}
@@ -771,6 +789,8 @@ export default function ProjectWorkspace({ projectId, chatId }) {
             onAddFiles={addFiles}
             onRemoveAttachment={(i) => setAttachments((list) => list.filter((_, j) => j !== i))}
             toolbar={composerToolbar}
+            capabilityCommands={capabilityCommands}
+            slashCommandsEnabled={slashCommandsEnabled}
             placeholder={activeChat ? 'Reply in this chat…' : 'Start a new chat in this project…'}
             hint="Enter to send · Shift+Enter for a new line · this chat shares the project's instructions, memory and files"
           />

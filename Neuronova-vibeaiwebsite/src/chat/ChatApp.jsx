@@ -30,6 +30,9 @@ import Message from './Message.jsx'
 import ListboxSelect from './ListboxSelect.jsx'
 import PendingActionInbox from './capabilities/PendingActionInbox.jsx'
 import CapabilitySelect from './capabilities/CapabilitySelect.jsx'
+import useCapabilityCommands from './capabilities/useCapabilityCommands.js'
+import { capabilityForRegenerate } from './capabilities/commands.js'
+import useSlashCommandsEnabled from './useSlashCommandsEnabled.js'
 
 const TEAMS = [
   { value: 'auto', label: 'Auto route' },
@@ -67,6 +70,8 @@ export default function ChatApp() {
   const [team, setTeam] = useState('auto')
   const [mode, setMode] = useState(DEFAULT_MODE)
   const [capabilityId, setCapabilityId] = useState('')
+  const [slashCommandsEnabled, applySlashCommandSettings] = useSlashCommandsEnabled(user.id)
+  const capabilityCommands = useCapabilityCommands()
   // Which conversation is mid-typewriter, if any. Distinct from `running`
   // (a request in flight) because the animation is purely local decoration
   // replayed over an already-complete, already-saved string.
@@ -317,7 +322,7 @@ export default function ChatApp() {
   // lives in engine.js::dispatchEngineReply, shared with ProjectWorkspace.
   // This wrapper only supplies ChatApp's own concerns: which conversation's
   // history to send, and where the finished answer belongs.
-  const dispatchReply = (convId, text, sent, convForHistory) => {
+  const dispatchReply = (convId, text, sent, convForHistory, requestedCapabilityId = capabilityId) => {
     // Drop the just-appended user turn and the empty assistant placeholder;
     // the prompt is passed separately.
     const history = (convForHistory?.messages || []).slice(0, -2)
@@ -327,14 +332,15 @@ export default function ChatApp() {
       dispatch: () =>
         dispatchEngineReply({
           text, history, convId, sent, team, mode, systemPrompt, getToken, probe,
-          capabilityIds: capabilityId ? [capabilityId] : [],
+          capabilityIds: requestedCapabilityId ? [requestedCapabilityId] : [],
         }),
       persist: (reply) => persistReply(convId, reply),
     })
   }
 
-  const handleSend = (text) => {
+  const handleSend = (text, { capabilityId: commandCapabilityId } = {}) => {
     if (streaming) return false
+    const requestedCapabilityId = commandCapabilityId || capabilityId
     let convId = activeId
     let next = chats
     if (!active) {
@@ -360,6 +366,7 @@ export default function ChatApp() {
         // Keep capped text for faithful regeneration, but never persist
         // visual/base64 payloads -- see stripAttachmentPayloads.
         attachments: stripAttachmentPayloads(sent),
+        capabilityId: requestedCapabilityId || null,
         ts: Date.now(),
       },
               { id: newId(), role: 'assistant', content: '', ts: Date.now() },
@@ -374,7 +381,13 @@ export default function ChatApp() {
       return false
     }
     setAttachments([])
-    dispatchReply(convId, text, sent, next.find((c) => c.id === convId))
+    dispatchReply(
+      convId,
+      text,
+      sent,
+      next.find((c) => c.id === convId),
+      requestedCapabilityId,
+    )
     return true
   }
 
@@ -421,6 +434,7 @@ export default function ChatApp() {
       lastUser.content,
       lastUser.attachments || [],
       next.find((conversation) => conversation.id === active.id),
+      capabilityForRegenerate(lastUser),
     )
   }
 
@@ -562,7 +576,7 @@ export default function ChatApp() {
         aria-label="Route to team"
         onChange={setTeam}
       />
-      <CapabilitySelect value={capabilityId} onChange={setCapabilityId} />
+      <CapabilitySelect commands={capabilityCommands} value={capabilityId} onChange={setCapabilityId} />
       <div className="mode-switch composer-mode-switch" role="radiogroup" aria-label="VibeAI reasoning level">
         {MODES.map((reasoningMode) => (
           <button
@@ -609,6 +623,7 @@ export default function ChatApp() {
       <RegistryPanel open={registryOpen} onClose={() => setRegistryOpen(false)} />
       <SettingsModal
         open={settingsOpen}
+        onSettingsChange={applySlashCommandSettings}
         onClose={() => {
           setSettingsOpen(false)
           // Re-read on close so edited instructions apply to the very next
@@ -695,6 +710,8 @@ export default function ChatApp() {
           onAddFiles={addFiles}
           onRemoveAttachment={(i) => setAttachments((list) => list.filter((_, j) => j !== i))}
           toolbar={composerToolbar}
+          capabilityCommands={capabilityCommands}
+          slashCommandsEnabled={slashCommandsEnabled}
         />
       </main>
     </div>

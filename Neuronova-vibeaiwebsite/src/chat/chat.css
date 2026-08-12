@@ -1026,10 +1026,88 @@
 /* The foot of the page. Transparent so the sheet continues underneath —
    a filled bar here would read as a separate toolbar bolted on. */
 .composer-wrap {
+  position: relative;
   padding: calc(var(--space-unit) * 3) calc(var(--space-unit) * 6)
     calc(var(--space-unit) * 4);
   border-top: 1px solid var(--line);
   background: transparent;
+}
+
+.slash-menu {
+  position: absolute;
+  z-index: 40;
+  bottom: calc(100% - var(--sp-2));
+  left: 50%;
+  width: min(var(--col-content), calc(100% - var(--sp-6) * 2));
+  max-height: min(380px, 52vh);
+  overflow-y: auto;
+  transform: translateX(-50%);
+  padding: var(--sp-2);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-overlay) 96%, transparent);
+  border: 1px solid var(--border-default);
+  border-radius: var(--r-lg);
+  box-shadow: var(--e-4);
+  backdrop-filter: blur(18px);
+}
+
+.slash-menu-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+}
+
+.slash-menu-head strong {
+  color: var(--text-primary);
+}
+
+.slash-command {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1.6fr) auto;
+  gap: var(--sp-3);
+  width: 100%;
+  align-items: center;
+  padding: var(--sp-3);
+  color: var(--text-secondary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+
+.slash-command:hover,
+.slash-command.is-active {
+  color: var(--text-primary);
+  background: var(--bg-raised);
+}
+
+.slash-command code {
+  overflow: hidden;
+  color: var(--accent);
+  font: 600 var(--fs-caption)/1.3 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command > span {
+  display: grid;
+  gap: 2px;
+  font-size: var(--fs-caption);
+}
+
+.slash-command > span strong {
+  color: var(--text-primary);
+  font-size: var(--fs-body);
+}
+
+.slash-command small {
+  color: var(--text-faint);
+  font-size: var(--fs-caption);
+  white-space: nowrap;
 }
 
 .composer-attachments {
@@ -1317,6 +1395,20 @@
 
   .composer-wrap {
     padding: var(--sp-3) var(--sp-3) max(var(--sp-4), env(safe-area-inset-bottom));
+  }
+
+  .slash-menu {
+    width: calc(100% - var(--sp-4) * 2);
+  }
+
+  .slash-menu-head span,
+  .slash-command small {
+    display: none;
+  }
+
+  .slash-command {
+    grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+    gap: var(--sp-2);
   }
 
   .composer {
