@@ -29,6 +29,13 @@ GROQ_TPM: dict[str, int] = {
 GROQ_TPM_DEFAULT = 6_000
 _OUTPUT_HEADROOM = 2_000  # slice of TPM reserved for the model's own output
 
+# Reasoning models bill hidden reasoning against the SAME budget as the visible
+# answer, so 2000 does not buy them a complete reply -- measured 2026-08-08,
+# qwen3.6-27b needs ~4000 for reasoning plus a finished answer and truncates
+# below that. Reserve accordingly when trimming input, otherwise the input
+# quietly consumes the room the answer needs and the reply is cut mid-word.
+_REASONING_OUTPUT_HEADROOM = 5_000
+
 
 class GroqConnector(BaseModelConnector):
     BASE_URL       = "https://api.groq.com/openai/v1"
@@ -93,11 +100,29 @@ class GroqConnector(BaseModelConnector):
         fix in cerebras_conn.py (2026-07-09): the agent loop prepends several
         KB of injected context before the task in the first user message, so
         a head-only slice can contain zero task text."""
-        if len(content) <= cls._ANCHOR_MAX_CHARS:
+        return cls._anchor_content_to(content, cls._ANCHOR_MAX_CHARS)
+
+    @staticmethod
+    def _anchor_content_to(content: str, max_chars: int) -> str:
+        """The head+tail slice above, at a caller-chosen size.
+
+        Split out because TPM overflow needs the same shape at a budget that
+        varies per model, rather than the fixed re-anchoring constant.
+        """
+        if len(content) <= max_chars:
             return content
-        head = content[:500]
-        tail = content[-(cls._ANCHOR_MAX_CHARS - 520):]
-        return f"{head}\n...\n{tail}"
+        head_len = min(500, max(1, max_chars // 4))
+        tail_len = max(1, max_chars - head_len - 20)   # 20 for the "\n...\n" marker
+        return f"{content[:head_len]}\n...\n{content[-tail_len:]}"
+
+    def _is_reasoning_model(self) -> bool:
+        """Models that spend the token budget on hidden reasoning before any
+        visible text. Same test the reasoning_format=hidden branch uses, so the
+        two can never disagree about which models this applies to."""
+        return "qwen3" in self.api_model
+
+    def _output_headroom(self) -> int:
+        return _REASONING_OUTPUT_HEADROOM if self._is_reasoning_model() else _OUTPUT_HEADROOM
 
     def _truncate_messages(self, messages: list[dict], tools: list[dict]) -> list[dict]:
         """
@@ -106,7 +131,7 @@ class GroqConnector(BaseModelConnector):
         TPM budget. System prompt is always preserved; a user message
         (re-anchored on the original task if none survives) is guaranteed.
         """
-        budget      = GROQ_TPM.get(self.api_model, GROQ_TPM_DEFAULT) - _OUTPUT_HEADROOM
+        budget      = GROQ_TPM.get(self.api_model, GROQ_TPM_DEFAULT) - self._output_headroom()
         tools_toks  = self._est(json.dumps(tools))
         remaining   = budget - tools_toks
 
@@ -156,7 +181,38 @@ class GroqConnector(BaseModelConnector):
                 f"to stay inside {budget} TPM budget"
             )
 
-        return system + kept
+        out = system + kept
+
+        # Dropping whole turns cannot help when a SINGLE turn is oversize: the
+        # loop above always keeps at least one turn (`and kept_turns`), so one
+        # giant user message passed through untouched and Groq rejected the
+        # request outright. That is the 413 seen live from free_manager -- the
+        # clamp alone could not fix it, because clamping only shrinks the
+        # OUTPUT budget while the input was already over TPM by itself.
+        # So clamp the content as a last resort, head+tail via the same slicer
+        # used for re-anchoring: the ask usually sits at one end and the bulk
+        # detail in the middle, so a head-only cut can lose the actual request.
+        overflow = sum(self._msg_cost(m) for m in out) - budget
+        if overflow > 0:
+            biggest = max(
+                (m for m in out if m.get("role") != "system"),
+                key=lambda m: len(str(m.get("content") or "")),
+                default=None,
+            )
+            if biggest is not None:
+                content = str(biggest.get("content") or "")
+                # budget is in tokens, _est is chars//3 -- convert back, and
+                # keep a floor so we never slice a message down to nothing.
+                allowed_chars = max(500, (self._est(content) - overflow) * 3)
+                if allowed_chars < len(content):
+                    biggest["content"] = self._anchor_content_to(content, allowed_chars)
+                    logger.warning(
+                        f"[groq/{self.api_model}] single message exceeded the "
+                        f"{budget} TPM budget — sliced {len(content)} chars to "
+                        f"{len(biggest['content'])}"
+                    )
+
+        return out
 
     async def _call(self, prompt, system, images, max_tokens, temperature, **kwargs) -> str:
         if not settings.groq_api_key:
@@ -175,8 +231,36 @@ class GroqConnector(BaseModelConnector):
             # Reasoning still CONSUMES max_tokens even when hidden — observed live:
             # qwen3.6-27b returned 0 chars on a max_tokens=1000 planning call because
             # the whole budget went to reasoning before any visible text was emitted.
-            # Same floor the Cerebras connector already applies for its reasoning models.
-            max_tokens = max(max_tokens, 2048)
+            #
+            # 2048 fixed the EMPTY answers but not the TRUNCATED ones: it is enough
+            # to start emitting text and not enough to finish. Measured live
+            # 2026-08-08 on one graded task, finish_reason straight from the API:
+            #
+            #   max_tokens=2048   7/7 calls finish_reason="length", every one
+            #                     pinned at exactly 2048 completion tokens
+            #   max_tokens=4096   0/3 truncated, but real usage was 2611-3982,
+            #                     i.e. the worst sample used 97% of the cap
+            #   max_tokens=6144   0/1 truncated, used 3319
+            #
+            # So reasoning + a complete answer needs ~4000 tokens on real work.
+            # 5000 leaves genuine headroom instead of 3%. The truncation was
+            # invisible in logs -- cut text usually ends on a plausible
+            # character, and it surfaced only as SyntaxError on half-written
+            # code in graded runs, which reads like a weak model and is not.
+            max_tokens = max(max_tokens, 5000)
+        # Clamp AFTER any floor above, and here in _call as well as in
+        # _call_with_tools. _call never clamped, so it relied entirely on each
+        # caller hand-picking a TPM-safe number -- and one did not: gpt-oss-120b
+        # returned "413 Request too large" live from manager/free_manager.py.
+        # Groq counts max_tokens toward the request size, so a large input plus
+        # a generous budget is rejected outright even when the real completion
+        # would have been short.
+        # Trim input first, clamp second -- the same order _call_with_tools
+        # uses. Clamping alone cannot save an oversize prompt: it only shrinks
+        # the OUTPUT budget, so a request whose input already exceeds TPM is
+        # still rejected. (No tools on this path, hence the empty list.)
+        messages = self._truncate_messages(messages, [])
+        max_tokens = self._clamp_to_tpm(max_tokens, messages)
         resp = await self._client.chat.completions.create(
             model=self.api_model, messages=messages,
             max_tokens=min(max_tokens, 32_768), temperature=temperature, **extra,
@@ -268,7 +352,15 @@ class GroqConnector(BaseModelConnector):
         if tools:
             est_input += sum(len(str(t)) for t in tools) // 3
         fitted = tpm - est_input - 800  # margin for tokenizer variance
-        return max(1024, min(max_tokens, fitted))
+        # The floor must not undo the reasoning budget. A long input drives
+        # `fitted` down, and a flat 1024 floor would hand a reasoning model less
+        # than it needs to finish -- reintroducing the exact truncation the
+        # floor in _call exists to prevent, just via a different door. Callers
+        # pair this with _truncate_messages, which already reserves the larger
+        # headroom for these models, so the input should have been trimmed to
+        # fit before we get here.
+        floor = _REASONING_OUTPUT_HEADROOM if self._is_reasoning_model() else 1024
+        return max(floor, min(max_tokens, fitted))
 
     async def _call_with_tools(self, messages, tools, max_tokens, temperature, **kwargs) -> dict:
         """Native Groq tool calling."""

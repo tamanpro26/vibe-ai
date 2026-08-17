@@ -36,6 +36,14 @@ class CerebrasConnector(BaseModelConnector):
         # of tokens on hidden reasoning before emitting content; a small max_tokens
         # truncates mid-reasoning and returns None.
         max_tokens = max(max_tokens, 2048)
+        # _truncate existed with a proper adaptive budget, but only the
+        # tool-calling path used it -- _call sent whatever it was handed. So a
+        # long prompt went straight to the 400 this class already knows how to
+        # avoid. Reproduced live 2026-08-09 on zai-glm-4.7: 4.6s at 5k chars,
+        # 56.9s at 12k, and at 24k chars a hard
+        # "400 Please reduce the length of the message".
+        # This is the same defect shape as groq_conn._call, fixed the same way.
+        messages = self._truncate(messages)
         resp = await self._client.chat.completions.create(
             model=self.api_model, messages=messages,
             max_tokens=min(max_tokens, 16_384), temperature=temperature,
@@ -49,7 +57,15 @@ class CerebrasConnector(BaseModelConnector):
     # and additionally ADAPT at runtime — the error body states the current
     # limit exactly ("Current length is N while limit is M"), which we parse
     # and store per api_model, then retry once with tighter truncation.
-    _INPUT_BUDGET_TOKENS = 6_000
+    # 6000 left NO room for the completion. The discovered-limit path already
+    # reserves headroom (`discovered * 0.75`), but this default path did not,
+    # so a request could fill ~6000 tokens of input against an observed 8192
+    # limit and leave ~2000 for a model that spends its whole budget on hidden
+    # reasoning before emitting anything -- which returns an EMPTY response,
+    # not an error. That is the "glm_47_cerebras returned an empty response"
+    # seen live (44.2s wasted across one traced request), reproduced 2026-08-09
+    # at 48k chars of input and fixed by this line.
+    _INPUT_BUDGET_TOKENS = 4_000
     _DISCOVERED_LIMITS: dict[str, int] = {}   # api_model -> tokens (from error bodies)
     _CTX_LIMIT_RE = re.compile(r"limit is (\d+)")
 
@@ -202,7 +218,40 @@ class CerebrasConnector(BaseModelConnector):
                 f"[cerebras/{self.api_model}] truncated context: "
                 f"kept {len(kept)}/{len(convo)} messages within input budget"
             )
-        return system + kept
+
+        out = system + kept
+
+        # Turn-level dropping cannot rescue a SINGLE oversize turn: the loop
+        # above always keeps at least one (`and kept_turns`), so one very large
+        # user message survived intact and Cerebras rejected the whole request.
+        # Reproduced live 2026-08-09 on zai-glm-4.7: 24k chars ->
+        # "400 Please reduce the length of the message", while 12k merely got
+        # slow. Same hole, same fix as groq_conn._truncate_messages.
+        budget = self._budget()
+        overflow = sum(self._est(str(m.get("content") or "")) for m in out) - budget
+        if overflow > 0:
+            biggest = max(
+                (m for m in out if m.get("role") != "system"),
+                key=lambda m: len(str(m.get("content") or "")),
+                default=None,
+            )
+            if biggest is not None:
+                content = str(biggest.get("content") or "")
+                allowed_chars = max(500, (self._est(content) - overflow) * 3)
+                if allowed_chars < len(content):
+                    head_len = min(500, max(1, allowed_chars // 4))
+                    tail_len = max(1, allowed_chars - head_len - 20)
+                    # HEAD+TAIL for the same reason _anchor_content is: the
+                    # agent loop prepends injected context, so the actual task
+                    # is at the tail and a head-only cut can drop it entirely.
+                    biggest["content"] = f"{content[:head_len]}\n...\n{content[-tail_len:]}"
+                    logger.warning(
+                        f"[cerebras/{self.api_model}] single message exceeded the "
+                        f"{budget}-token input budget — sliced {len(content)} chars "
+                        f"to {len(biggest['content'])}"
+                    )
+
+        return out
 
     async def _call_with_tools(self, messages, tools, max_tokens, temperature, **kwargs) -> dict:
         """Cerebras supports OpenAI-compatible function calling."""

@@ -36,7 +36,22 @@ class NvidiaConnector(BaseModelConnector):
             raise RuntimeError("NVIDIA_API_KEY not set — free at https://build.nvidia.com")
         messages = []
         if system: messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        # `images` was accepted and then silently DROPPED. That is worse than
+        # not supporting vision: a NIM VLM in the vision team's failover chain
+        # received text only and answered "unable to identify shapes or colors
+        # due to insufficient input data" -- a confident, plausible, wrong
+        # answer rather than an error. Observed live 2026-08-09 when
+        # gemini_flash_vision hit its daily 429 cap and failover landed here.
+        # NIM VLMs take OpenAI-style content arrays with data-URI image_url.
+        if images:
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for img in images:
+                url = img if str(img).startswith(("http://", "https://", "data:")) \
+                    else f"data:image/png;base64,{img}"
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
         # extra_body carries chat_template_kwargs for NIM DeepSeek thinking;
         # request_timeout gives a silently-reasoning model room past the 30s
         # client default. Both are model-configured (see ModelDef / Feature 1).

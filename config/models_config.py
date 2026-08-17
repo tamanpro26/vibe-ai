@@ -167,7 +167,14 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
     "gpt_oss_120b_free_intent": ModelDef(
         model_id="gpt_oss_120b_free_intent",
         provider="openrouter",
-        api_model="openai/gpt-oss-120b:free",   # Strongest free OpenAI-family model on OpenRouter
+        # Was openai/gpt-oss-120b:free. OpenRouter retired that slug: probed
+        # live 2026-08-09, it returns 404 on EVERY call -- "unavailable for
+        # free ... use this slug instead: openai/gpt-oss-120b" (the paid one).
+        # This is refiner STAGE 1, so every non-fast-path request in the system
+        # was paying a full generate_resilient failover walk before recovering.
+        # Repointed to a free slug verified answering the same day rather than
+        # to the paid one, which would silently start billing.
+        api_model="nvidia/nemotron-3-super-120b-a12b:free",
         team="prompt",
         role="Intent parser",
         context_window=128_000,
@@ -365,9 +372,11 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
     "qwen3_coder_openrouter": ModelDef(
         model_id="qwen3_coder_openrouter",
         provider="openrouter",
-        api_model="qwen/qwen3-coder:free",
+        # Was qwen/qwen3-coder:free -- 404 as of 2026-08-09, same OpenRouter
+        # free-slug retirement. gpt-oss-20b:free probed alive the same day.
+        api_model="openai/gpt-oss-20b:free",
         team="code",
-        role="Manual-select coder (live-verified 2026-07-16: real but currently oversubscribed upstream)",
+        role="Manual-select coder",
         context_window=1_048_576,
         capabilities=["code_generation"],
     ),
@@ -403,7 +412,11 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
     "llama4_maverick": ModelDef(
         model_id="llama4_maverick",
         provider="openrouter",
-        api_model="meta-llama/llama-4-maverick:free",  # Real Llama 4 Maverick — distinct from Nemotron
+        # Was meta-llama/llama-4-maverick:free -- 404 as of 2026-08-09.
+        # Its callers (teams/vision.py, cli.py, tools/agent_tools.py) all list
+        # it as a VISION fallback, so it is repointed to a free slug that is
+        # both alive and actually multimodal, not merely alive.
+        api_model="nvidia/nemotron-nano-12b-v2-vl:free",
         team="vision",
         role="Visual debugger",
         context_window=524_288,
@@ -479,7 +492,11 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
     "lfm_router": ModelDef(
         model_id="lfm_router",
         provider="openrouter",
-        api_model="liquid/lfm-2.5-1.2b-instruct:free",  # Tiny 1.2B — ultra-fast routing
+        # Was liquid/lfm-2.5-1.2b-instruct:free -- OpenRouter returns
+        # "No endpoints found for liquid/..." as of 2026-08-09, i.e. the model
+        # is gone rather than merely paid. gemma-4-31b-it:free probed alive and
+        # is small enough to keep routing cheap.
+        api_model="google/gemma-4-31b-it:free",
         team="router",
         role="Logic router",
         context_window=32_768,
@@ -557,6 +574,129 @@ MODEL_REGISTRY: dict[str, ModelDef] = {
         role="Manual-select fallback -- OmniRoute's own best-available-coding-model router",
         context_window=1_048_576,
         capabilities=["coding", "tool_calling", "reasoning"],
+    ),
+
+    # ── Fleet expansion (2026-08-09) ──────────────────────────────────────────
+    # Every entry below was probed with a real generate() call BEFORE being
+    # added, because a provider catalog is not availability: NVIDIA advertises
+    # 102 models on this key and only 5 actually answer -- the rest return
+    # 404 "Function not found" because the tier does not have them deployed.
+    # That is the same failure that left four 404 models sitting in this
+    # registry for weeks, so nothing goes in here unprobed.
+    #
+    # Deliberately NOT added: meta/llama-3.3-70b-instruct (answers, but took
+    # 86.5s for a two-token reply -- cold start or not, it is unverified as
+    # fast and this fleet already loses ~28% of its time to slow providers),
+    # meta/llama-3.2-90b-vision-instruct and meta/llama-3.2-1b/3b-instruct
+    # (90s timeouts).
+
+    "north_mini_code": ModelDef(
+        model_id="north_mini_code",
+        provider="openrouter",
+        api_model="cohere/north-mini-code:free",
+        team="code",
+        role="Compact code generator",
+        context_window=128_000,
+        capabilities=["code_generation", "instruction_following"],
+    ),
+    "laguna_s_coder": ModelDef(
+        model_id="laguna_s_coder",
+        provider="openrouter",
+        api_model="poolside/laguna-s-2.1:free",
+        team="code",
+        role="Code specialist (Poolside)",
+        context_window=128_000,
+        capabilities=["code_generation", "reasoning"],
+    ),
+    "llama32_11b_vision": ModelDef(
+        model_id="llama32_11b_vision",
+        provider="nvidia",
+        api_model="meta/llama-3.2-11b-vision-instruct",
+        team="vision",
+        role="Screenshot analyst",
+        context_window=128_000,
+        capabilities=["vision", "multimodal", "image_understanding"],
+    ),
+    "nemotron_nano_vl_8b": ModelDef(
+        model_id="nemotron_nano_vl_8b",
+        provider="nvidia",
+        api_model="nvidia/llama-3.1-nemotron-nano-vl-8b-v1",
+        team="vision",
+        role="Compact visual reasoner",
+        context_window=128_000,
+        capabilities=["vision", "multimodal", "reasoning"],
+    ),
+    "nemotron_super_49b": ModelDef(
+        model_id="nemotron_super_49b",
+        provider="nvidia",
+        api_model="nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        team="brain",
+        role="Deep reasoner",
+        context_window=128_000,
+        capabilities=["reasoning", "long_context", "analysis"],
+    ),
+    "llama31_70b_nim": ModelDef(
+        model_id="llama31_70b_nim",
+        provider="nvidia",
+        api_model="meta/llama-3.1-70b-instruct",
+        team="brain",
+        role="General analyst",
+        context_window=128_000,
+        capabilities=["reasoning", "instruction_following"],
+    ),
+    "nemotron_lightning": ModelDef(
+        model_id="nemotron_lightning",
+        provider="openrouter",
+        api_model="nvidia/nemotron-3.5-lightning:free",
+        team="router",
+        role="Fast classifier",
+        context_window=128_000,
+        capabilities=["routing", "fast_inference", "structured_output"],
+    ),
+    "lfm_26b_router": ModelDef(
+        model_id="lfm_26b_router",
+        provider="openrouter",
+        api_model="liquid/lfm-2.5-2.6b:free",
+        team="router",
+        role="Tiny logic router",
+        context_window=32_768,
+        capabilities=["routing", "logic", "fast_inference"],
+    ),
+    "nemotron_nano_9b": ModelDef(
+        model_id="nemotron_nano_9b",
+        provider="openrouter",
+        api_model="nvidia/nemotron-nano-9b-v2:free",
+        team="prompt",
+        role="Constraint extractor",
+        context_window=128_000,
+        capabilities=["instruction_following", "intent_extraction"],
+    ),
+    "gemma4_26b_prompt": ModelDef(
+        model_id="gemma4_26b_prompt",
+        provider="openrouter",
+        api_model="google/gemma-4-26b-a4b-it:free",
+        team="prompt",
+        role="Requirement clarifier",
+        context_window=128_000,
+        capabilities=["instruction_following", "structured_output"],
+    ),
+    "nemotron_nano_30b": ModelDef(
+        model_id="nemotron_nano_30b",
+        provider="openrouter",
+        api_model="nvidia/nemotron-3-nano-30b-a3b:free",
+        team="prompt",
+        role="Scope analyst",
+        context_window=128_000,
+        capabilities=["instruction_following", "reasoning"],
+    ),
+    "laguna_xs_manager": ModelDef(
+        model_id="laguna_xs_manager",
+        provider="openrouter",
+        api_model="poolside/laguna-xs-2.1:free",
+        team="manager",
+        role="Lightweight coordinator",
+        context_window=128_000,
+        capabilities=["instruction_following", "coordination"],
     ),
 }
 
