@@ -39,7 +39,7 @@ from teams.prompt_refiner import PromptRefinerPipeline
 from tools.manager_fallback import fallback_chain, BACKUP_MANAGER_SYSTEM
 
 
-_FORCEABLE_TEAMS = ("brain", "code", "vision", "design")
+_FORCEABLE_TEAMS = ("brain", "code", "vision", "design", "research")
 
 # Website reasoning levels are orchestration preferences, not model aliases.
 # Their presence enters the Manager's normal refiner -> specialist-team ->
@@ -86,6 +86,8 @@ def _get_team(name: str):
         from teams.vision import VisionTeam; return VisionTeam()
     if name == "design":
         from teams.design import DesignTeam; return DesignTeam()
+    if name == "research":
+        from teams.research import ResearchTeam; return ResearchTeam()
     if name == "router":
         from teams.router_team import RouterTeam; return RouterTeam()
     raise ValueError(f"Unknown team: {name}")
@@ -391,10 +393,15 @@ class ClaudeManager:
         # A real image/design/vision request must never hit the fast path
         # (a plain text model with no image capability), even if one of the
         # two signals the classifier emits is unreliable this run.
+        # "research" is here for the same reason ui_design is: the fast path is
+        # one plain text model answering from its weights. That is precisely the
+        # wrong answer for a question about current facts -- it would produce a
+        # confident, uncited, potentially stale reply instead of one grounded in
+        # retrieved sources. Route it to ResearchTeam, which searches first.
         _needs_full_pipeline = (
             quick.get("needs_vision")
             or quick.get("needs_design")
-            or quick.get("task_type") in ("ui_design", "animation", "video_analysis")
+            or quick.get("task_type") in ("ui_design", "animation", "video_analysis", "research")
         )
         # A pure coding/debugging task takes the direct path at ANY complexity,
         # not just "simple". Measured 2026-08-08 on vibeloop's 10-task v4 train
@@ -880,6 +887,24 @@ class ClaudeManager:
 
     # ── Synthesis via fallback chain ──────────────────────────────────────────
 
+    # A "**Sources**" block is a factual attachment, not prose to be polished.
+    # Measured 2026-08-09: the research team returns a cited answer plus this
+    # block, and synthesis dropped it EVERY time -- inline URLs survived only
+    # sometimes (0 urls on one run, 12 on the next, same question). Citations
+    # are the entire contract of a grounded answer, so they cannot depend on a
+    # rewrite step happening to keep them.
+    _SOURCES_RE = re.compile(r"\n*---\n\*\*Sources\*\*\n(?:.+\n?)+", re.MULTILINE)
+    # The same rewrite also throws away GENERATED ARTIFACTS. Measured
+    # 2026-08-09: the design team returned a real Pollinations image URL and
+    # synthesis dropped it, substituting inline SVG it wrote itself -- the only
+    # surviving URL in the final answer was the w3.org SVG namespace. A user
+    # asking for an image got prose about an image. An artifact URL is a
+    # pointer to work already done; it cannot be re-derived by paraphrasing.
+    _ARTIFACT_RE = re.compile(
+        r"https?://[^\s<>\"')]+(?:pollinations|\.png|\.jpg|\.jpeg|\.webp|\.gif)[^\s<>\"')]*",
+        re.IGNORECASE,
+    )
+
     async def _synthesise(self, task_json: TaskJSON, outputs: dict[str, str]) -> str:
         logger.info("[manager] synthesising final response")
         block = "\n\n".join(f"=== {t.upper()} ===\n{o}" for t, o in outputs.items())
@@ -887,15 +912,46 @@ class ClaudeManager:
             f"[Running on backup manager: {fallback_chain.active_name}]\n\n"
             if fallback_chain.using_backup else ""
         )
-        return await self._manager_generate(
+        # Pull any sources block out BEFORE synthesis so it can be restored
+        # verbatim afterwards. Asking the model nicely is done too, but the
+        # re-attach below is what actually guarantees it.
+        sources = ""
+        artifacts: list[str] = []
+        for out in outputs.values():
+            found = self._SOURCES_RE.search(out or "")
+            if found and not sources:
+                sources = found.group(0).rstrip()
+            for url in self._ARTIFACT_RE.findall(out or ""):
+                if url not in artifacts:
+                    artifacts.append(url)
+
+        final = await self._manager_generate(
             prompt=(
                 f"{active_note}Synthesise into one polished response.\n\n"
+                "Keep every source URL, citation marker and generated-asset URL exactly "
+                "as given. They are evidence and delivered work, not styling: an "
+                "unsourced claim is worse than no claim, and describing an image the "
+                "teams already generated is not the same as delivering it. Never "
+                "replace a generated asset URL with your own substitute.\n\n"
                 f"Request: {task_json.original_prompt}\n\n{block}"
             ),
             max_tokens=4000,
             temperature=0.4,
             task_kind="synthesis",
         )
+        final = final or ""
+
+        # Instructions are asked for above; these re-attaches are what actually
+        # guarantee it, because a rewrite step that ignores them is exactly the
+        # measured failure.
+        missing = [u for u in artifacts if u not in final]
+        if missing:
+            logger.info(f"[manager] synthesis dropped {len(missing)} asset url(s) — re-attaching")
+            final = f"{final.rstrip()}\n\n" + "\n".join(f"![generated asset]({u})" for u in missing)
+        if sources and "**Sources**" not in final:
+            logger.info("[manager] synthesis dropped the sources block — re-attaching")
+            final = f"{final.rstrip()}\n\n{sources}"
+        return final
 
     async def _handle_message(self, msg: IMCPMessage) -> None:
         logger.debug(f"[manager] bus: {msg.type.value} from {msg.from_.model}")

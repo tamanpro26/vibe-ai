@@ -110,6 +110,17 @@ class VisionTeam(BaseTeam):
     # nemotron_vl / llama4_maverick remain in the registry as generate_resilient fallbacks
     # but free-tier OpenRouter endpoints strip image payloads — don't use as primaries.
     _UI_MODELS     = ["gemini_flash_vision", "gemini_20_flash_ocr"]
+    # Both analysis paths fan out with gather(return_exceptions=True), which
+    # degrades gracefully on FAILURE but had nothing bounding SLOWNESS -- so
+    # the team finished only when its slowest model did. Measured 2026-08-09 on
+    # the same 512x512 image: 25.7s when Gemini was healthy, 147s when it was
+    # burning 429 retries against its daily cap, which pushed the whole request
+    # past a 420s ceiling and returned nothing at all.
+    # Losing one of two analysts is already handled below (the loop counts
+    # failures and still reports); losing the answer is not.
+    # ponytail: fixed ceiling, not adaptive -- revisit if healthy vision calls
+    # start legitimately exceeding 60s rather than raising this blindly.
+    _VISION_MODEL_TIMEOUT_S = 60
     _VIDEO_MODELS  = ["gemini_flash_vision", "gemini_20_flash_ocr"]
     _AUDIO_MODEL   = "whisper_large_v3"
 
@@ -195,17 +206,23 @@ class VisionTeam(BaseTeam):
 
         # ── Step 3: Run vision models + Whisper concurrently ──────────
         tasks = [
-            self._analyze_with_motion_context(
-                model_id="nemotron_vl",
-                packet=packet,
-                instruction=instruction,
-                task_json=task_json,
+            asyncio.wait_for(
+                self._analyze_with_motion_context(
+                    model_id="nemotron_vl",
+                    packet=packet,
+                    instruction=instruction,
+                    task_json=task_json,
+                ),
+                timeout=self._VISION_MODEL_TIMEOUT_S,
             ),
-            self._analyze_with_motion_context(
-                model_id="llama4_maverick",
-                packet=packet,
-                instruction=instruction,
-                task_json=task_json,
+            asyncio.wait_for(
+                self._analyze_with_motion_context(
+                    model_id="llama4_maverick",
+                    packet=packet,
+                    instruction=instruction,
+                    task_json=task_json,
+                ),
+                timeout=self._VISION_MODEL_TIMEOUT_S,
             ),
             self._transcribe_audio(video_path or ""),
         ]
@@ -440,13 +457,16 @@ class VisionTeam(BaseTeam):
             images.append(image_b64)
 
         tasks = [
-            generate_resilient(
-                model_id,
-                prompt=instruction or "Analyse this screenshot in detail.",
-                system=_SYSTEM_PROMPTS.get(model_id, ""),
-                images=images,
-                max_tokens=1500,
-                temperature=0.3,
+            asyncio.wait_for(
+                generate_resilient(
+                    model_id,
+                    prompt=instruction or "Analyse this screenshot in detail.",
+                    system=_SYSTEM_PROMPTS.get(model_id, ""),
+                    images=images,
+                    max_tokens=1500,
+                    temperature=0.3,
+                ),
+                timeout=self._VISION_MODEL_TIMEOUT_S,
             )
             for model_id in self._UI_MODELS
         ]

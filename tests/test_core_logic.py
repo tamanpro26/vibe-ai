@@ -6,6 +6,7 @@ inputs), no provider keys needed. Run: pytest tests/ -q
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -277,11 +278,18 @@ class TestCerebrasTruncateAccountsForToolsSchema:
 
     def test_large_tools_schema_shrinks_effective_budget(self):
         c = self._connector()
-        # Two turns (~2800 est-tokens each -> ~5600 total) that both fit
-        # comfortably under the default 6000-token budget with no tools.
+        # Sized RELATIVE to the connector's real budget, not to a hardcoded
+        # number: these were literal 8_400-char turns tuned to a 6000-token
+        # budget, and silently became a failure the moment that budget was
+        # lowered to leave room for the completion. The invariant under test is
+        # "a tools schema shrinks the effective budget", not any particular
+        # budget value. _est is chars//3, so 0.4 * budget tokens per turn puts
+        # two turns at ~80% of budget -- comfortably in, with headroom.
+        budget = c._budget()
+        turn_chars = int(budget * 0.4) * 3
         messages = [{"role": "system", "content": "sys"}]
-        messages += self._turn(8_400, "1")
-        messages += self._turn(8_400, "2")
+        messages += self._turn(turn_chars, "1")
+        messages += self._turn(turn_chars, "2")
 
         without_tools = c._truncate(messages)
         kept_turns_no_tools = sum(
@@ -289,10 +297,11 @@ class TestCerebrasTruncateAccountsForToolsSchema:
         )
         assert kept_turns_no_tools == 2, "both turns should fit with no tools schema counted"
 
-        # A tools schema costing ~2500 est-tokens (json ~7500 chars) leaves
-        # only ~3500 tokens of real headroom -- not enough for both turns.
+        # A tools schema costing ~40% of the budget leaves too little headroom
+        # for both turns, so one must be dropped. Also derived from `budget`
+        # rather than hardcoded, for the same reason as above.
         big_tools = [{"type": "function", "function": {
-            "name": "x", "description": "y" * 7_500, "parameters": {},
+            "name": "x", "description": "y" * (int(budget * 0.4) * 3), "parameters": {},
         }}]
         with_tools = c._truncate(messages, big_tools)
         kept_turns_with_tools = sum(
@@ -4552,6 +4561,12 @@ class TestPrunedDirectoryWalks:
         assert not any("node_modules" in p.parts for p in found)
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("pyautogui") is None,
+    reason="pyautogui is an optional desktop-automation dependency, deliberately "
+           "not in requirements.txt/pyproject.toml -- these two tests failed on "
+           "every clean checkout, which trains people to ignore a red suite",
+)
 class TestAutomationNonBlocking:
     """#14 -- wait_for_window's poll loop and type_text's clipboard-restore
     sleep are blocking time.sleep calls, invoked directly from an async
@@ -7145,3 +7160,200 @@ class TestGWBlackboardSafeConfidence:
         bb = asyncio.run(run())
         assert len(bb.hypotheses) == 1
         assert bb.hypotheses[0].confidence == 0.5
+
+
+# ── Research team (teams/research.py) ──────────────────────────────────────────
+# The team exists because research was only ever a TOOL bolted onto other flows
+# (tools/search.py, tools/domain_retriever.py) with no team the router could
+# dispatch a "what is actually true right now" question to -- so it landed on
+# brain, which answers from weights. These cover the parts that are logic
+# rather than prompt: dedup, partial-failure tolerance, and the refusal to
+# answer unsourced. No live API calls.
+
+class TestResearchTeam:
+    @staticmethod
+    def _team(monkeypatch, search_impl, synth="grounded answer [1]"):
+        import teams.research as research_mod
+
+        team = research_mod.ResearchTeam()
+
+        async def fake_plan(question):
+            return ["query one", "query two"]
+
+        async def fake_generate(model_id, **kwargs):
+            return synth
+
+        monkeypatch.setattr(team, "_plan_queries", fake_plan)
+        monkeypatch.setattr(research_mod, "generate_resilient", fake_generate)
+        monkeypatch.setattr(team._stack, "search", search_impl)
+        return team, research_mod
+
+    @staticmethod
+    def _result(title, url):
+        from tools.search import SearchResult
+        return SearchResult(title=title, url=url, snippet="s", full_text="body")
+
+    def _run(self, team):
+        from core.imcp import TaskJSON
+        task = TaskJSON(task_id="t", original_prompt="q", refined_prompt="q")
+        return asyncio.run(team._execute(task, "what changed?", 1, {}))
+
+    def test_dedups_sources_by_url_across_queries(self, monkeypatch):
+        # Two queries legitimately return the same page; citing it twice would
+        # make one source look like corroboration from two.
+        async def search(query, extract_full=None):
+            return [self._result("Shared", "https://a"), self._result(query, f"https://{query}")]
+
+        team, _ = self._team(monkeypatch, search)
+        out = self._run(team)
+        assert out.count("https://a") == 1
+        assert "[2]" in out and "[3]" in out and "[4]" not in out
+
+    def test_one_failing_query_does_not_lose_the_other_sources(self, monkeypatch):
+        # Same straggler lesson the prompt refiner learned: a partial source set
+        # beats failing the whole request.
+        async def search(query, extract_full=None):
+            if query == "query one":
+                raise RuntimeError("provider down")
+            return [self._result("Survivor", "https://b")]
+
+        team, _ = self._team(monkeypatch, search)
+        out = self._run(team)
+        assert "https://b" in out
+        assert "grounded answer" in out
+
+    def test_no_sources_refuses_instead_of_answering_from_memory(self, monkeypatch):
+        # The whole point of the team. Answering from weights here and calling
+        # it research is the failure mode, not a graceful fallback.
+        async def search(query, extract_full=None):
+            return []
+
+        sentinel = "THIS CAME FROM MODEL WEIGHTS"
+        team, _ = self._team(monkeypatch, search, synth=sentinel)
+        out = self._run(team)
+        assert sentinel not in out
+        assert "could not retrieve any sources" in out
+
+    def test_research_is_dispatchable_and_never_takes_the_fast_path(self):
+        # A research question answered by one text model with no sources is
+        # exactly what this team exists to prevent.
+        import inspect
+        from manager.claude_manager import _FORCEABLE_TEAMS, _get_team
+        import manager.claude_manager as manager_mod
+
+        assert "research" in _FORCEABLE_TEAMS
+        assert _get_team("research").team_name == "research"
+        source = inspect.getsource(manager_mod.ClaudeManager._try_fast_path)
+        assert '"research"' in source, "research must be excluded from the fast path"
+
+
+# ── Groq TPM budgeting (models/connectors/groq_conn.py) ───────────────────────
+# Groq counts max_tokens toward the request size, so a request is rejected with
+# 413 when est_input + max_tokens exceeds TPM even if the real completion would
+# have been short. _call never clamped (only _call_with_tools did), and a live
+# 413 duly fired from manager/free_manager.py. These assert the arithmetic
+# rather than the API, so they run offline and cannot flake.
+
+class TestGroqTpmBudgeting:
+    @staticmethod
+    def _conn(model_id):
+        from config.models_config import MODEL_REGISTRY
+        from models.connectors.groq_conn import GroqConnector
+        return GroqConnector(MODEL_REGISTRY[model_id])
+
+    @staticmethod
+    def _fits(conn, messages, max_tokens):
+        """The exact condition Groq rejects with 413."""
+        from models.connectors.groq_conn import GROQ_TPM, GROQ_TPM_DEFAULT
+        tpm = GROQ_TPM.get(conn.api_model, GROQ_TPM_DEFAULT)
+        est_input = sum(len(str(m)) for m in messages) // 3
+        return est_input + max_tokens <= tpm
+
+    def test_oversize_prompt_is_trimmed_and_clamped_under_tpm(self):
+        # The live 413 shape: a big prompt plus a generous budget.
+        conn = self._conn("gpt_oss_120b_coder")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "def helper(x):\n    return x*2\n" * 900},
+        ]
+        trimmed = conn._truncate_messages(messages, [])
+        clamped = conn._clamp_to_tpm(8192, trimmed)
+        assert self._fits(conn, trimmed, clamped), "still exceeds TPM -- would 413"
+
+    def test_reasoning_model_keeps_a_completable_budget(self):
+        # The floor interaction: a long input drives `fitted` down, and a flat
+        # 1024 floor would hand a reasoning model less than it needs to finish,
+        # reintroducing the truncation the floor in _call exists to prevent.
+        from models.connectors.groq_conn import _REASONING_OUTPUT_HEADROOM
+        conn = self._conn("qwen36_27b_verifier")
+        assert conn._is_reasoning_model()
+        messages = [{"role": "user", "content": "analyse this\n" * 4000}]
+        clamped = conn._clamp_to_tpm(5000, conn._truncate_messages(messages, []))
+        assert clamped >= _REASONING_OUTPUT_HEADROOM, (
+            "reasoning model clamped below what it needs to finish an answer"
+        )
+
+    def test_non_reasoning_model_is_not_given_the_reasoning_floor(self):
+        # The bigger floor buys nothing for a model that emits text immediately,
+        # and would only crowd out its input.
+        conn = self._conn("gpt_oss_120b_coder")
+        assert not conn._is_reasoning_model()
+        assert conn._output_headroom() == 2_000
+
+    def test_reasoning_floor_matches_measured_need(self):
+        # qwen3.6-27b measured 2611-3982 completion tokens for reasoning plus a
+        # finished answer; 2048 truncated 7/7. Guard the floor against being
+        # quietly lowered back under that.
+        from models.connectors.groq_conn import _REASONING_OUTPUT_HEADROOM
+        assert _REASONING_OUTPUT_HEADROOM >= 4_000
+
+
+# ── Synthesis must not destroy team artifacts (manager/claude_manager.py) ─────
+# The synthesis step rewrites team output into "one polished response", and a
+# rewrite is free to drop things. Measured 2026-08-09: the research team's
+# citations vanished (0 source urls on one run, 12 on the next -- same
+# question), and the design team's real generated image URL was replaced by
+# inline SVG the synthesiser wrote itself, so a user asking for an image got
+# prose about an image. Both are evidence/delivered work, not styling.
+
+class TestSynthesisPreservesArtifacts:
+    @staticmethod
+    def _mgr(monkeypatch, synthetic_reply):
+        import manager.claude_manager as mgr_mod
+
+        async def fake_generate(self, prompt, system="", max_tokens=1000,
+                                temperature=0.3, task_kind=""):
+            return synthetic_reply
+
+        monkeypatch.setattr(mgr_mod.ClaudeManager, "_manager_generate", fake_generate)
+        return mgr_mod
+
+    @staticmethod
+    def _task():
+        from core.imcp import TaskJSON
+        return TaskJSON(task_id="t", original_prompt="do the thing", refined_prompt="do the thing")
+
+    def test_dropped_sources_block_is_reattached(self, monkeypatch):
+        mgr_mod = self._mgr(monkeypatch, "A polished answer with no citations at all.")
+        outputs = {"research": (
+            "Free-threading is supported in 3.14 [1].\n\n"
+            "---\n**Sources**\n[1] [PEP 779](https://peps.python.org/pep-0779/)"
+        )}
+        final = asyncio.run(mgr_mod.manager._synthesise(self._task(), outputs))
+        assert "**Sources**" in final
+        assert "peps.python.org/pep-0779" in final
+
+    def test_dropped_asset_url_is_reattached(self, monkeypatch):
+        # The measured case: synthesis answered with its own inline SVG and
+        # threw the real generated image away.
+        mgr_mod = self._mgr(monkeypatch, '<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+        url = "https://image.pollinations.ai/prompt/a%20mountain"
+        final = asyncio.run(mgr_mod.manager._synthesise(self._task(), {"design": f"Design asset: {url}"}))
+        assert url in final, "a generated asset must survive synthesis"
+
+    def test_preserved_artifacts_are_not_duplicated(self, monkeypatch):
+        # When synthesis behaves, the re-attach must stay out of the way.
+        url = "https://image.pollinations.ai/prompt/a%20mountain"
+        mgr_mod = self._mgr(monkeypatch, f"Here is your logo: {url}")
+        final = asyncio.run(mgr_mod.manager._synthesise(self._task(), {"design": f"Design asset: {url}"}))
+        assert final.count(url) == 1
