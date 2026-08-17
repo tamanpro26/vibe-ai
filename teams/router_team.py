@@ -30,7 +30,7 @@ from teams.base_team import BaseTeam
 _ROUTER_SYSTEM = get_prompt("ROUTER_SYSTEM", """You are a fast task router in VibeAI.
 Given a user request, classify it and return ONLY valid JSON:
 {
-  "task_type": "debugging|vibe_coding|ui_design|animation|video_analysis|mixed",
+  "task_type": "debugging|vibe_coding|ui_design|animation|video_analysis|research|mixed",
   "complexity": "simple|moderate|complex",
   "needs_vision": true/false,
   "needs_code": true/false,
@@ -38,6 +38,18 @@ Given a user request, classify it and return ONLY valid JSON:
   "media_path": "<path if found, else null>",
   "quick_summary": "one sentence describing the task"
 }
+
+RESEARCH DETECTION — set task_type: "research" when answering well requires
+CURRENT external facts rather than reasoning from what a model already knows:
+- The request asks what is happening/changed/released/announced now, recently,
+  or "latest", or names a version, price, date, or ongoing event
+- It asks to compare real products, papers, libraries, or vendors on fact
+- It asks for sources, citations, evidence, or "look it up"
+Do NOT use it for questions answerable from general knowledge ("explain
+recursion"), or for coding/debugging work, which have their own types. This
+routes to a team that searches first and answers only from what it retrieves,
+so misrouting a general question here just makes it slower, and misrouting a
+current-facts question AWAY from here makes it confidently out of date.
 
 VISION DETECTION — set needs_vision: true and task_type: "video_analysis" when:
 - The request mentions ANY filename ending in .mp4 .mov .avi .mkv .webm .frames

@@ -82,7 +82,7 @@ Return ONLY valid JSON.""",
 
     "nemotron_nano_format": """You are an instruction formatter for a 31-model AI system.
 You receive a fully-refined technical specification and must output a complete TaskJSON.
-The task types are: debugging, vibe_coding, ui_design, animation, video_analysis, mixed.
+The task types are: debugging, vibe_coding, ui_design, animation, video_analysis, research, mixed.
 
 Active team rules:
 - debugging:      brain=true, code=true, vision=conditional(screenshot), design=false
@@ -90,6 +90,15 @@ Active team rules:
 - ui_design:      brain=true, code=conditional(impl), vision=true, design=true
 - animation:      brain=true, code=conditional(css/js), vision=true, design=true
 - video_analysis: brain=true, code=false, vision=true, design=false
+- research:       research=true, brain=false, code=false, vision=false, design=false
+
+"research" is for questions that need CURRENT external facts -- what changed,
+released, costs, or is true right now; comparing real products or papers; or
+any request for sources and citations. brain is deliberately false there: the
+research team answers only from what it retrieves, and adding a team that
+answers from its weights reintroduces exactly the unsourced guessing this type
+exists to avoid. Do NOT use research for questions answerable from general
+knowledge, or for coding/debugging work.
 
 A bare request to generate/create/draw/make/paint/design a picture, image,
 photo, illustration, icon, logo, banner, artwork, or graphic -- with NO
