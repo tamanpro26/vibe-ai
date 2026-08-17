@@ -1064,6 +1064,26 @@
   color: var(--text-primary);
 }
 
+/* Empty state: typing "/" with nothing installed rendered no element at all,
+   which reads as a broken feature rather than an empty one. Reuses the menu
+   surface so it appears in the same place the list would. */
+.slash-menu-empty .slash-menu-head a {
+  color: var(--accent, var(--text-primary));
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.slash-menu-empty .slash-menu-head a:hover {
+  text-decoration: underline;
+}
+
+.slash-empty-note {
+  margin: 0;
+  padding: 0 var(--sp-3) var(--sp-3);
+  color: var(--text-secondary);
+  font-size: var(--fs-caption);
+}
+
 .slash-command {
   display: grid;
   grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1.6fr) auto;

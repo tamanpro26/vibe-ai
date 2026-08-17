@@ -26,6 +26,17 @@ export default function Composer({
     ? matchCapabilityCommands(text, capabilityCommands)
     : []
   const commandMenuOpen = commandMatches.length > 0
+  // Typing "/" used to render NOTHING when there were no installed
+  // capabilities -- which is the normal state for a new account, and is
+  // indistinguishable from the feature being broken. Reported as exactly that.
+  // An empty result is information; show it rather than swallowing it.
+  const slashTyped = slashCommandsEnabled && /^\/[^\s]*$/.test(text.trim())
+  const emptyHint = !slashTyped ? null
+    : capabilityCommands.length === 0
+      ? 'No capabilities installed yet — add one in the Capability Hub to invoke it here.'
+      : commandMatches.length === 0
+        ? 'No installed capability matches that name.'
+        : null
   // "/capability-id" with no request typed yet is not sendable -- send() bails
   // on it. Enter can't reach that (the open menu intercepts it), but the send
   // button could: it only checks text.trim(), so it stayed enabled and clicked
@@ -112,6 +123,15 @@ export default function Composer({
 
   return (
     <div className="composer-wrap">
+      {emptyHint && (
+        <div className="slash-menu slash-menu-empty" role="status">
+          <div className="slash-menu-head">
+            <strong>Skills &amp; plugin features</strong>
+            <a href="#/capabilities">Open Capability Hub →</a>
+          </div>
+          <p className="slash-empty-note">{emptyHint}</p>
+        </div>
+      )}
       {commandMenuOpen && (
         <div id="capability-command-menu" className="slash-menu" role="listbox" aria-label="Capability commands">
           <div className="slash-menu-head">
